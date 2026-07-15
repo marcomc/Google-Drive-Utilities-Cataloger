@@ -17,31 +17,33 @@ repository contains no personal data, IDs, or keys.
 - [Localization](#localization)
 - [Activation](#activation)
 - [Operations](#operations)
+- [Operations runbook](docs/RUNBOOK.md)
 - [Costs](#costs)
 - [Publishing](#publishing)
 
 ## Architecture
 
-```text
-PDF in the intake folder
-          |
-          +-- Drive event -> Pub/Sub -> Apps Script (every minute)
-          |
-          +-- Daily Apps Script trigger
-                       |
-                       v
-             Gemini API: JSON extraction
-                       |
-                       v
-       Drive AGENTS.md + local rules + SHA-256 hash + reconciliation
-                       |
-                       +-- Drive: rename and archive
-                       +-- Sheets: insert and verify a row
-                       +-- Mail: send the report
+```mermaid
+flowchart LR
+  accTitle: Cataloging architecture
+  accDescr: A Drive event or daily fallback starts one intake-folder scan, which applies policy and validation before writing any result.
+  event[Drive event] --> pubsub[Pub/Sub]
+  pubsub --> poll[Apps Script poll every minute]
+  poll --> queued{Message received?}
+  queued -- No --> wait[Wait for next poll]
+  queued -- Yes --> scan[Scan intake root]
+  daily[Daily Apps Script trigger] --> scan[Scan intake root]
+  scan --> policy[Drive policy and local rules]
+  policy --> extract[Gemini JSON extraction]
+  extract --> verify[Hash and reconciliation]
+  verify --> drive[Rename and archive]
+  verify --> sheets[Insert and verify Sheet row]
+  verify --> mail[Send report]
 ```
 
-The Drive event speeds up processing. The daily scan remains the safety net for
-missed events or expired subscriptions.
+The event path is a signal, not a document payload: the poller scans only when
+Pub/Sub returns a message. The daily scan is the safety net for missed events
+or expired subscriptions.
 
 ## Security
 
@@ -203,12 +205,24 @@ register its two-letter code in `Localization.gs`, then set that code in
 - `renewDriveEventSubscription`: renews the Drive subscription.
 - `removeAutomationTriggers`: stops triggers without changing files or sheets.
 
+For the installation, validation, and incident procedures, see the concise
+[operations runbook](docs/RUNBOOK.md).
+
 ## Costs
 
-Gemini API may have a Free Tier, varying by model, region, and quota. Workspace
-Events requires billing. Pub/Sub charges only beyond its monthly allowance; for
-a small number of utility documents, traffic is normally minimal. Always configure a
-budget and alerts in the Cloud project before enabling the automation.
+Workspace Events requires a billing-enabled Cloud project. Gemini pricing and
+quotas vary by model, region, and account.
+
+Pub/Sub is billed by message data volume, not by the number of Apps Script
+polls; its first 10 GiB of monthly throughput is free. The one-minute poll has
+no per-execution Apps Script charge, but it consumes execution and URL Fetch
+quotas. A longer interval reduces quota pressure and increases event-handling
+latency; for a small invoice volume, it normally does not produce a material
+cost saving. The default is `EVENT_POLL_MINUTES: 1` in `Config.gs`.
+
+Configure a Cloud billing budget and alerts before enabling the automation.
+See [Pub/Sub pricing](https://cloud.google.com/pubsub/pricing) and
+[Apps Script quotas](https://developers.google.com/apps-script/guides/services/quotas).
 
 ## Publishing
 
