@@ -69,9 +69,12 @@ flowchart LR
 4. Create a Gemini API key and save it in a password manager.
 5. Create the standalone Apps Script project, upload the source and manifest,
    then set its time zone.
-6. In **Project Settings**, change from the Apps Script default Cloud project
+6. Enable the **Google Apps Script API** once for the Google account at
+   <https://script.google.com/home/usersettings>. This is required only when
+   deploying the project with clasp.
+7. In **Project Settings**, change from the Apps Script default Cloud project
    to the standard Cloud project number.
-7. Run `getSetupStatus` and complete the Google authorization flow.
+8. Run `getSetupStatus` and complete the Google authorization flow.
 
 Changing the linked Cloud project revokes the existing Apps Script grants.
 Reauthorize immediately after the change. It affects only this Apps Script

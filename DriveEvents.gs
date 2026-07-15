@@ -82,13 +82,12 @@ function provisionDriveEventTransport() {
   ensurePubSubTopic_(topic);
   grantDrivePublisher_(topic);
   ensurePubSubPullSubscription_(subscription, topic);
-  PropertiesService.getScriptProperties().setProperties({
+  const properties = PropertiesService.getScriptProperties();
+  properties.setProperties({
     PUBSUB_TOPIC: topic,
-    PUBSUB_SUBSCRIPTION: subscription,
-    WORKSPACE_EVENT_SUBSCRIPTION: '',
-    WORKSPACE_EVENT_EXPIRES_AT: ''
+    PUBSUB_SUBSCRIPTION: subscription
   }, false);
-  const eventSubscription = createDriveEventSubscription_(topic);
+  const eventSubscription = findDriveEventSubscription_() || createDriveEventSubscription_(topic);
   storeWorkspaceEventSubscription_(eventSubscription);
   return getSetupStatus();
 }
@@ -120,13 +119,22 @@ function renewDriveEventSubscription() {
 }
 
 function ensurePubSubTopic_(topic) {
-  cloudFetch_('https://pubsub.googleapis.com/v1/' + topic, { method: 'put', payload: '{}' });
+  try {
+    cloudFetch_('https://pubsub.googleapis.com/v1/' + topic, { method: 'get' });
+  } catch (error) {
+    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+      throw error;
+    }
+    cloudFetch_('https://pubsub.googleapis.com/v1/' + topic, {
+      method: 'put',
+      payload: '{}'
+    });
+  }
 }
 
 function grantDrivePublisher_(topic) {
   const current = cloudFetch_('https://pubsub.googleapis.com/v1/' + topic + ':getIamPolicy', {
-    method: 'post',
-    payload: '{}'
+    method: 'get'
   });
   const policy = current || { bindings: [] };
   policy.bindings = policy.bindings || [];
@@ -147,14 +155,21 @@ function grantDrivePublisher_(topic) {
 }
 
 function ensurePubSubPullSubscription_(subscription, topic) {
-  cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, {
-    method: 'put',
-    payload: JSON.stringify({ topic: topic, ackDeadlineSeconds: 60 })
-  });
+  try {
+    cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, { method: 'get' });
+  } catch (error) {
+    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+      throw error;
+    }
+    cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, {
+      method: 'put',
+      payload: JSON.stringify({ topic: topic, ackDeadlineSeconds: 60 })
+    });
+  }
 }
 
 function createDriveEventSubscription_(topic) {
-  return cloudFetch_('https://workspaceevents.googleapis.com/v1/subscriptions', {
+  const operation = cloudFetch_('https://workspaceevents.googleapis.com/v1/subscriptions', {
     method: 'post',
     payload: JSON.stringify({
       targetResource: '//drive.googleapis.com/files/' + getRootFolderId_(),
@@ -169,6 +184,20 @@ function createDriveEventSubscription_(topic) {
       ttl: '86400s'
     })
   });
+  if (!operation.response || !operation.response.name) {
+    throw new Error('Workspace Events did not return a Subscription in the create operation.');
+  }
+  return operation.response;
+}
+
+function findDriveEventSubscription_() {
+  const targetResource = '//drive.googleapis.com/files/' + getRootFolderId_();
+  const filter = 'event_types:"google.workspace.drive.file.v3.created" AND ' +
+    'target_resource="' + targetResource + '"';
+  const response = cloudFetch_('https://workspaceevents.googleapis.com/v1/subscriptions?filter=' +
+    encodeURIComponent(filter), { method: 'get' });
+  const subscriptions = response.subscriptions || [];
+  return subscriptions.length ? subscriptions[0] : null;
 }
 
 function storeWorkspaceEventSubscription_(subscription) {
