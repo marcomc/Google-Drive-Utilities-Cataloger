@@ -1,0 +1,23 @@
+/**
+ * Return all bundled localization data. Locale files contain labels and
+ * spreadsheet-header aliases only; processing logic stays elsewhere.
+ */
+function getLocalizationRegistry_() {
+  return Object.freeze({
+    en: getEnglishLocalization_(),
+    it: getItalianLocalization_()
+  });
+}
+
+function getSupportedLocales_() {
+  return Object.keys(getLocalizationRegistry_());
+}
+
+function getLocalization_() {
+  const locale = getAutomationConfig_().locale || 'en';
+  return getLocalizationRegistry_()[locale];
+}
+
+function getHeaderAliases_(headerKey) {
+  return getLocalization_().headerAliases[headerKey] || [];
+}

@@ -1,0 +1,52 @@
+{
+  "locale": "en",
+  "canonical_supplies": [
+    "Water",
+    "Gas",
+    "Electricity",
+    "Internet",
+    "Waste"
+  ],
+  "canonical_suppliers": [
+    "WATER PROVIDER",
+    "ENERGY PROVIDER",
+    "INTERNET PROVIDER"
+  ],
+  "supply_aliases": {
+    "water": "Water",
+    "water service": "Water",
+    "gas": "Gas",
+    "electricity": "Electricity",
+    "power": "Electricity",
+    "internet": "Internet",
+    "waste": "Waste"
+  },
+  "supplier_aliases": {
+    "WATER PROVIDER LTD": "WATER PROVIDER",
+    "ENERGY PROVIDER LTD": "ENERGY PROVIDER"
+  },
+  "address_rules": [
+    {
+      "match": "ADDRESS FOR IMPORT",
+      "type": "import"
+    },
+    {
+      "match": "ADDRESS FOR ARCHIVE ONLY",
+      "type": "archive_only"
+    }
+  ],
+  "archive_only_folder_path": "Archive only",
+  "destination_templates": {
+    "Water|WATER PROVIDER": "Water/{year}",
+    "Electricity|ENERGY PROVIDER": "Electricity/{year}",
+    "Internet|INTERNET PROVIDER": "Internet/{year}"
+  },
+  "sheet_by_supply": {
+    "Water": "Water",
+    "Gas": "Gas",
+    "Electricity": "Electricity",
+    "Internet": "Internet",
+    "Waste": "Waste"
+  },
+  "frequency_overrides": []
+}

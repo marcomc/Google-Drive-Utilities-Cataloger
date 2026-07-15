@@ -1,0 +1,8 @@
+# Runtime secrets are configured only in Apps Script Script Properties.
+.clasp.json
+node_modules/**
+README.md
+AGENTS.example.md
+config.example.json
+config.local.json
+.gitignore
