@@ -17,6 +17,7 @@ repository contains no personal data, IDs, or keys.
 - [Localization](#localization)
 - [Activation](#activation)
 - [Operations](#operations)
+- [Observability](#observability)
 - [Operations runbook](docs/RUNBOOK.md)
 - [Costs](#costs)
 - [Publishing](#publishing)
@@ -197,6 +198,15 @@ register its two-letter code in `Localization.gs`, then set that code in
 
 For the installation, validation, and incident procedures, see the concise
 [operations runbook](docs/RUNBOOK.md).
+
+## Observability
+
+The Apps Script **Executions** page shows trigger health. An empty one-minute
+`processDriveEventQueue` poll intentionally has no log entries: `Completed`
+means it found no Pub/Sub message. Eventful and daily runs write structured
+per-stage logs, including the final file status and email outcome. Open **View
+in Cloud Logging** from an execution for the complete sequence; see the
+[runbook observability procedure](docs/RUNBOOK.md#observability).
 
 ## Costs
 

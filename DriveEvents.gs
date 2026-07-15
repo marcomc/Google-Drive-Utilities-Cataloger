@@ -57,12 +57,14 @@ function processDriveEventQueue() {
     return { processed: false, reason: 'empty' };
   }
 
+  logCatalogEvent_('drive-event-received', { messageCount: messages.length });
   const result = runUtilitiesCataloging_('drive-event');
   const ackIds = messages.map(function (message) { return message.ackId; });
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
     method: 'post',
     payload: JSON.stringify({ ackIds: ackIds })
   });
+  logCatalogEvent_('drive-event-acknowledged', { messageCount: ackIds.length });
   return result;
 }
 

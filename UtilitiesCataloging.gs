@@ -18,7 +18,9 @@ function processSingleIntakeFile(fileId) {
   }
 
   const driveAgentsPolicy = loadDriveAgentsPolicy_(rootFolder);
+  logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
   const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+  logCatalogResult_(file, result);
   sendReportEmail_([result]);
   return result;
 }
@@ -26,9 +28,14 @@ function processSingleIntakeFile(fileId) {
 function runUtilitiesCataloging_(triggerSource) {
   assertCatalogConfiguration_();
   const lock = LockService.getScriptLock();
+  logCatalogEvent_('catalog-run-start', { triggerSource: triggerSource });
 
   if (!lock.tryLock(1000)) {
     console.log('Utilities cataloging is already running; trigger skipped: ' + triggerSource);
+    logCatalogEvent_('catalog-run-skipped', {
+      triggerSource: triggerSource,
+      reason: 'already-running'
+    });
     return { triggerSource: triggerSource, skipped: 'already-running', results: [] };
   }
 
@@ -38,21 +45,35 @@ function runUtilitiesCataloging_(triggerSource) {
     const files = listDirectIntakePdfs_(rootFolder);
     const results = [];
     const driveAgentsPolicy = files.length > 0 ? loadDriveAgentsPolicy_(rootFolder) : '';
+    logCatalogEvent_('catalog-scan-completed', {
+      triggerSource: triggerSource,
+      intakePdfCount: files.length
+    });
 
     files.forEach(function (file) {
       if (Date.now() - startedAt >= CONFIG.MAX_RUNTIME_MS) {
-        results.push(buildErrorResult_(file, 'Tempo di esecuzione quasi esaurito.',
-          'The document remains in intake and will be retried by the next trigger.'));
+        const result = buildErrorResult_(file, 'Tempo di esecuzione quasi esaurito.',
+          'The document remains in intake and will be retried by the next trigger.');
+        results.push(result);
+        logCatalogResult_(file, result);
         return;
       }
 
-      results.push(processIntakeFile_(file, rootFolder, driveAgentsPolicy));
+      logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
+      const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+      results.push(result);
+      logCatalogResult_(file, result);
     });
 
     if (results.length > 0) {
       sendReportEmail_(results);
     }
 
+    logCatalogEvent_('catalog-run-completed', {
+      triggerSource: triggerSource,
+      resultCount: results.length,
+      statuses: results.map(function (result) { return result.status; }).join(',')
+    });
     return { triggerSource: triggerSource, results: results };
   } finally {
     lock.releaseLock();
@@ -112,7 +133,13 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     return buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink);
   } catch (error) {
-    console.error(error.stack || error);
+    console.error('Catalog file processing failed for file ID ' + file.getId() + ': ' +
+      (error.name || 'Error'));
+    logCatalogEvent_('catalog-file-processing-error', {
+      fileId: file.getId(),
+      fileName: originalName,
+      errorType: error.name || 'Error'
+    });
     return buildErrorResult_(file, String(error.message || error),
       'No further automatic changes were attempted. Verify the file state using the supplied link.',
       originalName, state);
@@ -870,10 +897,37 @@ function sendReportEmail_(results) {
   const recipient = getScriptProperty_(CONFIG.PROPERTY_KEYS.NOTIFICATION_RECIPIENT);
   const reportLabels = getLocalization_().reportLabels;
   const body = results.map(formatResult_).join('\n\n');
+  logCatalogEvent_('report-email-send-start', { resultCount: results.length });
   MailApp.sendEmail({
     to: recipient,
     subject: reportLabels.emailSubject.replace('{count}', String(results.length)),
     body: body
+  });
+  logCatalogEvent_('report-email-sent', { resultCount: results.length });
+}
+
+/**
+ * Emit a concise, structured event without credentials, recipients, or extracted values.
+ */
+function logCatalogEvent_(event, details) {
+  const payload = Object.assign({
+    message: event,
+    component: 'drive-utilities-cataloger',
+    event: event
+  }, details || {});
+  Logger.log(payload);
+}
+
+function describeFileForLog_(file) {
+  return { fileId: file.getId(), fileName: file.getName() };
+}
+
+function logCatalogResult_(file, result) {
+  logCatalogEvent_('catalog-file-processing-completed', {
+    fileId: file.getId(),
+    fileName: file.getName(),
+    status: result.status,
+    action: result.actions || ''
   });
 }
 

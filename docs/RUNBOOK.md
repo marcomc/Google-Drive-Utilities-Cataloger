@@ -14,6 +14,7 @@ Keep the existing automation enabled until a controlled test proves this one.
 - [Cadence and cost](#cadence-and-cost)
 - [Use cases](#use-cases)
 - [Operations](#operations)
+- [Observability](#observability)
 - [Troubleshooting](#troubleshooting)
 - [Secrets and cost controls](#secrets-and-cost-controls)
 
@@ -315,6 +316,48 @@ fallback enabled at every interval.
 After a transport repair, run `installAutomationTriggers` to restore all three
 triggers. It removes and recreates only the cataloger's matching triggers.
 
+## Observability
+
+Use the **Executions** page for trigger health and Cloud Logging for the
+per-file outcome. An empty one-minute poll is intentionally quiet: a
+`Completed` `processDriveEventQueue` execution with no log entries means Pub/Sub
+had no message to process, not that a document failed.
+
+When a Drive event or daily run finds work, the script writes these structured
+events in order:
+
+```text
+drive-event-received                 (event path only)
+catalog-run-start
+catalog-scan-completed
+catalog-file-processing-start        (once per direct-root PDF)
+catalog-file-processing-completed    (status and action)
+report-email-send-start
+report-email-sent
+catalog-run-completed
+```
+
+The per-file completion event contains the Drive file ID and name, status, and
+action. It deliberately excludes the Gemini key, notification recipient,
+document text, and extracted invoice values. A `catalog-run-skipped` event
+means another run already held the processing lock; it made no changes.
+
+Apps Script can take a short time to display log entries. For a reliable view,
+open **View in Cloud Logging** from an execution, or query the linked Cloud
+project:
+
+```bash
+gcloud logging read \
+  'jsonPayload.component="drive-utilities-cataloger"' \
+  --project="${PROJECT_ID}" \
+  --limit=50 \
+  --order=desc \
+  --format='table(timestamp,severity,jsonPayload.event,jsonPayload.fileName,jsonPayload.status,jsonPayload.resultCount)'
+```
+
+Logs are written only after the source version containing this observability
+feature is deployed; they cannot reconstruct earlier executions.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Recovery |
@@ -322,6 +365,8 @@ triggers. It removes and recreates only the cataloger's matching triggers.
 | Pub/Sub says the consumer project is disabled | Apps Script still uses its default Cloud project. | Link the intended standard Cloud project number, then reauthorize. |
 | Consent screen blocks execution | OAuth Testing lacks the operator. | Add the account as a test user and rerun `getSetupStatus`. |
 | Daily works but event path does not | Event subscription expired or transport is absent. | Run `provisionDriveEventTransport`, then reinstall triggers. |
+| A completed one-minute poll has no logs | No Pub/Sub message was available. | This is expected; add or change a controlled direct-root PDF, then check the next eventful run. |
+| An eventful run stops before a file outcome | A failure occurred before processing, or Cloud Logging is delayed. | Open the execution in Cloud Logging and follow the structured event sequence. |
 | Nothing is processed | No direct-root PDF, or `AGENTS.md` is missing, duplicated, invalid, or oversized. | Correct the intake folder; do not move PDFs into subfolders to retry. |
 | A document is left untouched | Data, destination, or reconciliation is ambiguous. | Resolve the single reported problem and rerun with a controlled file. |
 
