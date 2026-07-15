@@ -6,7 +6,9 @@ Keep the existing automation enabled until a controlled test proves this one.
 ## Contents
 
 - [Architecture](#architecture)
-- [Install](#install)
+- [Prerequisites](#prerequisites)
+- [CLI-first installation](#cli-first-installation)
+- [Browser-only steps](#browser-only-steps)
 - [Configure](#configure)
 - [Activate and validate](#activate-and-validate)
 - [Cadence and cost](#cadence-and-cost)
@@ -45,36 +47,152 @@ flowchart LR
   gemini --> result["Archive, Sheet, and email"]
 ```
 
-## Install
+## Prerequisites
 
-This is the setup path for a new Google account or Cloud project.
+- Google Cloud CLI, Node.js 20 or later, Git, and `jq`.
+- A Google account that can create Cloud projects, link billing, and access the
+  intake Drive folder and destination spreadsheet.
+- A billing account. Workspace Events currently requires billing.
+- Access to the [Google Workspace Developer Preview](https://developers.google.com/workspace/preview).
+
+## CLI-first installation
+
+This is the command-line path for a new private installation. It creates a
+separate Cloud project and Apps Script project. Do not reuse a Cloud project
+that is linked to an unrelated Apps Script project.
 
 ```mermaid
 flowchart LR
   accTitle: Initial installation path
-  accDescr: Creates the Cloud and Apps Script setup before any automation is enabled.
-  cloud["Create Cloud project"] --> apis["Enable required APIs"]
-  apis --> oauth["Configure OAuth testing"]
-  oauth --> key["Create Gemini API key"]
-  key --> script["Create Apps Script project"]
-  script --> link["Link standard Cloud project"]
-  link --> auth["Authorize Apps Script"]
-  auth --> config["Set Script Properties"]
+  accDescr: CLI creates the Cloud and script resources. Browser-only Google controls then link the projects, collect authorization, and store private runtime settings.
+  cloud["CLI: Cloud project"] --> apis["CLI: APIs and billing"]
+  apis --> key["CLI: Gemini API key"]
+  key --> script["CLI: Apps Script and source"]
+  script --> link["Browser: Link Cloud project"]
+  link --> auth["Browser: OAuth and properties"]
+  auth --> activate["Browser: Provision and install triggers"]
 ```
 
-1. Create a standard Google Cloud project with billing enabled.
-2. Enable Drive, Sheets, Pub/Sub, Workspace Events, Gemini, and Apps Script
-   APIs.
-3. Configure OAuth as External / Testing and add the operator as a test user.
-4. Create a Gemini API key and save it in a password manager.
-5. Create the standalone Apps Script project, upload the source and manifest,
-   then set its time zone.
-6. Enable the **Google Apps Script API** once for the Google account at
-   <https://script.google.com/home/usersettings>. This is required only when
-   deploying the project with clasp.
-7. In **Project Settings**, change from the Apps Script default Cloud project
-   to the standard Cloud project number.
-8. Run `getSetupStatus` and complete the Google authorization flow.
+### Create or select the Cloud project
+
+For a new project, run the following once. Pick a globally unique project ID.
+The script selects the first open billing account, so replace that command if
+the account should be chosen explicitly.
+
+```bash
+set -euo pipefail
+
+PROJECT_ID="my-drive-utilities-cataloger"
+PROJECT_NAME="Drive Utilities Cataloger"
+BILLING_ACCOUNT_ID="$(gcloud billing accounts list \
+  --filter='open=true' \
+  --format='value(name)' \
+  --limit=1 | sed 's#billingAccounts/##')"
+
+test -n "${BILLING_ACCOUNT_ID}"
+gcloud projects create "${PROJECT_ID}" --name="${PROJECT_NAME}"
+gcloud billing projects link "${PROJECT_ID}" \
+  --billing-account="${BILLING_ACCOUNT_ID}"
+```
+
+For an existing project, do not run `gcloud projects create`. Set `PROJECT_ID`
+to its ID and verify the prerequisites instead:
+
+```bash
+gcloud projects describe "${PROJECT_ID}"
+gcloud billing projects describe "${PROJECT_ID}"
+```
+
+Enable the complete service set. This command is safe to repeat.
+
+```bash
+gcloud services enable --project="${PROJECT_ID}" \
+  apikeys.googleapis.com \
+  drive.googleapis.com \
+  generativelanguage.googleapis.com \
+  pubsub.googleapis.com \
+  script.googleapis.com \
+  sheets.googleapis.com \
+  workspaceevents.googleapis.com
+
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" \
+  --format='value(projectNumber)')"
+printf 'Cloud project number: %s\n' "${PROJECT_NUMBER}"
+```
+
+The project number is needed in the browser-only linking step. It is an
+identifier, not a secret.
+
+### Create the Gemini key
+
+This creates a key restricted to the Gemini API. It deliberately has no IP or
+HTTP-referrer restriction: Apps Script does not provide a fixed caller IP or
+browser referrer. Do not create a service-account-bound authorization key.
+
+```bash
+gcloud services api-keys create --project="${PROJECT_ID}" \
+  --display-name="drive-utilities-cataloger-gemini" \
+  --api-target=service=generativelanguage.googleapis.com \
+  --format='value(response.keyString)'
+```
+
+The command prints the `GEMINI_API_KEY` once. Save it in Bitwarden immediately,
+then paste it only into Apps Script Script Properties. Do not place it in a
+shell variable, `config.local.json`, source code, or Git.
+
+### Create the Apps Script project and upload source
+
+`clasp create` pulls a default `Code.gs` and manifest. Create the empty script
+in a temporary directory so those generated files cannot overwrite this
+repository's source or manifest.
+
+Before running this block, complete Browser-only step 2. Complete Browser-only
+steps 1 and 3 before activation.
+
+```bash
+git clone <repository-url>
+cd Google-Drive-Utilities-Cataloger
+
+npx --yes @google/clasp@3.3.0 login --no-localhost
+
+bootstrap_dir="$(mktemp -d)"
+(
+  cd "${bootstrap_dir}"
+  npx --yes @google/clasp@3.3.0 create \
+    --type standalone \
+    --title "Drive Utilities Cataloger"
+)
+mv "${bootstrap_dir}/.clasp.json" .clasp.json
+rm -rf "${bootstrap_dir}"
+
+# Set the desired IANA time zone in appsscript.json before this upload.
+npx --yes @google/clasp@3.3.0 push --force
+npx --yes @google/clasp@3.3.0 status
+```
+
+The `.clasp.json` file contains the private Script ID and is intentionally
+ignored by Git. Do not commit it.
+
+## Browser-only steps
+
+These are Google account controls that do not have a stable, safe CLI path for
+this private Apps Script deployment. Complete them once, in the order shown.
+
+| Step | Browser action | Why it remains browser-only |
+| --- | --- | --- |
+| 1 | Join the Google Workspace Developer Preview. | Drive subscriptions are a Developer Preview feature. |
+| 2 | Enable **Google Apps Script API** at <https://script.google.com/home/usersettings>. | This is an account-level clasp prerequisite. |
+| 3 | In Google Cloud **Google Auth Platform**, set the audience to **External / Testing** and add the operator as a test user. | Consent audience and test users are managed by Google Auth Platform. |
+| 4 | Open the standalone Apps Script project, then **Project Settings > Google Cloud Platform (GCP) Project > Change project**. Enter `PROJECT_NUMBER`. | A `.clasp.json` `projectId` does not link the runtime Apps Script project. |
+| 5 | Reauthorize the Apps Script project when prompted. | Linking a standard Cloud project invalidates prior Apps Script grants. |
+| 6 | In **Project Settings > Script Properties**, enter the values in [Configure](#configure). | Apps Script has no public Script Properties configuration endpoint. |
+
+Use the same Google account for the Cloud project, Apps Script project, and
+Drive resources unless the account has been granted the required permissions.
+
+Do not add an `executionApi` manifest entry or deploy an API executable only to
+call setup functions from `clasp run`. That would broaden the script's callable
+surface without making the private runtime configuration safer.
 
 Changing the linked Cloud project revokes the existing Apps Script grants.
 Reauthorize immediately after the change. It affects only this Apps Script
@@ -124,6 +242,29 @@ Run the functions from the Apps Script editor in this exact order.
 | 3 | `installAutomationTriggers` | Installs the three time-based triggers. |
 | 4 | **Triggers** page | Lists daily run, one-minute poll, and six-hour renewal. |
 | 5 | Controlled test PDF | Verifies archive, Sheet row, source link, and email report. |
+
+After step 2, verify the provisioned Pub/Sub resources from the CLI. The
+automation creates the publisher IAM binding itself; do not add it manually.
+
+```bash
+gcloud pubsub topics describe drive-utilities-events \
+  --project="${PROJECT_ID}" \
+  --format='yaml(name)'
+gcloud pubsub subscriptions describe drive-utilities-events-pull \
+  --project="${PROJECT_ID}" \
+  --format='yaml(name,topic,ackDeadlineSeconds)'
+gcloud pubsub topics get-iam-policy drive-utilities-events \
+  --project="${PROJECT_ID}" \
+  --format=json | jq -e '
+    .bindings[] |
+    select(.role == "roles/pubsub.publisher") |
+    select(.members[] == "serviceAccount:drive-api-event-push@system.gserviceaccount.com")
+  ' >/dev/null
+```
+
+Expect the topic and pull subscription to exist, an acknowledgement deadline of
+`60`, and the Drive event publisher service account to have
+`roles/pubsub.publisher` on the topic.
 
 Do not manually run `runDailyUtilitiesCataloging` or
 `processDriveEventQueue` as a harmless test: either may process an intake PDF.

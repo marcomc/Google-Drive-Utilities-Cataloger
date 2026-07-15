@@ -64,25 +64,15 @@ The public policy template is [AGENTS.example.md](AGENTS.example.md).
 3. Drive API, Google Sheets API, Pub/Sub API, and Google Workspace Events API
    enabled in the Cloud project.
 4. Access to the [Workspace Developer Preview](https://developers.google.com/workspace/preview), required for Drive Events.
-5. A Gemini API key created in Google AI Studio.
+5. A Gemini API key created for the Cloud project.
 6. Node.js to use clasp during development and deployment.
 
 ## Installation
 
-```sh
-git clone <repository-url>
-cd Google-Drive-Utilities-Cataloger
-npx --yes @google/clasp@3.3.0 login --no-localhost
-npx --yes @google/clasp@3.3.0 create --type standalone --title "Drive Utilities Cataloger"
-npx --yes @google/clasp@3.3.0 push
-```
-
-In Apps Script, associate the project with the standard Cloud project in
-**Project Settings > Google Cloud Platform (GCP) Project**.
-
-In the same **Project Settings** page, set the project's time zone before
-installing triggers. The daily trigger and spreadsheet date comparisons use
-this project time zone.
+Use the [CLI-first runbook](docs/RUNBOOK.md#cli-first-installation). It creates
+the Cloud and Apps Script resources without overwriting the repository's
+manifest, documents the Gemini key handoff, and lists the small set of
+unavoidable Google browser controls.
 
 ## Configuration
 
