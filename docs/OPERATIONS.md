@@ -1,6 +1,6 @@
-# Operations Runbook
+# Operations and Troubleshooting Guide
 
-This runbook operates one deployed cataloger instance. Use the separate
+This guide covers one deployed cataloger instance. Use the separate
 [installation guide](INSTALLATION.md) for first-time provisioning.
 
 ## Contents

@@ -87,14 +87,15 @@ diagnostics.
 | Document | Use it for |
 | --- | --- |
 | [Installation guide](docs/INSTALLATION.md) | Automated setup, local prerequisites, browser handoff, and first validation. |
-| [Operations runbook](docs/RUNBOOK.md) | Runtime behavior, logging, cost controls, and incident recovery. |
+| [Operations and troubleshooting guide](docs/OPERATIONS.md) | Runtime behavior, logging, cost controls, and incident recovery. |
 | [Configuration reference](docs/CONFIGURATION.md) | Script Properties, `config.local.json`, Drive `AGENTS.md`, Gemini runtime selection, and localization. |
 | [AGENTS.example.md](AGENTS.example.md) | Sanitized policy template to copy into the Drive intake folder as `AGENTS.md`. |
 | [Changelog](CHANGELOG.md) | Released features and version history. |
 | [TODO](TODO.md) | Concrete work intentionally not implemented yet. |
 
-The installation guide owns setup; the runbook owns deployed operations; the
-configuration reference owns settings and policy customization.
+The installation guide owns setup; the operations guide owns deployed
+operations; the configuration reference owns settings and policy
+customization.
 
 ## Publishing
 

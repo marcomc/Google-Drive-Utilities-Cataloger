@@ -461,7 +461,7 @@ Do not disable an existing automation yet.
 5. Verify the renamed Drive file, one spreadsheet row and source link, and one
    report email.
 6. Check structured logs using the
-   [operations runbook](RUNBOOK.md#observability).
+   [operations guide](OPERATIONS.md#observability).
 
 Only after this test passes should the previous automation be paused.
 
@@ -476,7 +476,7 @@ Only after this test passes should the previous automation be paused.
 | Temporary credential handoff fails | Confirm Secret Manager API access in the cataloger project, then rerun resume. |
 | Drive or Sheet access denied | Grant Editor access to the installer account. |
 | Workspace Events error | Confirm Developer Preview enrollment and required APIs. |
-| Pub/Sub validation fails | Rerun resume with `--debug`, then use the runbook transport checks. |
+| Pub/Sub validation fails | Rerun resume with `--debug`, then use the operations guide transport checks. |
 
 Use:
 
@@ -527,7 +527,7 @@ gcloud projects describe "$(jq -r '.projectId' .clasp.json)"
 ```
 
 Continue operating that deployment with the
-[operations runbook](RUNBOOK.md), or run `make install-reset` to detach this
+[operations guide](OPERATIONS.md), or run `make install-reset` to detach this
 checkout and start a separate installation. Reset leaves every remote Google
 resource in place; inspect and remove obsolete remote resources separately.
 Do not construct `.installer/state.json` manually.
