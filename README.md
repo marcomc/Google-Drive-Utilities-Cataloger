@@ -9,6 +9,7 @@ Each installation uses its own Google resources and private credentials.
 - [Architecture](#architecture)
 - [Security boundaries](#security-boundaries)
 - [Quick start](#quick-start)
+- [Installer behavior](#installer-behavior)
 - [Documentation](#documentation)
 - [Publishing](#publishing)
 
@@ -44,26 +45,64 @@ Unchanged `NEEDS REVIEW` and `DUPLICATE` files are not sent to Gemini again.
 
 ## Quick start
 
-1. Follow the [CLI-first installation](docs/RUNBOOK.md#cli-first-installation).
-2. Complete the unavoidable [browser-only steps](docs/RUNBOOK.md#browser-only-steps).
-3. Apply the [configuration reference](docs/CONFIGURATION.md).
-4. [Activate and validate](docs/RUNBOOK.md#activate-and-validate) with a
-   controlled PDF before pausing any existing automation.
+```bash
+git clone <repository-url>
+cd Google-Drive-Utilities-Cataloger
+make
+make install-check
+make install
+```
+
+Follow the printed one-time Google browser handoff, customize the generated
+`config.local.json`, then resume:
+
+```bash
+GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
+  make install-resume
+```
+
+See the [installation guide](docs/INSTALLATION.md) for tool setup, supported
+environment variables, Gemini runtime choices, and troubleshooting.
+
+## Installer behavior
+
+The installer:
+
+- checks local tools, Google CLI authentication, and billing access;
+- creates or reuses one Cloud project and standalone Apps Script project;
+- enables only the runtime APIs required by the selected Gemini mode;
+- creates a spreadsheet when none is supplied;
+- installs the Drive policy, Script Properties, event transport, and triggers;
+- transfers a Gemini key through short-lived Secret Manager input, never CLI
+  arguments;
+- validates the final Pub/Sub and Apps Script state;
+- stores no API key in repository or installer state.
+
+Google account controls that have no supported CLI are presented as one
+resumable browser handoff. Run `make install-resume-debug` for non-secret
+diagnostics.
 
 ## Documentation
 
 | Document | Use it for |
 | --- | --- |
-| [Operations runbook](docs/RUNBOOK.md) | Installation, activation, operations, logging, cost controls, and incident recovery. |
+| [Installation guide](docs/INSTALLATION.md) | Automated setup, local prerequisites, browser handoff, and first validation. |
+| [Operations runbook](docs/RUNBOOK.md) | Runtime behavior, logging, cost controls, and incident recovery. |
 | [Configuration reference](docs/CONFIGURATION.md) | Script Properties, `config.local.json`, Drive `AGENTS.md`, Gemini runtime selection, and localization. |
 | [AGENTS.example.md](AGENTS.example.md) | Sanitized policy template to copy into the Drive intake folder as `AGENTS.md`. |
+| [Changelog](CHANGELOG.md) | Released features and version history. |
+| [TODO](TODO.md) | Concrete work intentionally not implemented yet. |
 
-The runbook is the source of truth for deployed cadence, operational commands,
-and runtime behavior. The configuration reference is the source of truth for
-settings and policy customization.
+The installation guide owns setup; the runbook owns deployed operations; the
+configuration reference owns settings and policy customization.
 
 ## Publishing
 
-Before publishing a copy of this repository, verify that it contains no Drive
-IDs, addresses, email addresses, Script IDs, or API keys; retain the example
-configuration and policy template; and run the documented validation checks.
+Before publishing a copy of this repository, verify that it contains no
+installation-specific Drive IDs, service addresses, report recipients, Script
+IDs, or API keys. Retain the intended license attribution, example
+configuration, and policy template; then run:
+
+```bash
+make check
+```

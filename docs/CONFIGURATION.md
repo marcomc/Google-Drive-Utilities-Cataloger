@@ -19,13 +19,15 @@ Choose one primary runtime:
 
 | Primary runtime | Required setup | Billing model |
 | --- | --- | --- |
-| Gemini Developer API | Private `GEMINI_API_KEY` and Gemini API enabled. | Free Tier quota or Gemini Developer API billing. |
+| Gemini Developer API | Private `GEMINI_API_KEY` from a Google AI Studio project. | Free or paid tier inherited from the key's project. |
 | Vertex AI | Vertex AI API enabled on the linked Cloud project. | Google Cloud billing; no API key. |
 
 For Gemini Developer API Free Tier with one-hour automatic Vertex fallback,
-enable Vertex AI on the linked Cloud project, provide the Developer API key,
-then run the owner-only `configureGeminiFreeTierWithVertexFallback` function
-once from the Apps Script editor. It keeps `gemini_api` as the primary backend.
+select `gemini_api_with_vertex_fallback` in the installer. For a manual
+installation, enable Vertex AI on the linked Cloud project, provide the
+Developer API key, then run the owner-only
+`configureGeminiFreeTierWithVertexFallback` function once. It keeps
+`gemini_api` as the primary backend.
 
 Only a `429` response explicitly identifying a daily request quota triggers one
 Vertex retry and a one-hour temporary Vertex route. Generic rate-limit errors do
@@ -33,8 +35,9 @@ not cause Vertex usage.
 
 ## Script Properties
 
-Open the standalone Apps Script project, then use **Project Settings > Script
-Properties > Edit script properties**.
+The automated installer writes these properties through its owner-only
+bootstrap. For manual maintenance, open the standalone Apps Script project,
+then use **Project Settings > Script Properties > Edit script properties**.
 
 | Property | Value |
 | --- | --- |
@@ -56,16 +59,17 @@ creates and maintains them.
 ## Local configuration file
 
 `config.example.json` is the public template. From the repository root, create
-a private copy beside it:
+a private copy beside it. The automated installer does this when needed:
 
 ```sh
 cp config.example.json config.local.json
 jq empty config.local.json
 ```
 
-Replace every placeholder, then paste the complete file contents into the
-`AUTOMATION_CONFIG_JSON` Script Property. The script parses that property at
-runtime; it does not read a JSON file from Drive or its Apps Script source.
+Replace every placeholder. The installer rejects an unchanged template and
+writes the complete object to `AUTOMATION_CONFIG_JSON` during resume. For a
+manual installation, paste the complete file contents into that Script
+Property. Runtime does not read a JSON file from Drive or Apps Script source.
 
 `config.local.json` is ignored by Git and clasp. Do not commit or upload it.
 
@@ -87,8 +91,10 @@ produces `NEEDS REVIEW`; `address_missing_type` does not weaken that rule.
 
 ## Drive policy
 
-Copy [AGENTS.example.md](../AGENTS.example.md) to the root of the Drive intake
-folder and name that Drive copy exactly `AGENTS.md`.
+The installer creates the intake `AGENTS.md` from
+[AGENTS.example.md](../AGENTS.example.md) when it is absent. For a manual
+installation, copy the template to the root of the Drive intake folder and
+name that Drive copy exactly `AGENTS.md`.
 
 ```text
 Repository:           AGENTS.example.md
@@ -124,8 +130,9 @@ register the two-letter code in `Localization.gs`, then set that code in
 Before activation:
 
 1. Validate `config.local.json` with `jq empty config.local.json`.
-2. Confirm every required Script Property is present.
-3. Confirm exactly one valid `AGENTS.md` is in the Drive intake root.
-4. Run `getSetupStatus` in the Apps Script editor.
+2. Run `make install-resume`; it validates properties, policy, event transport,
+   and triggers.
+3. For manual installations, confirm every required Script Property and one
+   valid Drive `AGENTS.md`, then run `getSetupStatus`.
 
-Continue with [activation and validation](RUNBOOK.md#activate-and-validate).
+Continue with [controlled validation](INSTALLATION.md#controlled-validation).

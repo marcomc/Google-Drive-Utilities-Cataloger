@@ -122,8 +122,8 @@ function provisionDriveEventTransport() {
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
   }
-  const topic = 'projects/' + projectId + '/topics/drive-utilities-events';
-  const subscription = 'projects/' + projectId + '/subscriptions/drive-utilities-events-pull';
+  const topic = getDriveEventTopicName_(projectId);
+  const subscription = getDriveEventPullSubscriptionName_(projectId);
 
   ensurePubSubTopic_(topic);
   grantDrivePublisher_(topic);
@@ -133,7 +133,8 @@ function provisionDriveEventTransport() {
     PUBSUB_TOPIC: topic,
     PUBSUB_SUBSCRIPTION: subscription
   }, false);
-  const eventSubscription = findDriveEventSubscription_() || createDriveEventSubscription_(topic);
+  const eventSubscription = findDriveEventSubscription_(topic) ||
+    createDriveEventSubscription_(topic);
   storeWorkspaceEventSubscription_(eventSubscription);
   return getSetupStatus();
 }
@@ -148,8 +149,8 @@ function recreateDriveEventSubscription() {
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
   }
-  const topic = 'projects/' + projectId + '/topics/drive-utilities-events';
-  const subscription = 'projects/' + projectId + '/subscriptions/drive-utilities-events-pull';
+  const topic = getDriveEventTopicName_(projectId);
+  const subscription = getDriveEventPullSubscriptionName_(projectId);
 
   ensurePubSubTopic_(topic);
   grantDrivePublisher_(topic);
@@ -174,6 +175,17 @@ function recreateDriveEventSubscription() {
   }, false);
   storeWorkspaceEventSubscription_(eventSubscription);
   return getSetupStatus();
+}
+
+function getDriveEventTopicName_(projectId) {
+  return 'projects/' + projectId + '/topics/drive-utilities-events-' +
+    ScriptApp.getScriptId();
+}
+
+function getDriveEventPullSubscriptionName_(projectId) {
+  return 'projects/' + projectId +
+    '/subscriptions/drive-utilities-events-pull-' +
+    ScriptApp.getScriptId();
 }
 
 function renewDriveEventSubscription() {
@@ -239,8 +251,12 @@ function grantDrivePublisher_(topic) {
 }
 
 function ensurePubSubPullSubscription_(subscription, topic) {
+  let current;
   try {
-    cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, { method: 'get' });
+    current = cloudFetch_(
+      'https://pubsub.googleapis.com/v1/' + subscription,
+      { method: 'get' }
+    );
   } catch (error) {
     if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
       throw error;
@@ -249,6 +265,29 @@ function ensurePubSubPullSubscription_(subscription, topic) {
       method: 'put',
       payload: JSON.stringify({ topic: topic, ackDeadlineSeconds: 60 })
     });
+    return;
+  }
+
+  if (current.topic !== topic) {
+    throw new Error(
+      'Existing Pub/Sub pull subscription targets an unexpected topic.'
+    );
+  }
+  if (Number(current.ackDeadlineSeconds) !== 60) {
+    cloudFetch_(
+      'https://pubsub.googleapis.com/v1/' + subscription,
+      {
+        method: 'patch',
+        payload: JSON.stringify({
+          subscription: {
+            name: subscription,
+            topic: topic,
+            ackDeadlineSeconds: 60
+          },
+          updateMask: 'ackDeadlineSeconds'
+        })
+      }
+    );
   }
 }
 
@@ -273,14 +312,34 @@ function createDriveEventSubscription_(topic) {
   return operation.response;
 }
 
-function findDriveEventSubscription_() {
+function findDriveEventSubscription_(topic) {
   const targetResource = '//drive.googleapis.com/files/' + getRootFolderId_();
   const filter = 'event_types:"google.workspace.drive.file.v3.created" AND ' +
     'target_resource="' + targetResource + '"';
   const response = cloudFetch_('https://workspaceevents.googleapis.com/v1/subscriptions?filter=' +
     encodeURIComponent(filter), { method: 'get' });
   const subscriptions = response.subscriptions || [];
-  return subscriptions.length ? subscriptions[0] : null;
+  const matching = subscriptions.filter(function (subscription) {
+    return subscription.state === 'ACTIVE' &&
+      subscription.notificationEndpoint &&
+      subscription.notificationEndpoint.pubsubTopic === topic &&
+      subscription.driveOptions &&
+      subscription.driveOptions.includeDescendants === true;
+  });
+  if (matching.length > 1) {
+    throw new Error(
+      'Multiple active Workspace event subscriptions match this installation.'
+    );
+  }
+  if (matching.length === 1) {
+    return matching[0];
+  }
+  if (subscriptions.length > 0) {
+    throw new Error(
+      'An existing Workspace event subscription has incompatible topology.'
+    );
+  }
+  return null;
 }
 
 function storeWorkspaceEventSubscription_(subscription) {

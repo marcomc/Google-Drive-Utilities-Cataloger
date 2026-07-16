@@ -4,6 +4,19 @@
 function getEnglishLocalization_() {
   return Object.freeze({
     promptLanguage: 'English',
+    installerSheetHeaders: Object.freeze([
+      'Issue date',
+      'Supplier',
+      'Invoice number',
+      'Reference year',
+      'Reference month',
+      'Frequency',
+      'Total consumption costs',
+      'Total non-consumption costs',
+      'VAT',
+      'Total cost',
+      'Source file'
+    ]),
     documentLabels: Object.freeze({ Invoice: 'Invoice', Contract: 'Contract', Report: 'Report' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',

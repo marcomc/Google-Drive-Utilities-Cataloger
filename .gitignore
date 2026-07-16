@@ -1,3 +1,4 @@
 .clasp.json
 config.local.json
 node_modules/
+.installer/

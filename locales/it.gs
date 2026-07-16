@@ -4,6 +4,19 @@
 function getItalianLocalization_() {
   return Object.freeze({
     promptLanguage: 'Italian',
+    installerSheetHeaders: Object.freeze([
+      'Data di emissione',
+      'Fornitore',
+      'Numero fattura',
+      'Anno di riferimento',
+      'Mese di riferimento',
+      'Frequenza',
+      'Totale costi consumo',
+      'Totale costi non consumo',
+      'IVA',
+      'Costo totale',
+      'File sorgente'
+    ]),
     documentLabels: Object.freeze({ Invoice: 'Fattura', Contract: 'Contratto', Report: 'Report' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTATO',
@@ -40,8 +53,8 @@ function getItalianLocalization_() {
       supplier: ['fornitore'],
       identifier: ['numero fattura', 'n fattura', 'numero documento'],
       sourceFile: ['file sorgente'],
-      year: ['anno', 'anno riferimento'],
-      month: ['mese', 'mese riferimento'],
+      year: ['anno', 'anno riferimento', 'anno di riferimento'],
+      month: ['mese', 'mese riferimento', 'mese di riferimento'],
       frequency: ['frequenza'],
       consumptionCost: ['totale costi consumo', 'costo consumi', 'costi consumo'],
       nonConsumptionCosts: ['totale costi non consumo', 'costi non consumo'],
