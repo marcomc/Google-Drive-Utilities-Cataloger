@@ -35,6 +35,7 @@
       "type": "archive_only"
     }
   ],
+  "address_missing_type": "import",
   "archive_only_folder_path": "Archive only",
   "destination_templates": {
     "Water|WATER PROVIDER": "Water/{year}",

@@ -40,30 +40,13 @@ function runUtilitiesCataloging_(triggerSource) {
   }
 
   try {
-    const startedAt = Date.now();
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
     const files = listDirectIntakePdfs_(rootFolder);
-    const results = [];
-    const driveAgentsPolicy = files.length > 0 ? loadDriveAgentsPolicy_(rootFolder) : '';
     logCatalogEvent_('catalog-scan-completed', {
       triggerSource: triggerSource,
       intakePdfCount: files.length
     });
-
-    files.forEach(function (file) {
-      if (Date.now() - startedAt >= CONFIG.MAX_RUNTIME_MS) {
-        const result = buildErrorResult_(file, 'Tempo di esecuzione quasi esaurito.',
-          'The document remains in intake and will be retried by the next trigger.');
-        results.push(result);
-        logCatalogResult_(file, result);
-        return;
-      }
-
-      logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
-      const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
-      results.push(result);
-      logCatalogResult_(file, result);
-    });
+    const results = processEligibleIntakeFiles_(files, rootFolder, triggerSource);
 
     if (results.length > 0) {
       sendReportEmail_(results);
@@ -78,6 +61,48 @@ function runUtilitiesCataloging_(triggerSource) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Process only files that are new or changed since their last outcome.
+ * An unchanged error is retried by the daily fallback, never by every event
+ * poll. This keeps ambiguous documents from exhausting Gemini quota.
+ */
+function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
+  const startedAt = Date.now();
+  const state = loadIntakeFileState_();
+  const results = [];
+  const eligible = files.filter(function (file) {
+    if (shouldProcessIntakeFile_(file, state, triggerSource)) {
+      return true;
+    }
+    logCatalogEvent_('catalog-file-skipped', Object.assign(describeFileForLog_(file), {
+      triggerSource: triggerSource,
+      reason: 'unchanged-after-recorded-outcome'
+    }));
+    return false;
+  });
+  const driveAgentsPolicy = eligible.length > 0 ? loadDriveAgentsPolicy_(rootFolder) : '';
+
+  eligible.forEach(function (file) {
+    if (Date.now() - startedAt >= CONFIG.MAX_RUNTIME_MS) {
+      const result = buildErrorResult_(file, 'Execution time is nearly exhausted.',
+        'The document remains in intake and will be retried by the next daily run.');
+      results.push(result);
+      recordIntakeFileOutcome_(state, file, result);
+      logCatalogResult_(file, result);
+      return;
+    }
+
+    logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+    results.push(result);
+    recordIntakeFileOutcome_(state, file, result);
+    logCatalogResult_(file, result);
+  });
+
+  saveIntakeFileState_(state);
+  return results;
 }
 
 function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
@@ -133,14 +158,16 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     return buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink);
   } catch (error) {
+    const errorMessage = describeError_(error);
     console.error('Catalog file processing failed for file ID ' + file.getId() + ': ' +
-      (error.name || 'Error'));
+      errorMessage);
     logCatalogEvent_('catalog-file-processing-error', {
       fileId: file.getId(),
       fileName: originalName,
-      errorType: error.name || 'Error'
+      errorType: error.name || 'Error',
+      errorMessage: errorMessage
     });
-    return buildErrorResult_(file, String(error.message || error),
+    return buildErrorResult_(file, errorMessage,
       'No further automatic changes were attempted. Verify the file state using the supplied link.',
       originalName, state);
   }
@@ -210,53 +237,230 @@ function loadDriveAgentsPolicy_(rootFolder) {
 function extractUtilityData_(file, driveAgentsPolicy) {
   const blob = file.getBlob();
   const headers = getAllSheetHeaders_();
-  const response = callGeminiForPdf_(blob, headers, driveAgentsPolicy);
+  const response = callGeminiForPdf_(blob, headers, driveAgentsPolicy, file);
   const extracted = parseGeminiJson_(response);
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
   return normalizeExtraction_(extracted);
 }
 
-function callGeminiForPdf_(blob, sheetHeaders, driveAgentsPolicy) {
-  const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/' +
-    encodeURIComponent(getGeminiModel_()) + ':generateContent?key=' +
-    encodeURIComponent(getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY));
+function callGeminiForPdf_(blob, sheetHeaders, driveAgentsPolicy, file) {
+  return callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file,
+    getEffectiveGeminiBackend_(), '');
+}
+
+function callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file, backend,
+  fallbackReason) {
+  const isVertexAi = backend === 'vertex_ai';
+  const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
+  const pdfPart = isVertexAi ? {
+    inlineData: {
+      mimeType: MimeType.PDF,
+      data: Utilities.base64Encode(blob.getBytes())
+    }
+  } : {
+    inline_data: {
+      mime_type: MimeType.PDF,
+      data: Utilities.base64Encode(blob.getBytes())
+    }
+  };
   const payload = {
     contents: [{
       role: 'user',
       parts: [
         { text: buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) },
-        {
-          inline_data: {
-            mime_type: MimeType.PDF,
-            data: Utilities.base64Encode(blob.getBytes())
-          }
-        }
+        pdfPart
       ]
     }],
     generationConfig: {
+      maxOutputTokens: 4096,
       responseMimeType: 'application/json',
       temperature: 0
     }
   };
-  const response = UrlFetchApp.fetch(endpoint, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
+  let response;
+  for (let attempt = 1; attempt <= CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS; attempt += 1) {
+    const requestLog = Object.assign(describeFileForLog_(file), {
+      backend: backend,
+      model: getGeminiModel_(),
+      attempt: attempt
+    });
+    if (fallbackReason) {
+      requestLog.fallbackReason = fallbackReason;
+    }
+    logCatalogEvent_('gemini-generation-request', requestLog);
+    const requestOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    if (isVertexAi) {
+      requestOptions.headers = { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() };
+    }
+    response = UrlFetchApp.fetch(endpoint, requestOptions);
+    const code = response.getResponseCode();
+    const responseLog = Object.assign(describeFileForLog_(file), {
+      attempt: attempt,
+      statusCode: code
+    });
+    if (fallbackReason) {
+      responseLog.fallbackReason = fallbackReason;
+    }
+    logCatalogEvent_('gemini-generation-response', responseLog);
+    if (code === 200) {
+      break;
+    }
+    if (backend === 'gemini_api' && isAutomaticVertexFallbackEnabled_() &&
+      isGeminiFreeTierDailyQuotaExhausted_(response)) {
+      activateTemporaryVertexFallback_(file);
+      return callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file,
+        'vertex_ai', 'free-tier-daily-quota-exhausted');
+    }
+    if (!isTransientGeminiResponse_(code) || attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
+      throw new Error(describeGeminiHttpError_(response));
+    }
+    const delay = CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+    console.warn('Gemini API HTTP ' + code + '; retrying attempt ' + (attempt + 1) +
+      ' after ' + delay + ' ms.');
+    Utilities.sleep(delay);
+  }
 
-  if (response.getResponseCode() !== 200) {
-    throw new Error('Gemini API HTTP ' + response.getResponseCode() + ': ' + response.getContentText());
+  if (!response || response.getResponseCode() !== 200) {
+    throw new Error('Gemini did not return a usable response.');
   }
 
   const body = JSON.parse(response.getContentText());
+  logGeminiUsage_(body.usageMetadata, file, backend, fallbackReason);
   const candidate = body.candidates && body.candidates[0];
   const parts = candidate && candidate.content && candidate.content.parts;
   if (!parts || !parts[0] || !parts[0].text) {
     throw new Error('Gemini did not return valid extraction JSON.');
   }
   return parts[0].text;
+}
+
+/**
+ * Record the provider-reported token counts for one successful generation.
+ * `estimatedCostUsd` is intentionally a current list-price estimate: billing
+ * exports and the Cloud Billing console remain the financial source of truth.
+ */
+function logGeminiUsage_(usageMetadata, file, backend, fallbackReason) {
+  const usage = usageMetadata || {};
+  const promptTokenCount = normalizeGeminiTokenCount_(usage.promptTokenCount);
+  const candidatesTokenCount = normalizeGeminiTokenCount_(usage.candidatesTokenCount);
+  const thoughtsTokenCount = normalizeGeminiTokenCount_(usage.thoughtsTokenCount);
+  const totalTokenCount = normalizeGeminiTokenCount_(usage.totalTokenCount);
+  const cachedContentTokenCount = normalizeGeminiTokenCount_(usage.cachedContentTokenCount);
+  const payload = Object.assign(describeFileForLog_(file), {
+    backend: backend,
+    model: getGeminiModel_(),
+    usageMetadataPresent: Boolean(usageMetadata),
+    promptTokenCount: promptTokenCount,
+    candidatesTokenCount: candidatesTokenCount,
+    thoughtsTokenCount: thoughtsTokenCount,
+    cachedContentTokenCount: cachedContentTokenCount,
+    totalTokenCount: totalTokenCount
+  });
+  if (fallbackReason) {
+    payload.fallbackReason = fallbackReason;
+  }
+  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), {
+    promptTokenCount: promptTokenCount,
+    candidatesTokenCount: candidatesTokenCount,
+    thoughtsTokenCount: thoughtsTokenCount
+  });
+  if (estimate) {
+    Object.assign(payload, estimate);
+  }
+  logCatalogEvent_('gemini-generation-usage', payload);
+}
+
+function normalizeGeminiTokenCount_(value) {
+  return typeof value === 'number' && isFinite(value) && value >= 0 ? value : 0;
+}
+
+function estimateGeminiUsageCostUsd_(backend, model, usage) {
+  if (backend !== 'vertex_ai' || model !== 'gemini-2.5-flash') {
+    return null;
+  }
+  const pricing = CONFIG.VERTEX_GEMINI_25_FLASH_USD_PER_MILLION_TOKENS;
+  const inputCostUsd = usage.promptTokenCount * pricing.input / 1000000;
+  const outputTokenCount = usage.candidatesTokenCount + usage.thoughtsTokenCount;
+  const outputCostUsd = outputTokenCount * pricing.output / 1000000;
+  return {
+    pricingSource: 'vertex-ai-standard-list-price-2026-07',
+    estimatedInputCostUsd: roundGeminiCostUsd_(inputCostUsd),
+    estimatedOutputCostUsd: roundGeminiCostUsd_(outputCostUsd),
+    estimatedCostUsd: roundGeminiCostUsd_(inputCostUsd + outputCostUsd)
+  };
+}
+
+function roundGeminiCostUsd_(value) {
+  return Math.round(value * 100000000) / 100000000;
+}
+
+function getGeminiApiEndpoint_() {
+  return 'https://generativelanguage.googleapis.com/v1beta/models/' +
+    encodeURIComponent(getGeminiModel_()) + ':generateContent?key=' +
+    encodeURIComponent(getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY));
+}
+
+function getVertexAiEndpoint_() {
+  return 'https://aiplatform.googleapis.com/v1/projects/' +
+    encodeURIComponent(getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID)) +
+    '/locations/' + encodeURIComponent(getVertexAiLocation_()) +
+    '/publishers/google/models/' + encodeURIComponent(getGeminiModel_()) + ':generateContent';
+}
+
+function isTransientGeminiResponse_(statusCode) {
+  return [500, 502, 503, 504].indexOf(statusCode) >= 0;
+}
+
+function isGeminiFreeTierDailyQuotaExhausted_(response) {
+  if (response.getResponseCode() !== 429) {
+    return false;
+  }
+  return /GenerateRequestsPerDay|requests? per day|\bRPD\b/i.test(response.getContentText());
+}
+
+function activateTemporaryVertexFallback_(file) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  let effectiveUntil;
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const propertyKey = CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL;
+    const fallbackUntil = Date.now() + CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS;
+    const existingUntil = Number(properties.getProperty(propertyKey)) || 0;
+    effectiveUntil = Math.max(existingUntil, fallbackUntil);
+    properties.setProperty(propertyKey, String(effectiveUntil));
+  } finally {
+    lock.releaseLock();
+  }
+  logCatalogEvent_('gemini-vertex-fallback-activated', Object.assign(describeFileForLog_(file), {
+    reason: 'free-tier-daily-quota-exhausted',
+    cooldownMinutes: CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS / 60000,
+    fallbackUntil: new Date(effectiveUntil).toISOString()
+  }));
+  return effectiveUntil;
+}
+
+function describeGeminiHttpError_(response) {
+  const statusCode = response.getResponseCode();
+  let apiError = {};
+  try {
+    apiError = JSON.parse(response.getContentText()).error || {};
+  } catch (error) {
+    apiError = {};
+  }
+  const message = String(apiError.message || response.getContentText() || 'Unknown Gemini API error.')
+    .replace(/\s+/g, ' ').trim();
+  if (statusCode === 429 && message.indexOf('GenerateRequestsPerDay') >= 0) {
+    return 'Gemini Free Tier daily request quota is exhausted (HTTP 429). ' +
+      'The document remains in intake and will be retried by the next daily run.';
+  }
+  return 'Gemini API HTTP ' + statusCode + ': ' + message;
 }
 
 function buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) {
@@ -297,8 +501,9 @@ function buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) {
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
-    'Classify the address only with these configured rules: ' +
-      JSON.stringify(automationConfig.address_rules) + '.',
+    'Classify a printed address only with these configured rules: ' +
+      JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
+      String(automationConfig.address_missing_type || 'unknown') + '.',
     'Apply these frequency overrides when supplier and supply match: ' +
       JSON.stringify(automationConfig.frequency_overrides || []) + '.',
     'The reference year and month are the end of the last billed period.',
@@ -430,7 +635,7 @@ function findSpreadsheetDuplicate_(extracted) {
     const row = values[index];
     if (normalizeCellText_(row[supplierColumn - 1]) === normalizeCellText_(extracted.supplier) &&
       normalizeCellText_(row[identifierColumn - 1]) === normalizeCellText_(extracted.identifier) &&
-      dateMatches_(row[dateColumn - 1], extracted.issue_date)) {
+      dateMatches_(row[dateColumn - 1], extracted.issue_date, spreadsheet.getSpreadsheetTimeZone())) {
       return {
         sheet: sheet,
         row: layout.headerRow + 1 + index,
@@ -500,7 +705,7 @@ function getOrCreateFolderByPath_(rootFolder, path) {
 }
 
 function getDestinationCollision_(destination, name, sourceHash) {
-  const files = destination.getFilesByName(name);
+  const files = destination.folder.getFilesByName(name);
   if (!files.hasNext()) {
     return { status: 'none' };
   }
@@ -621,12 +826,8 @@ function copyRowStyleAndFormulas_(sheet, targetRow, width) {
   const source = sheet.getRange(sourceRow, 1, 1, width);
   const target = sheet.getRange(targetRow, 1, 1, width);
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-  const formulas = source.getFormulas()[0];
-  formulas.forEach(function (formula, index) {
-    if (formula) {
-      target.getCell(1, index + 1).setFormula(formula);
-    }
-  });
+  // Copying formulas as a range preserves relative references for the new row.
+  source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
 }
 
 function writeInvoiceRow_(sheet, row, layout, file, extracted) {
@@ -736,7 +937,12 @@ function applyFrequencyOverride_(extracted) {
 
 function classifyAddress_(addressEvidence) {
   const normalizedAddress = normalizeCellText_(addressEvidence);
-  const rule = getAutomationConfig_().address_rules.filter(function (item) {
+  const automationConfig = getAutomationConfig_();
+  if (!normalizedAddress) {
+    const fallback = automationConfig.address_missing_type;
+    return ['import', 'archive_only'].indexOf(fallback) >= 0 ? fallback : 'unknown';
+  }
+  const rule = automationConfig.address_rules.filter(function (item) {
     return item && item.match && item.type &&
       normalizedAddress.indexOf(normalizeCellText_(item.match)) >= 0;
   })[0];
@@ -793,15 +999,69 @@ function findHeaderIndex_(lookup, aliases) {
   return 0;
 }
 
-function dateMatches_(value, isoDate) {
-  return dateForValue_(value) === isoDate;
+function dateMatches_(value, isoDate, timeZone) {
+  return dateForValue_(value, timeZone) === isoDate;
 }
 
-function dateForValue_(value) {
+function dateForValue_(value, timeZone) {
   if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value)) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    return Utilities.formatDate(value, timeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
   }
   return normalizeIsoDate_(value);
+}
+
+function loadIntakeFileState_() {
+  const raw = getScriptProperty_(CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE);
+  if (!raw) {
+    return {};
+  }
+  try {
+    const state = JSON.parse(raw);
+    return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+  } catch (error) {
+    console.warn('Ignoring malformed intake processing state.');
+    return {};
+  }
+}
+
+function shouldProcessIntakeFile_(file, state, triggerSource) {
+  const previous = state[file.getId()];
+  const fingerprint = intakeFileFingerprint_(file);
+  if (!previous || previous.fingerprint !== fingerprint) {
+    return true;
+  }
+  return triggerSource === 'daily' && previous.status === 'ERROR' &&
+    previous.attemptDate !== intakeStateDate_();
+}
+
+function recordIntakeFileOutcome_(state, file, result) {
+  state[file.getId()] = {
+    fingerprint: intakeFileFingerprint_(file),
+    status: result.status,
+    attemptDate: intakeStateDate_(),
+    updatedAt: Date.now()
+  };
+}
+
+function intakeFileFingerprint_(file) {
+  return String(file.getLastUpdated().getTime()) + ':' + String(file.getSize());
+}
+
+function intakeStateDate_() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function saveIntakeFileState_(state) {
+  const entries = Object.keys(state).map(function (fileId) {
+    return { fileId: fileId, value: state[fileId] };
+  }).sort(function (left, right) {
+    return right.value.updatedAt - left.value.updatedAt;
+  }).slice(0, CONFIG.MAX_INTAKE_STATE_ENTRIES);
+  const pruned = {};
+  entries.forEach(function (entry) { pruned[entry.fileId] = entry.value; });
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE, JSON.stringify(pruned)
+  );
 }
 
 function isoDateToDate_(isoDate) {
@@ -920,6 +1180,13 @@ function logCatalogEvent_(event, details) {
 
 function describeFileForLog_(file) {
   return { fileId: file.getId(), fileName: file.getName() };
+}
+
+function describeError_(error) {
+  if (error && error.message) {
+    return String(error.message);
+  }
+  return String(error || 'Unknown error');
 }
 
 function logCatalogResult_(file, result) {

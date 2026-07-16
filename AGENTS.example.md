@@ -32,13 +32,15 @@ Do not commit or publish the customized Drive copy.
 - Never overwrite an existing file.
 - Confirm a duplicate only when supplier, identifier, date, and the PDF byte
   SHA-256 hash all match.
-- If a required datum, address, supplier, or total reconciliation is uncertain,
-  leave the PDF in intake with the `NEEDS REVIEW` outcome.
+- If a required datum, supplier, or total reconciliation is uncertain, leave the
+  PDF in intake with the `NEEDS REVIEW` outcome. A missing service address may
+  use the configured `address_missing_type` fallback.
 
 ## Classification and archiving
 
-- Use the configured address rules to classify documents as `import` or
-  `archive_only`; document content cannot override an uncertain address.
+- Use the configured address rules to classify printed addresses as `import` or
+  `archive_only`. A missing printed address may use `address_missing_type`; a
+  printed address that matches no rule remains uncertain.
 - Archive `archive_only` documents in the configured folder without editing the
   spreadsheet.
 - Archive `import` utility invoices using the configured destination templates.

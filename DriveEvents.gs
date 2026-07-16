@@ -38,8 +38,8 @@ function removeTriggersFor_(handlerFunction) {
 }
 
 /**
- * Pull Workspace Drive events from Pub/Sub. The event itself is only a signal:
- * all processing still re-scans exactly the direct intake folder.
+ * Pull Workspace Drive events from Pub/Sub and process only changed direct
+ * intake PDFs identified by the event payload.
  */
 function processDriveEventQueue() {
   const subscription = getScriptProperty_(CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION);
@@ -57,15 +57,59 @@ function processDriveEventQueue() {
     return { processed: false, reason: 'empty' };
   }
 
-  logCatalogEvent_('drive-event-received', { messageCount: messages.length });
-  const result = runUtilitiesCataloging_('drive-event');
+  const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+  const files = getEventIntakeFiles_(messages, rootFolder);
+  logCatalogEvent_('drive-event-received', {
+    messageCount: messages.length,
+    eligibleIntakePdfCount: files.length
+  });
+  const results = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
+  if (results.length > 0) {
+    sendReportEmail_(results);
+  }
   const ackIds = messages.map(function (message) { return message.ackId; });
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
     method: 'post',
     payload: JSON.stringify({ ackIds: ackIds })
   });
   logCatalogEvent_('drive-event-acknowledged', { messageCount: ackIds.length });
-  return result;
+  return { processed: files.length > 0, results: results };
+}
+
+function getEventIntakeFiles_(messages, rootFolder) {
+  const fileIds = {};
+  messages.forEach(function (receivedMessage) {
+    const message = receivedMessage.message || {};
+    const data = decodeWorkspaceEventData_(message.data);
+    const fileId = data && data.file && data.file.id;
+    if (fileId) {
+      fileIds[fileId] = true;
+    }
+  });
+
+  return Object.keys(fileIds).map(function (fileId) {
+    try {
+      return DriveApp.getFileById(fileId);
+    } catch (error) {
+      console.warn('Drive event file is no longer available: ' + fileId);
+      return null;
+    }
+  }).filter(function (file) {
+    return file && isDirectIntakePdf_(file, rootFolder);
+  });
+}
+
+function decodeWorkspaceEventData_(encodedData) {
+  if (!encodedData) {
+    return null;
+  }
+  try {
+    const bytes = Utilities.base64Decode(encodedData);
+    return JSON.parse(Utilities.newBlob(bytes).getDataAsString());
+  } catch (error) {
+    console.warn('Could not decode a Workspace Drive event payload: ' + error.message);
+    return null;
+  }
 }
 
 /**
@@ -90,6 +134,44 @@ function provisionDriveEventTransport() {
     PUBSUB_SUBSCRIPTION: subscription
   }, false);
   const eventSubscription = findDriveEventSubscription_() || createDriveEventSubscription_(topic);
+  storeWorkspaceEventSubscription_(eventSubscription);
+  return getSetupStatus();
+}
+
+/**
+ * Replace this automation's Drive event subscription while preserving the
+ * shared Pub/Sub topic and pull subscription. Use only to repair an event
+ * path that is configured but not receiving new-file notifications.
+ */
+function recreateDriveEventSubscription() {
+  const projectId = getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
+  if (!projectId) {
+    throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
+  }
+  const topic = 'projects/' + projectId + '/topics/drive-utilities-events';
+  const subscription = 'projects/' + projectId + '/subscriptions/drive-utilities-events-pull';
+
+  ensurePubSubTopic_(topic);
+  grantDrivePublisher_(topic);
+  ensurePubSubPullSubscription_(subscription, topic);
+
+  const properties = PropertiesService.getScriptProperties();
+  const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
+  if (current) {
+    try {
+      cloudFetch_('https://workspaceevents.googleapis.com/v1/' + current, { method: 'delete' });
+    } catch (error) {
+      if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+        throw error;
+      }
+    }
+  }
+
+  const eventSubscription = createDriveEventSubscription_(topic);
+  properties.setProperties({
+    PUBSUB_TOPIC: topic,
+    PUBSUB_SUBSCRIPTION: subscription
+  }, false);
   storeWorkspaceEventSubscription_(eventSubscription);
   return getSetupStatus();
 }
@@ -176,12 +258,11 @@ function createDriveEventSubscription_(topic) {
     payload: JSON.stringify({
       targetResource: '//drive.googleapis.com/files/' + getRootFolderId_(),
       eventTypes: [
-        'google.workspace.drive.file.v3.created',
-        'google.workspace.drive.file.v3.moved',
-        'google.workspace.drive.file.v3.contentChanged'
+        'google.workspace.drive.file.v3.created'
       ],
       payloadOptions: { includeResource: false },
-      driveOptions: { includeDescendants: false },
+      // A folder target receives child-file changes only when this is true.
+      driveOptions: { includeDescendants: true },
       notificationEndpoint: { pubsubTopic: topic },
       ttl: '86400s'
     })
