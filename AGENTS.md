@@ -31,6 +31,12 @@
 - Keep installer-owned `clasp` authorization isolated from the global profile.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
+- Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
+  logs, and per-file report version synchronized.
+- Classify automatic paid-backend fallback only from provider-specific,
+  explicit terminal quota or credit signals. Never infer it from an HTTP status
+  or documentation URL alone; retain negative tests for transient rate limits
+  and responses from the paid backend.
 - Do not allocate credential files inside command substitutions: subshell
   cleanup registrations do not reach the parent process. Stream secrets over
   stdin when possible; otherwise create and track temporary files in the

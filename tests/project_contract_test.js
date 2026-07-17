@@ -78,6 +78,10 @@ function testCommittedJsonAndRuntimeConfig() {
     path.join(projectRoot, 'scripts/install.sh'),
     'utf8'
   );
+  const changelog = fs.readFileSync(
+    path.join(projectRoot, 'CHANGELOG.md'),
+    'utf8'
+  );
   assert.equal(manifest.runtimeVersion, 'V8');
   assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
   assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
@@ -85,6 +89,12 @@ function testCommittedJsonAndRuntimeConfig() {
   assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);
 
   const context = loadConfigContext();
+  const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
+  assert.match(applicationVersion, /^\d+\.\d+\.\d+$/);
+  assert.match(changelog, new RegExp(
+    '^## \\[' + applicationVersion.replace(/\./g, '\\.') + '\\]',
+    'm'
+  ));
   assert.doesNotThrow(() => context.validateAutomationConfig_(automationConfig));
 }
 

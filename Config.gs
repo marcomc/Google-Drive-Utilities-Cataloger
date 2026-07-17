@@ -1,4 +1,5 @@
 const CONFIG = Object.freeze({
+  APP_VERSION: '0.1.0',
   DEFAULT_MODEL: 'gemini-2.5-flash',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
@@ -57,6 +58,7 @@ function getSetupStatus() {
   const properties = PropertiesService.getScriptProperties();
   const key = CONFIG.PROPERTY_KEYS;
   return {
+    applicationVersion: CONFIG.APP_VERSION,
     geminiApiKeyConfigured: Boolean(properties.getProperty(key.GEMINI_API_KEY)),
     geminiBackend: getGeminiBackend_(),
     geminiEffectiveBackend: getEffectiveGeminiBackend_(),
@@ -74,6 +76,10 @@ function getSetupStatus() {
     workspaceEventSubscription: properties.getProperty(key.WORKSPACE_EVENT_SUBSCRIPTION) || '',
     workspaceEventExpiresAt: properties.getProperty(key.WORKSPACE_EVENT_EXPIRES_AT) || ''
   };
+}
+
+function getApplicationVersion() {
+  return CONFIG.APP_VERSION;
 }
 
 /**
@@ -143,7 +149,8 @@ function getTemporaryVertexFallbackUntilIso_() {
 
 /**
  * Keep the configured Gemini Developer API backend as the primary runtime.
- * A temporary Vertex route exists only after a verified Free Tier daily limit.
+ * A temporary Vertex route exists only after a verified terminal Gemini API
+ * availability limit, such as daily quota or depleted prepayment credits.
  */
 function getEffectiveGeminiBackend_() {
   const primaryBackend = getGeminiBackend_();
@@ -155,8 +162,8 @@ function getEffectiveGeminiBackend_() {
 }
 
 /**
- * Switch the primary runtime to Gemini Developer API Free Tier and enable a
- * one-hour temporary Vertex route when that API reports its daily limit.
+ * Switch the primary runtime to Gemini Developer API and enable a one-hour
+ * temporary Vertex route when that API reports a terminal availability limit.
  */
 function configureGeminiFreeTierWithVertexFallback() {
   const properties = PropertiesService.getScriptProperties();

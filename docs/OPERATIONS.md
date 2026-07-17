@@ -97,16 +97,17 @@ fallback enabled at every interval.
 | Event not received | Wait for daily trigger. | Daily scan catches direct intake PDFs. |
 | PDF is unchanged after `NEEDS REVIEW` or `DUPLICATE` | No action. | It is not sent to Gemini again until the file changes or is manually processed. |
 | Gemini Developer API Free Tier daily quota is exhausted | Wait for automatic Vertex fallback, the next daily fallback, or increase Gemini quota. | With automatic fallback enabled, the current PDF retries once on Vertex and the runtime returns to Free Tier after one hour. |
+| Gemini Developer API prepayment credits are depleted | Replenish credits or leave automatic Vertex fallback enabled. | The current PDF switches to Vertex and later PDFs use Vertex for one hour; generic short-lived `429` limits do not switch. |
 | Change suppliers or folders | Edit `config.local.json`, then replace `AUTOMATION_CONFIG_JSON`. | New rules apply on the next run. |
 | Change per-document instructions | Edit Drive `AGENTS.md`. | The next eligible PDF run reads it. |
 | Pause safely | Run `removeAutomationTriggers`. | No triggers run; existing files and Sheet rows remain unchanged. |
 
 Each normally processed PDF uses one Gemini generation request. Transient
-network, `408`, `429`, and selected `5xx` failures receive one bounded retry.
-A verified Gemini Developer API daily-quota response instead retries once on
-Vertex when automatic fallback is enabled. Other quota errors never switch
-backends. Unchanged completed, duplicate, or review documents are not
-resubmitted on each event.
+network, `408`, generic `429`, and selected `5xx` failures receive one bounded
+retry. A verified Gemini Developer API daily-quota or depleted-prepayment
+response instead retries once on Vertex when automatic fallback is enabled.
+Unchanged completed, duplicate, or review documents are not resubmitted on
+each event.
 
 ## Operations
 
@@ -167,6 +168,11 @@ at run start. The per-file completion event contains only the Drive file ID and
 status. Logs deliberately exclude filenames, credentials, recipients, document
 text, and extracted invoice values. A `catalog-run-skipped` event means another
 run already held the processing lock; it made no changes.
+
+Every structured log event, setup-status response, and per-file email report
+includes the running `MAJOR.MINOR.PATCH` application version. This identifies
+the exact source version that processed a PDF even when email delivery is
+retried later from the durable outbox.
 
 Apps Script can take a short time to display log entries. For a reliable view,
 open **View in Cloud Logging** from an execution, or query the linked Cloud

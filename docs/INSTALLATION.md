@@ -243,7 +243,9 @@ subscription, publisher IAM binding, and Apps Script triggers.
 | `gemini_api_with_vertex_fallback` | API key plus Apps Script OAuth | Both |
 
 For the fallback mode, Gemini Developer API remains primary. A verified daily
-quota exhaustion routes one retry and the following hour to Vertex AI.
+quota exhaustion or depleted prepayment-credit response routes the current PDF
+and the following hour to Vertex AI. Generic short-lived rate limits stay on
+the Developer API and receive the normal bounded retry.
 
 The cataloger Cloud project must have billing for Workspace Events. That does
 not require the Gemini API key to belong to the same project. To preserve a

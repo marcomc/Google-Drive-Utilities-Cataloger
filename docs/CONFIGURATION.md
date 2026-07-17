@@ -29,10 +29,11 @@ Developer API key, then run the owner-only
 `configureGeminiFreeTierWithVertexFallback` function once. It keeps
 `gemini_api` as the primary backend.
 
-Only a `429` response explicitly identifying a daily request quota triggers one
-Vertex retry and a one-hour temporary Vertex route. Other transient network,
-`408`, `429`, and selected `5xx` failures receive one bounded retry on the
-current backend; generic rate-limit errors do not cause Vertex usage.
+Only a `429` response explicitly identifying a daily request quota or depleted
+Gemini API prepayment credits triggers one Vertex retry and a one-hour
+temporary Vertex route. Other transient network, `408`, generic `429`, and
+selected `5xx` failures receive one bounded retry on the current backend;
+short-lived rate limits do not cause Vertex usage.
 
 ## Script Properties
 

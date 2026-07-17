@@ -458,23 +458,27 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     if (code === 200) {
       break;
     }
+    const vertexFallbackReason = backend === 'gemini_api' ?
+      getGeminiVertexFallbackReason_(response) : '';
     if (backend === 'gemini_api' && isAutomaticVertexFallbackEnabled_() &&
-      isGeminiFreeTierDailyQuotaExhausted_(response)) {
-      activateTemporaryVertexFallback_(file);
+      vertexFallbackReason) {
+      activateTemporaryVertexFallback_(file, vertexFallbackReason);
       return callGeminiForPdfWithBackend_(
         blob,
         sheetHeadersBySupply,
         driveAgentsPolicy,
         file,
         'vertex_ai',
-        'free-tier-daily-quota-exhausted'
+        vertexFallbackReason
       );
     }
-    if (!isTransientGeminiResponse_(code) || attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
-      throw new Error(describeGeminiHttpError_(response));
+    if (vertexFallbackReason || !isTransientGeminiResponse_(code) ||
+      attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
+      throw new Error(describeGeminiHttpError_(response, backend));
     }
     const delay = CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-    console.warn('Gemini API HTTP ' + code + '; retrying attempt ' + (attempt + 1) +
+    const provider = backend === 'vertex_ai' ? 'Vertex AI' : 'Gemini Developer API';
+    console.warn(provider + ' HTTP ' + code + '; retrying attempt ' + (attempt + 1) +
       ' after ' + delay + ' ms.');
     Utilities.sleep(delay);
   }
@@ -569,14 +573,23 @@ function isTransientGeminiResponse_(statusCode) {
   return [408, 429, 500, 502, 503, 504].indexOf(statusCode) >= 0;
 }
 
-function isGeminiFreeTierDailyQuotaExhausted_(response) {
+function getGeminiVertexFallbackReason_(response) {
   if (response.getResponseCode() !== 429) {
-    return false;
+    return '';
   }
-  return /GenerateRequestsPerDay|requests? per day|\bRPD\b/i.test(response.getContentText());
+  const responseText = response.getContentText();
+  if (/GenerateRequestsPerDay|generate_content_free_tier_requests|requests?\s+per\s+day|\bRPD\b/i
+    .test(responseText)) {
+    return 'gemini-api-daily-quota-exhausted';
+  }
+  if (/prepayment credits?\s+(?:are\s+)?(?:depleted|exhausted)|(?:prepay(?:ment)?\s+)?(?:credits?|credit balance).{0,40}(?:depleted|exhausted|empty)/i
+    .test(responseText)) {
+    return 'gemini-api-prepayment-credits-depleted';
+  }
+  return '';
 }
 
-function activateTemporaryVertexFallback_(file) {
+function activateTemporaryVertexFallback_(file, reason) {
   const properties = PropertiesService.getScriptProperties();
   const propertyKey = CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL;
   const fallbackUntil = Date.now() + CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS;
@@ -584,14 +597,14 @@ function activateTemporaryVertexFallback_(file) {
   const effectiveUntil = Math.max(existingUntil, fallbackUntil);
   properties.setProperty(propertyKey, String(effectiveUntil));
   logCatalogEvent_('gemini-vertex-fallback-activated', Object.assign(describeFileForLog_(file), {
-    reason: 'free-tier-daily-quota-exhausted',
+    reason: reason,
     cooldownMinutes: CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS / 60000,
     fallbackUntil: new Date(effectiveUntil).toISOString()
   }));
   return effectiveUntil;
 }
 
-function describeGeminiHttpError_(response) {
+function describeGeminiHttpError_(response, backend) {
   const statusCode = response.getResponseCode();
   let apiError = {};
   try {
@@ -601,11 +614,18 @@ function describeGeminiHttpError_(response) {
   }
   const message = String(apiError.message || response.getContentText() || 'Unknown Gemini API error.')
     .replace(/\s+/g, ' ').trim();
-  if (statusCode === 429 && message.indexOf('GenerateRequestsPerDay') >= 0) {
-    return 'Gemini Free Tier daily request quota is exhausted (HTTP 429). ' +
+  const fallbackReason = getGeminiVertexFallbackReason_(response);
+  if (backend === 'gemini_api' && fallbackReason === 'gemini-api-daily-quota-exhausted') {
+    return 'Gemini Developer API daily request quota is exhausted (HTTP 429). ' +
       'The document remains in intake and will be retried by the next daily run.';
   }
-  return 'Gemini API HTTP ' + statusCode + ': ' + message;
+  if (backend === 'gemini_api' &&
+    fallbackReason === 'gemini-api-prepayment-credits-depleted') {
+    return 'Gemini Developer API prepayment credits are depleted (HTTP 429). ' +
+      'Add credits in Google AI Studio or enable automatic Vertex AI fallback.';
+  }
+  const provider = backend === 'vertex_ai' ? 'Vertex AI' : 'Gemini Developer API';
+  return provider + ' HTTP ' + statusCode + ': ' + message;
 }
 
 function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
@@ -2194,6 +2214,7 @@ function logCatalogEvent_(event, details) {
   const payload = Object.assign({
     message: event,
     component: 'drive-utilities-cataloger',
+    applicationVersion: CONFIG.APP_VERSION,
     event: event
   }, details || {});
   Logger.log(payload);
@@ -2253,6 +2274,7 @@ function formatResult_(result) {
     result.sheetLink ? 'Spreadsheet: ' + result.sheetLink : ''
   ].filter(Boolean).join(' ');
   return [
+    labels.softwareVersion + ': ' + CONFIG.APP_VERSION,
     labels.status + ': ' + localizeStatus_(result.status, localization),
     labels.originalFile + ': ' +
       oneLineReportText_(result.originalName) + ' (' + fileLink + ')',

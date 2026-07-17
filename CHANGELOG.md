@@ -31,7 +31,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Gemini Developer API and Vertex AI backends with configurable model and
   Vertex location.
 - Optional automatic Vertex AI fallback for one hour after verified Gemini
-  Developer API daily-quota exhaustion.
+  Developer API daily-quota exhaustion or depleted prepayment credits, while
+  generic short-lived rate limits remain on the primary backend.
 - One normal generation request per eligible PDF, one bounded retry for
   transient network, `408`, `429`, and selected `5xx` failures, and no backend
   switch for generic quota errors.
@@ -76,6 +77,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   formulas, and Drive links.
 - Localized per-file email reports for imported, archived, duplicate,
   needs-review, and error outcomes.
+- Application version in every per-file email report, structured log event,
+  and setup-status response.
 - Single-line normalization of untrusted report fields to prevent filenames or
   extracted narrative text from spoofing additional email labels.
 - Durable email outbox with per-item, per-email, and total Script Properties

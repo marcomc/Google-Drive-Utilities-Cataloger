@@ -235,8 +235,251 @@ function testDeveloperApiKeyUsesHeader() {
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
 }
 
-function testStructuredFileLogsContainOnlyOpaqueId() {
+function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
+  const requests = [];
+  const events = [];
+  const properties = {
+    GEMINI_API_KEY: 'developer-secret',
+    GEMINI_BACKEND: 'gemini_api',
+    GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+    GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project'
+  };
+  const responses = [
+    {
+      getResponseCode: () => 429,
+      getContentText: () => JSON.stringify({
+        error: {
+          code: 429,
+          status: 'RESOURCE_EXHAUSTED',
+          message: 'Your prepayment credits are depleted. Please go to AI Studio at ' +
+            'https://ai.studio/projects to manage your project and billing. Learn more at ' +
+            'https://ai.google.dev/gemini-api/docs/billing#prepay.'
+        }
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+      })
+    }
+  ];
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (key) => properties[key] || '',
+        setProperty: (key, value) => {
+          properties[key] = value;
+        }
+      })
+    },
+    UrlFetchApp: {
+      fetch: (url, options) => {
+        requests.push({ url, options });
+        return responses.shift();
+      }
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getVertexAiLocation_ = () => 'global';
+  context.getScriptProperty_ = (key) => properties[key] || '';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logGeminiUsage_ = () => {};
+  context.logCatalogEvent_ = (event, details) => {
+    events.push({ event, details });
+  };
+
+  const blob = { getBytes: () => [1, 2, 3] };
+  const firstResult = context.callGeminiForPdf_(
+    blob,
+    {},
+    'policy',
+    { getId: () => 'first-file-id' }
+  );
+
+  assert.equal(firstResult, '{}');
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].url, /generativelanguage\.googleapis\.com/);
+  assert.match(requests[1].url, /aiplatform\.googleapis\.com/);
+  assert.ok(Number(properties.GEMINI_VERTEX_FALLBACK_UNTIL) > Date.now());
+  assert.equal(
+    events.find((entry) => entry.event === 'gemini-vertex-fallback-activated')
+      .details.reason,
+    'gemini-api-prepayment-credits-depleted'
+  );
+
+  const secondResult = context.callGeminiForPdf_(
+    blob,
+    {},
+    'policy',
+    { getId: () => 'second-file-id' }
+  );
+  assert.equal(secondResult, '{}');
+  assert.match(requests[2].url, /aiplatform\.googleapis\.com/);
+
+  properties.GEMINI_VERTEX_FALLBACK_UNTIL = String(Date.now() - 1);
+  const thirdResult = context.callGeminiForPdf_(
+    blob,
+    {},
+    'policy',
+    { getId: () => 'third-file-id' }
+  );
+  assert.equal(thirdResult, '{}');
+  assert.match(requests[3].url, /generativelanguage\.googleapis\.com/);
+}
+
+function testEmailReportIncludesSoftwareVersion() {
   const context = loadCataloger();
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+
+  const report = context.formatResult_({
+    status: 'ERROR',
+    originalName: 'invoice.pdf',
+    assignedName: '',
+    fileUrl: 'https://drive.test/file-id',
+    destination: '',
+    supplySupplier: '',
+    extracted: {},
+    actions: 'No changes.',
+    problem: 'Provider unavailable.',
+    recommendedAction: 'Retry later.'
+  });
+
+  assert.equal(
+    report.startsWith(
+      'Software version: ' + context.getApplicationVersion() + '\nSTATUS: ERROR\n'
+    ),
+    true
+  );
+}
+
+function testGenericRateLimitStaysOnDeveloperApi() {
+  const requests = [];
+  const responses = [
+    {
+      getResponseCode: () => 429,
+      getContentText: () => JSON.stringify({
+        error: {
+          code: 429,
+          status: 'RESOURCE_EXHAUSTED',
+          message: 'Requests per minute limit exceeded. Retry in 1 second. ' +
+            'Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay.'
+        }
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+      })
+    }
+  ];
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: (url) => {
+        requests.push(url);
+        return responses.shift();
+      }
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getScriptProperty_ = () => 'developer-secret';
+  context.isAutomaticVertexFallbackEnabled_ = () => true;
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logCatalogEvent_ = () => {};
+  context.logGeminiUsage_ = () => {};
+
+  context.callGeminiForPdfWithBackend_(
+    { getBytes: () => [1, 2, 3] },
+    {},
+    'policy',
+    { getId: () => 'file-id' },
+    'gemini_api',
+    ''
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests.every((url) => url.includes('generativelanguage.googleapis.com')),
+    true
+  );
+}
+
+function testVertexRateLimitRetriesWithoutReclassifyingProviderQuota() {
+  const requests = [];
+  const responses = [
+    {
+      getResponseCode: () => 429,
+      getContentText: () => JSON.stringify({
+        error: {
+          code: 429,
+          status: 'RESOURCE_EXHAUSTED',
+          message: 'GenerateRequestsPerDay quota exceeded temporarily.'
+        }
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+      })
+    }
+  ];
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: (url) => {
+        requests.push(url);
+        return responses.shift();
+      }
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getVertexAiLocation_ = () => 'global';
+  context.getScriptProperty_ = () => 'cataloger-project';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logCatalogEvent_ = () => {};
+  context.logGeminiUsage_ = () => {};
+
+  context.callGeminiForPdfWithBackend_(
+    { getBytes: () => [1, 2, 3] },
+    {},
+    'policy',
+    { getId: () => 'file-id' },
+    'vertex_ai',
+    'gemini-api-daily-quota-exhausted'
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests.every((url) => url.includes('aiplatform.googleapis.com')),
+    true
+  );
+}
+
+function testStructuredFileLogsContainOnlyOpaqueId() {
+  const logPayloads = [];
+  const context = loadCataloger({
+    Logger: {
+      log: (payload) => logPayloads.push(payload)
+    }
+  });
   const details = context.describeFileForLog_({
     getId: () => 'opaque-file-id',
     getName: () => 'private-invoice-name.pdf'
@@ -251,6 +494,11 @@ function testStructuredFileLogsContainOnlyOpaqueId() {
       new Error('Spreadsheet row contained private values')
     ),
     'spreadsheet'
+  );
+  context.logCatalogEvent_('test-event', details);
+  assert.equal(
+    logPayloads[0].applicationVersion,
+    context.getApplicationVersion()
   );
 }
 
@@ -652,6 +900,10 @@ testExtractionSchemaAndCalendarValidation();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
+testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
+testEmailReportIncludesSoftwareVersion();
+testGenericRateLimitStaysOnDeveloperApi();
+testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();
 testPromptKeepsHeadersScopedBySupply();

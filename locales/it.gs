@@ -27,6 +27,7 @@ function getItalianLocalization_() {
       ERROR: 'ERRORE'
     }),
     reportLabels: Object.freeze({
+      softwareVersion: 'Versione software',
       status: 'ESITO',
       originalFile: 'File originale',
       assignedName: 'Nome assegnato',
