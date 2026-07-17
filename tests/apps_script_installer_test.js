@@ -36,25 +36,29 @@ function loadInstaller(fetchImplementation) {
   return context;
 }
 
-function testSecretManagerCredentialHandoff() {
+function testSecretManagerBootstrapHandoff() {
   const requests = [];
+  const privateOptions = {
+    projectId: 'cataloger-project',
+    geminiApiKey: 'developer-secret'
+  };
   const context = loadInstaller((url, options) => {
     requests.push({ url, options });
     return response(200, {
       payload: {
-        data: Buffer.from('developer-secret').toString('base64')
+        data: Buffer.from(JSON.stringify(privateOptions)).toString('base64')
       }
     });
   });
 
-  const apiKey = context.readInstallerGeminiApiKey_({
-    projectId: 'cataloger-project',
-    geminiSecretVersion:
+  const result = context.readInstallerBootstrapOptions_({
+    bootstrapSecretVersion:
       'projects/cataloger-project/secrets/' +
       'drive-utilities-cataloger-test-script-id/versions/7'
   });
 
-  assert.equal(apiKey, 'developer-secret');
+  assert.equal(result.projectId, 'cataloger-project');
+  assert.equal(result.geminiApiKey, 'developer-secret');
   assert.equal(requests.length, 1);
   assert.equal(
     requests[0].url,
@@ -74,12 +78,93 @@ function testSecretManagerScopeIsRestricted() {
   });
 
   assert.throws(
-    () => context.readInstallerGeminiApiKey_({
-      projectId: 'cataloger-project',
-      geminiSecretVersion:
+    () => context.readInstallerBootstrapOptions_({
+      bootstrapSecretVersion:
         'projects/other-project/secrets/unrelated/versions/1'
     }),
-    /selected Cloud project/
+    /does not belong/
+  );
+}
+
+function testResumedManagedSpreadsheetPlacementIsRepaired() {
+  const movedTo = [];
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const spreadsheet = {
+    getId: () => 'spreadsheet-id',
+    getSheets: () => [{ getLastRow: () => 0 }],
+    setSpreadsheetTimeZone: () => {},
+    setSpreadsheetLocale: () => {}
+  };
+  const rootFolder = { getId: () => 'root-folder-id' };
+  context.SpreadsheetApp = {
+    openById: () => spreadsheet
+  };
+  context.DriveApp = {
+    getFileById: () => ({
+      moveTo: (folder) => movedTo.push(folder.getId())
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US'
+  });
+  context.initializeInstallerSheets_ = () => {};
+
+  context.ensureInstallerSpreadsheet_(
+    rootFolder,
+    'spreadsheet-id',
+    'Utilities',
+    { locale: 'en' },
+    'Etc/UTC',
+    true
+  );
+  context.ensureInstallerSpreadsheet_(
+    rootFolder,
+    'spreadsheet-id',
+    'Utilities',
+    { locale: 'en' },
+    'Etc/UTC',
+    false
+  );
+
+  assert.deepEqual(movedTo, ['root-folder-id']);
+}
+
+function testPopulatedSpreadsheetSettingsAreNotChangedSilently() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const spreadsheet = {
+    getId: () => 'spreadsheet-id',
+    getSheets: () => [{ getLastRow: () => 2 }],
+    getSpreadsheetTimeZone: () => 'America/New_York',
+    getSpreadsheetLocale: () => 'en_US',
+    setSpreadsheetTimeZone: () => {
+      throw new Error('must not change populated spreadsheet settings');
+    },
+    setSpreadsheetLocale: () => {
+      throw new Error('must not change populated spreadsheet settings');
+    }
+  };
+  context.SpreadsheetApp = {
+    openById: () => spreadsheet
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US'
+  });
+  context.initializeInstallerSheets_ = () => {};
+
+  assert.throws(
+    () => context.ensureInstallerSpreadsheet_(
+      { getId: () => 'root-folder-id' },
+      'spreadsheet-id',
+      'Utilities',
+      { locale: 'en' },
+      'Etc/UTC',
+      false
+    ),
+    /time zone must match/
   );
 }
 
@@ -214,8 +299,10 @@ function testCredentialFailureIsRedacted() {
   );
 }
 
-testSecretManagerCredentialHandoff();
+testSecretManagerBootstrapHandoff();
 testSecretManagerScopeIsRestricted();
+testResumedManagedSpreadsheetPlacementIsRepaired();
+testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

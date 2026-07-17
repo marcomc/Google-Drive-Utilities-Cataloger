@@ -30,8 +30,9 @@ Developer API key, then run the owner-only
 `gemini_api` as the primary backend.
 
 Only a `429` response explicitly identifying a daily request quota triggers one
-Vertex retry and a one-hour temporary Vertex route. Generic rate-limit errors do
-not cause Vertex usage.
+Vertex retry and a one-hour temporary Vertex route. Other transient network,
+`408`, `429`, and selected `5xx` failures receive one bounded retry on the
+current backend; generic rate-limit errors do not cause Vertex usage.
 
 ## Script Properties
 
@@ -42,7 +43,7 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | Property | Value |
 | --- | --- |
 | `GEMINI_BACKEND` | Optional: `gemini_api` (default) or `vertex_ai`. |
-| `GEMINI_API_KEY` | Required only for `gemini_api`; save this private value in Bitwarden. |
+| `GEMINI_API_KEY` | Required only for `gemini_api`; save this private value in a password manager. |
 | `GEMINI_AUTO_VERTEX_FALLBACK` | Optional `true`; requires a configured Vertex AI project. |
 | `NOTIFICATION_RECIPIENT` | Recipient for processing reports. |
 | `ROOT_FOLDER_ID` | Drive intake-folder ID. |
@@ -70,6 +71,9 @@ Replace every placeholder. The installer rejects an unchanged template and
 writes the complete object to `AUTOMATION_CONFIG_JSON` during resume. For a
 manual installation, paste the complete file contents into that Script
 Property. Runtime does not read a JSON file from Drive or Apps Script source.
+The serialized object must remain at or below 8 KiB; the validator keeps that
+margin below the official
+[9 KB per-value Apps Script limit](https://developers.google.com/apps-script/guides/services/quotas).
 
 `config.local.json` is ignored by Git and clasp. Do not commit or upload it.
 
@@ -88,6 +92,15 @@ Property. Runtime does not read a JSON file from Drive or Apps Script source.
 
 A non-empty printed address that does not match an `address_rules` entry always
 produces `NEEDS REVIEW`; `address_missing_type` does not weaken that rule.
+Each frequency override has this shape:
+
+```json
+{
+  "supplier": "WATER PROVIDER",
+  "supply_type": "Water",
+  "frequency": "bimonthly"
+}
+```
 
 ## Drive policy
 
@@ -103,7 +116,7 @@ Drive intake folder:  AGENTS.md
 
 Customize only the Drive copy with installation-specific classification and
 extraction rules. Do not commit it, publish it, or upload it with clasp. The
-script requires exactly one readable, non-empty policy file, up to 100 KiB,
+script requires exactly one readable, non-empty policy file, up to 40 KiB,
 before it processes an eligible PDF.
 
 The policy can guide classification and extraction. It cannot extend the
@@ -120,16 +133,22 @@ locales/en.gs         English labels and header aliases
 locales/it.gs         Italian labels and header aliases
 ```
 
-To add a language, copy `locales/en.gs`, translate labels and aliases only,
-register the two-letter code in `Localization.gs`, then set that code in
-`config.local.json`. Keep the internal document-type values `Invoice`,
+To add a language, copy `locales/en.gs`, set its `spreadsheetLocale`, translate
+labels and aliases only, register the locale code in `Localization.gs`, then
+set that code in `config.local.json`. The CLI installer derives its supported
+codes from that registry. Keep the internal document-type values `Invoice`,
 `Contract`, and `Report` in English.
 
 ## Configuration validation
 
 Before activation:
 
-1. Validate `config.local.json` with `jq empty config.local.json`.
+1. Validate the complete configuration contract:
+
+   ```bash
+   node scripts/validate-config.js config.local.json
+   ```
+
 2. Run `make install-resume`; it validates properties, policy, event transport,
    and triggers.
 3. For manual installations, confirm every required Script Property and one

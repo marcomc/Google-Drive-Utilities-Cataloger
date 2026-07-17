@@ -34,8 +34,16 @@ is_valid_email() {
 
 is_supported_locale() {
   local locale="${1:-}"
+  local project_root="${PROJECT_ROOT:-}"
+  local supported
 
-  [[ "${locale}" == "en" || "${locale}" == "it" ]]
+  if [[ -z "${project_root}" ||
+    ! -f "${project_root}/scripts/list-locales.js" ]]; then
+    return 1
+  fi
+  supported="$(node "${project_root}/scripts/list-locales.js" 2>/dev/null)" ||
+    return 1
+  [[ " ${supported} " == *" ${locale} "* ]]
 }
 
 is_valid_time_zone() {

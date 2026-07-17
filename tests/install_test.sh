@@ -268,7 +268,7 @@ test_runtime_service_selection() {
     failures=$((failures + 1))
   fi
   if ! grep -q 'secretmanager.googleapis.com' <<<"${services}"; then
-    printf 'FAIL: Gemini API mode does not enable private credential handoff\n' >&2
+    printf 'FAIL: Gemini API mode does not enable private bootstrap handoff\n' >&2
     failures=$((failures + 1))
   fi
 
@@ -281,8 +281,8 @@ test_runtime_service_selection() {
 
   write_test_state "vertex_ai"
   services="$(required_cloud_services)"
-  if grep -q 'secretmanager.googleapis.com' <<<"${services}"; then
-    printf 'FAIL: Vertex-only mode unexpectedly enables Secret Manager\n' >&2
+  if ! grep -q 'secretmanager.googleapis.com' <<<"${services}"; then
+    printf 'FAIL: Vertex-only mode lacks private bootstrap handoff\n' >&2
     failures=$((failures + 1))
   fi
   if ! grep -q 'aiplatform.googleapis.com' <<<"${services}"; then
@@ -290,8 +290,13 @@ test_runtime_service_selection() {
     failures=$((failures + 1))
   fi
 
-  if grep -q -- '--arg geminiApiKey' "${PROJECT_ROOT}/scripts/install.sh"; then
-    printf 'FAIL: Gemini API key is still serialized into clasp arguments\n' >&2
+  actual="$(build_bootstrap_parameters \
+    'projects/test-project-123/secrets/bootstrap/versions/1')"
+  if ! jq -e '
+    length == 1 and
+    (.[0] | keys) == ["bootstrapSecretVersion"]
+  ' <<<"${actual}" >/dev/null; then
+    printf 'FAIL: private bootstrap values are serialized into clasp arguments\n' >&2
     failures=$((failures + 1))
   fi
 }
@@ -305,6 +310,43 @@ test_secret_input_assignment() {
   unset GDUC_GEMINI_API_KEY
   assert_equal "test-secret" "${actual}" \
     "return a Gemini key to the caller without logging it"
+}
+
+test_bootstrap_payload_keeps_key_off_disk() {
+  local payload_root
+  local test_status
+
+  payload_root="$(mktemp -d)"
+  set +e
+  PAYLOAD_TEST_ROOT="${payload_root}" bash -c '
+    source "$1"
+    PROJECT_ROOT="${PAYLOAD_TEST_ROOT}"
+    STATE_DIR="${PROJECT_ROOT}/state"
+    STATE_FILE="${STATE_DIR}/state.json"
+    INSTALL_LOCK_HELD=0
+    TEMP_PATHS=()
+    mkdir -p "${STATE_DIR}"
+    printf "%s\n" \
+      "{\"projectId\":\"test-project-123\",\"rootFolderId\":\"folder-id\",\"spreadsheetId\":\"\",\"spreadsheetTitle\":\"Utilities\",\"notificationRecipient\":\"operator@example.com\",\"geminiBackend\":\"gemini_api\",\"geminiModel\":\"gemini-2.5-flash\",\"geminiAutoVertexFallback\":false,\"vertexAiLocation\":\"global\",\"timeZone\":\"Etc/UTC\"}" \
+      >"${STATE_FILE}"
+    printf "%s\n" "{\"locale\":\"en\"}" \
+      >"${PROJECT_ROOT}/config.local.json"
+    printf "%s\n" "Policy" >"${PROJECT_ROOT}/AGENTS.example.md"
+
+    actual_payload=""
+    build_bootstrap_payload "test-secret" actual_payload
+    jq -e ".geminiApiKey == \"test-secret\"" \
+      <<<"${actual_payload}" >/dev/null &&
+      [[ "${#TEMP_PATHS[@]}" -eq 0 ]] &&
+      ! grep -R -q "test-secret" "${PROJECT_ROOT}"
+  ' _ "${PROJECT_ROOT}/scripts/install.sh"
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -ne 0 ]]; then
+    printf 'FAIL: bootstrap key was written to installer files\n' >&2
+    failures=$((failures + 1))
+  fi
+  rm -rf "${payload_root}"
 }
 
 test_resume_runtime_overrides() {
@@ -334,10 +376,10 @@ test_exit_zero_gemini_error_cleanup() {
   local actual
 
   (
-    remove_gemini_transfer_secret() {
+    remove_bootstrap_transfer_secret() {
       record_removed_secret "$1"
     }
-    discard_rejected_gemini_credential_if_needed \
+    discard_rejected_bootstrap_if_needed \
       '{"error":{"message":"Gemini Developer API key or model validation failed (HTTP 403)."}}' \
       'projects/test/secrets/transfer/versions/1'
   ) >/dev/null 2>&1
@@ -370,7 +412,7 @@ validate_secret_collision() {
     gcloud() {
       "${describe_function}"
     }
-    ensure_gemini_transfer_secret \
+    ensure_bootstrap_transfer_secret \
       "test-project-123" \
       "drive-utilities-cataloger-test-script-id"
   ) >/dev/null 2>&1
@@ -381,16 +423,128 @@ test_secret_resource_ownership() {
 
   write_test_state "gemini_api"
   state_set "scriptId" "test-script-id"
-  actual="$(gemini_transfer_secret_id)"
+  actual="$(bootstrap_transfer_secret_id)"
   assert_equal \
     "drive-utilities-cataloger-test-script-id" \
     "${actual}" \
-    "namespace the transfer secret with the Apps Script ID"
+    "namespace the bootstrap secret with the Apps Script ID"
 
-  assert_failure "reject an existing unowned transfer secret" \
+  assert_failure "reject an existing unowned bootstrap secret" \
     validate_secret_collision describe_unowned_secret
-  assert_success "reuse an installer-owned transfer secret" \
+  assert_success "reuse an installer-owned bootstrap secret" \
     validate_secret_collision describe_owned_secret
+}
+
+test_installer_lock_exclusion() {
+  local lock_state_dir
+  local test_status
+
+  lock_state_dir="$(mktemp -d)"
+  set +e
+  (
+    CUSTOM_STATE_DIR_REQUESTED=1
+    STATE_DIR="${lock_state_dir}"
+    STATE_FILE="${STATE_DIR}/state.json"
+    AUTH_DIR="${STATE_DIR}/clasp-auth"
+    MANAGEMENT_AUTH_DIR="${STATE_DIR}/clasp-management-auth"
+    STATE_MARKER="${STATE_DIR}/.gduc-installer-state"
+    INSTALL_LOCK_DIR="${STATE_DIR}/installer.lock"
+    validate_state_directory_setting
+    acquire_installer_lock
+    if GDUC_STATE_DIR="${lock_state_dir}" bash -c '
+      source "$1"
+      validate_state_directory_setting
+      acquire_installer_lock
+    ' _ "${PROJECT_ROOT}/scripts/install.sh" >/dev/null 2>&1; then
+      exit 1
+    fi
+    release_installer_lock
+  )
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -ne 0 ]]; then
+    printf 'FAIL: concurrent installer acquired the same state lock\n' >&2
+    failures=$((failures + 1))
+  fi
+  rm -rf "${lock_state_dir}"
+}
+
+test_preflight_does_not_require_global_clasp_login() {
+  local check_state_dir
+  local test_status
+
+  check_state_dir="$(mktemp -d)"
+  set +e
+  (
+    MANAGEMENT_AUTH_DIR="${check_state_dir}/clasp-management-auth"
+    CLASP=(false)
+    check_clasp_readiness >/dev/null
+  )
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -ne 0 ]]; then
+    printf 'FAIL: preflight required a global clasp login\n' >&2
+    failures=$((failures + 1))
+  fi
+  rm -rf "${check_state_dir}"
+}
+
+test_reset_removes_private_state_after_releasing_lock() {
+  local reset_root
+  local test_status
+
+  reset_root="$(mktemp -d)"
+  set +e
+  RESET_TEST_ROOT="${reset_root}" bash -c '
+    source "$1"
+    PROJECT_ROOT="${RESET_TEST_ROOT}"
+    STATE_DIR="${PROJECT_ROOT}/state"
+    STATE_FILE="${STATE_DIR}/state.json"
+    AUTH_DIR="${STATE_DIR}/clasp-auth"
+    MANAGEMENT_AUTH_DIR="${STATE_DIR}/clasp-management-auth"
+    STATE_MARKER="${STATE_DIR}/.gduc-installer-state"
+    INSTALL_LOCK_DIR="${STATE_DIR}/installer.lock"
+    INSTALL_LOCK_HELD=0
+    CONFIRM_RESULT=0
+    ensure_state_directory
+    printf "{}\n" >"${STATE_FILE}"
+    printf "{}\n" >"${PROJECT_ROOT}/.clasp.json"
+    acquire_installer_lock
+    confirm() {
+      CONFIRM_RESULT=1
+    }
+    reset_installer_state >/dev/null
+    [[ ! -e "${STATE_DIR}" && ! -e "${PROJECT_ROOT}/.clasp.json" ]]
+  ' _ "${PROJECT_ROOT}/scripts/install.sh"
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -ne 0 ]]; then
+    printf 'FAIL: reset left private installer state behind\n' >&2
+    failures=$((failures + 1))
+  fi
+  rm -rf "${reset_root}"
+}
+
+test_private_artifacts_are_ignored() {
+  local candidate
+
+  for candidate in \
+    ".clasp.json.tmp.interrupted" \
+    "config.local.json.tmp.interrupted" \
+    "client_secret_example.json" \
+    "oauth-client.json"; do
+    if ! git -C "${PROJECT_ROOT}" check-ignore -q "${candidate}"; then
+      printf 'FAIL: private artifact is not ignored: %s\n' \
+        "${candidate}" >&2
+      failures=$((failures + 1))
+    fi
+  done
+}
+
+test_restrictive_installer_umask() {
+  if ! grep -Eq '^umask 077$' "${PROJECT_ROOT}/scripts/install.sh"; then
+    fail "installer must create private artifacts under umask 077"
+  fi
 }
 
 test_drive_id_extraction
@@ -400,9 +554,15 @@ test_noninteractive_optional_input
 test_custom_state_directory_safety
 test_runtime_service_selection
 test_secret_input_assignment
+test_bootstrap_payload_keeps_key_off_disk
 test_resume_runtime_overrides
 test_exit_zero_gemini_error_cleanup
 test_secret_resource_ownership
+test_installer_lock_exclusion
+test_preflight_does_not_require_global_clasp_login
+test_reset_removes_private_state_after_releasing_lock
+test_private_artifacts_are_ignored
+test_restrictive_installer_umask
 
 if ! bash "${PROJECT_ROOT}/scripts/install.sh" --help >/dev/null; then
   printf 'FAIL: installer help is unavailable\n' >&2

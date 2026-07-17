@@ -78,9 +78,11 @@ manual review.
 ## Final verification and reporting
 
 For every processed document, verify its name, folder, any spreadsheet row,
-source link, and duplicate status. If verification fails after a move, do not
-perform destructive rollback: report the reached state and the file link.
+source link, and duplicate status. If verification fails, compensate only
+mutations proven to belong to the current file by its source marker and
+mutation journal. Never delete an unrelated row or source PDF; stop for manual
+review when provenance is ambiguous.
 
-Send email only when the intake folder contained at least one PDF. Each outcome
+Send email only for a new outcome or a recovered pending outcome. Each outcome
 must include status, original file, assigned name, destination, extracted data,
 costs, reconciliation, actions taken, and one recommended next action.

@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const projectRoot = path.resolve(__dirname, '..');
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(path.join(projectRoot, file), 'utf8'));
+}
+
+function loadFunction(file, functionName) {
+  const context = vm.createContext({});
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, file), 'utf8'),
+    context,
+    { filename: file }
+  );
+  return context[functionName]();
+}
+
+function loadConfigContext() {
+  const context = vm.createContext({
+    Utilities: {
+      newBlob: (value) => ({
+        getBytes: () => Array.from(Buffer.from(String(value), 'utf8'))
+      })
+    }
+  });
+  fs.readdirSync(path.join(projectRoot, 'locales'))
+    .filter((file) => file.endsWith('.gs'))
+    .sort()
+    .forEach((file) => {
+      vm.runInContext(
+        fs.readFileSync(path.join(projectRoot, 'locales', file), 'utf8'),
+        context,
+        { filename: `locales/${file}` }
+      );
+    });
+  ['Localization.gs', 'Config.gs'].forEach((file) => {
+    vm.runInContext(
+      fs.readFileSync(path.join(projectRoot, file), 'utf8'),
+      context,
+      { filename: file }
+    );
+  });
+  return context;
+}
+
+function shape(value) {
+  if (Array.isArray(value)) {
+    return [
+      'array',
+      ...Array.from(new Set(value.map((item) => JSON.stringify(shape(item)))))
+        .map((item) => JSON.parse(item))
+    ];
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, shape(value[key])])
+    );
+  }
+  return typeof value;
+}
+
+function testCommittedJsonAndRuntimeConfig() {
+  const automationConfig = readJson('config.example.json');
+  const manifest = readJson('appsscript.json');
+  const installerSource = fs.readFileSync(
+    path.join(projectRoot, 'Installer.gs'),
+    'utf8'
+  );
+  const installerShell = fs.readFileSync(
+    path.join(projectRoot, 'scripts/install.sh'),
+    'utf8'
+  );
+  assert.equal(manifest.runtimeVersion, 'V8');
+  assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
+  assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
+  assert.match(installerShell, /\.ackDeadlineSeconds == 300/);
+  assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);
+
+  const context = loadConfigContext();
+  assert.doesNotThrow(() => context.validateAutomationConfig_(automationConfig));
+}
+
+function testNormalizedConfigurationCollisions() {
+  const context = loadConfigContext();
+  const original = readJson('config.example.json');
+  const mutate = (callback) => {
+    const config = JSON.parse(JSON.stringify(original));
+    callback(config);
+    return config;
+  };
+
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.canonical_suppliers.push('WATER-PROVIDER');
+    })),
+    /normalized duplicates/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.supplier_aliases['ENERGY PROVIDER LIMITED'] = 'ENERGY PROVIDER';
+      config.supplier_aliases['ENERGY-PROVIDER-LIMITED'] = 'WATER PROVIDER';
+    })),
+    /normalized collision/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.supply_aliases.water = 'Water';
+    })),
+    /shadows a canonical/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.frequency_overrides = [
+        {
+          supplier: 'WATER PROVIDER',
+          supply_type: 'Water',
+          frequency: 'monthly'
+        },
+        {
+          supplier: 'WATER PROVIDER',
+          supply_type: 'Water',
+          frequency: 'bimonthly'
+        }
+      ];
+    })),
+    /duplicate tuple/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.address_rules[0].match = '!!!';
+    })),
+    /empty or duplicate match/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.oversized = 'x'.repeat(9000);
+    })),
+    /safe 8 KiB/
+  );
+}
+
+function testLocaleParity() {
+  const english = loadFunction('locales/en.gs', 'getEnglishLocalization_');
+  const italian = loadFunction('locales/it.gs', 'getItalianLocalization_');
+  assert.deepEqual(shape(italian), shape(english));
+}
+
+testCommittedJsonAndRuntimeConfig();
+testNormalizedConfigurationCollisions();
+testLocaleParity();
+
+console.log('Project contract tests passed.');

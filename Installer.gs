@@ -1,4 +1,4 @@
-const INSTALLER_GEMINI_SECRET_PREFIX =
+const INSTALLER_BOOTSTRAP_SECRET_PREFIX =
   'drive-utilities-cataloger-';
 
 /**
@@ -9,10 +9,9 @@ const INSTALLER_GEMINI_SECRET_PREFIX =
  * never returns or logs credentials.
  */
 function bootstrapCatalogerInstallation(options) {
-  const validated = validateInstallerOptions_(options);
-  if (validated.geminiSecretVersion) {
-    validated.geminiApiKey = readInstallerGeminiApiKey_(validated);
-  }
+  const validated = validateInstallerOptions_(
+    readInstallerBootstrapOptions_(options)
+  );
   validateInstallerGeminiAccess_(validated);
   const properties = PropertiesService.getScriptProperties();
   const priorRootFolderId = properties.getProperty(
@@ -28,7 +27,8 @@ function bootstrapCatalogerInstallation(options) {
     validated.spreadsheetId || resumableSpreadsheetId,
     validated.spreadsheetTitle,
     validated.automationConfig,
-    validated.timeZone
+    validated.timeZone,
+    !validated.spreadsheetId
   );
   ensureInstallerDestinationFolders_(rootFolder, validated.automationConfig);
 
@@ -54,8 +54,14 @@ function bootstrapCatalogerInstallation(options) {
 
   // Reuse the runtime validators before creating any event transport.
   assertCatalogConfiguration_();
-  const transportStatus = provisionDriveEventTransport();
-  const triggerStatus = installAutomationTriggers();
+  const lifecycleStatus = withCatalogLifecycleLock_('installation-bootstrap', function () {
+    return {
+      transport: provisionDriveEventTransportUnlocked_(),
+      triggers: installAutomationTriggersUnlocked_()
+    };
+  });
+  const transportStatus = lifecycleStatus.transport;
+  const triggerStatus = lifecycleStatus.triggers;
 
   return {
     installed: true,
@@ -81,7 +87,7 @@ function validateCatalogerInstallation() {
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
   loadDriveAgentsPolicy_(rootFolder);
   validateInstallerConfiguredSheets_();
-  getAllSheetHeaders_();
+  getSheetHeadersBySupply_();
 
   const expectedHandlers = [
     'runDailyUtilitiesCataloging',
@@ -99,10 +105,14 @@ function validateCatalogerInstallation() {
     }).length > 1;
   });
   const setup = getSetupStatus();
-  const workspaceEventActive = Boolean(
-    setup.workspaceEventSubscription &&
-    new Date(setup.workspaceEventExpiresAt).getTime() > Date.now()
-  );
+  let workspaceEventActive = false;
+  let workspaceEventError = '';
+  try {
+    validateDriveEventTopology_();
+    workspaceEventActive = true;
+  } catch (error) {
+    workspaceEventError = error.message;
+  }
 
   return {
     installed: setup.rootFolderConfigured &&
@@ -116,6 +126,7 @@ function validateCatalogerInstallation() {
     missingTriggerHandlers: missingTriggerHandlers,
     duplicateTriggerHandlers: duplicateTriggerHandlers,
     workspaceEventActive: workspaceEventActive,
+    workspaceEventError: workspaceEventError,
     geminiBackend: setup.geminiBackend,
     geminiApiKeyConfigured: setup.geminiApiKeyConfigured,
     pubSubConfigured: setup.pubSubConfigured
@@ -148,10 +159,8 @@ function validateInstallerOptions_(options) {
     throw new Error('Installer geminiBackend must be gemini_api or vertex_ai.');
   }
   if (options.geminiBackend === 'gemini_api' &&
-    !String(options.geminiSecretVersion || '').trim()) {
-    throw new Error(
-      'Installer geminiSecretVersion is required for gemini_api.'
-    );
+    !String(options.geminiApiKey || '').trim()) {
+    throw new Error('Installer Gemini API credential is required for gemini_api.');
   }
   if (!options.automationConfig ||
     typeof options.automationConfig !== 'object' ||
@@ -160,6 +169,7 @@ function validateInstallerOptions_(options) {
   }
 
   const config = options.automationConfig;
+  validateAutomationConfig_(config);
   ['canonical_supplies', 'canonical_suppliers', 'address_rules'].forEach(
     function (key) {
       if (!Array.isArray(config[key])) {
@@ -174,8 +184,11 @@ function validateInstallerOptions_(options) {
       throw new Error('Installer automationConfig requires the ' + key + ' object.');
     }
   });
-  if (['en', 'it'].indexOf(config.locale || 'en') < 0) {
-    throw new Error('Installer automationConfig locale must be en or it.');
+  if (getSupportedLocales_().indexOf(config.locale || 'en') < 0) {
+    throw new Error(
+      'Installer automationConfig locale must be one of: ' +
+        getSupportedLocales_().join(', ') + '.'
+    );
   }
 
   return {
@@ -185,8 +198,7 @@ function validateInstallerOptions_(options) {
     spreadsheetTitle: String(options.spreadsheetTitle).trim(),
     notificationRecipient: String(options.notificationRecipient).trim(),
     geminiBackend: options.geminiBackend,
-    geminiApiKey: '',
-    geminiSecretVersion: String(options.geminiSecretVersion || '').trim(),
+    geminiApiKey: String(options.geminiApiKey || '').trim(),
     geminiModel: String(options.geminiModel).trim(),
     autoVertexFallback: options.autoVertexFallback === true,
     vertexLocation: String(options.vertexLocation).trim(),
@@ -196,22 +208,26 @@ function validateInstallerOptions_(options) {
   };
 }
 
-function readInstallerGeminiApiKey_(options) {
-  const secretId = INSTALLER_GEMINI_SECRET_PREFIX +
+function readInstallerBootstrapOptions_(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options) ||
+    !String(options.bootstrapSecretVersion || '').trim()) {
+    throw new Error('Installer bootstrapSecretVersion is required.');
+  }
+  const secretVersion = String(options.bootstrapSecretVersion).trim();
+  const secretId = INSTALLER_BOOTSTRAP_SECRET_PREFIX +
     ScriptApp.getScriptId();
-  const expectedPrefix = 'projects/' + options.projectId +
-    '/secrets/' + secretId + '/versions/';
-  const versionId = options.geminiSecretVersion.slice(expectedPrefix.length);
-  if (options.geminiSecretVersion.indexOf(expectedPrefix) !== 0 ||
-    !/^[0-9]+$/.test(versionId)) {
+  const match = secretVersion.match(
+    /^projects\/([a-z][a-z0-9-]{4,28}[a-z0-9])\/secrets\/([^/]+)\/versions\/([0-9]+)$/
+  );
+  if (!match || match[2] !== secretId) {
     throw new Error(
-      'Installer Gemini secret must belong to the selected Cloud project.'
+      'Installer bootstrap secret does not belong to this Apps Script project.'
     );
   }
 
   const response = UrlFetchApp.fetch(
     'https://secretmanager.googleapis.com/v1/' +
-      options.geminiSecretVersion + ':access',
+      secretVersion + ':access',
     {
       method: 'get',
       headers: {
@@ -223,7 +239,7 @@ function readInstallerGeminiApiKey_(options) {
   const statusCode = response.getResponseCode();
   if (statusCode !== 200) {
     throw new Error(
-      'Could not access the temporary Gemini credential (HTTP ' +
+      'Could not access the temporary installer bootstrap data (HTTP ' +
       statusCode + ').'
     );
   }
@@ -234,18 +250,26 @@ function readInstallerGeminiApiKey_(options) {
   } catch (error) {
     throw new Error('Secret Manager returned an invalid response.');
   }
-  const encodedKey = secretResponse.payload &&
+  const encodedPayload = secretResponse.payload &&
     secretResponse.payload.data;
-  if (!encodedKey) {
-    throw new Error('The temporary Gemini credential is empty.');
+  if (!encodedPayload) {
+    throw new Error('The temporary installer bootstrap data is empty.');
   }
-  const apiKey = Utilities.newBlob(
-    Utilities.base64Decode(encodedKey)
-  ).getDataAsString().trim();
-  if (!apiKey) {
-    throw new Error('The temporary Gemini credential is empty.');
+  let privateOptions;
+  try {
+    privateOptions = JSON.parse(Utilities.newBlob(
+      Utilities.base64Decode(encodedPayload)
+    ).getDataAsString());
+  } catch (error) {
+    throw new Error('The temporary installer bootstrap data is invalid.');
   }
-  return apiKey;
+  if (!privateOptions || typeof privateOptions !== 'object' ||
+    Array.isArray(privateOptions) || privateOptions.projectId !== match[1]) {
+    throw new Error(
+      'Installer bootstrap data does not match the selected Cloud project.'
+    );
+  }
+  return privateOptions;
 }
 
 function validateInstallerGeminiAccess_(options) {
@@ -368,7 +392,7 @@ function ensureInstallerPolicyFile_(rootFolder, policyText) {
 }
 
 function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,
-  automationConfig, timeZone) {
+  automationConfig, timeZone, placeInRoot) {
   let spreadsheet;
   let created = false;
   if (spreadsheetId) {
@@ -379,14 +403,36 @@ function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,
       ROOT_FOLDER_ID: rootFolder.getId(),
       SPREADSHEET_ID: spreadsheet.getId()
     }, false);
-    DriveApp.getFileById(spreadsheet.getId()).moveTo(rootFolder);
     created = true;
   }
 
-  spreadsheet.setSpreadsheetTimeZone(timeZone);
-  spreadsheet.setSpreadsheetLocale(
-    (automationConfig.locale || 'en') === 'it' ? 'it_IT' : 'en_US'
+  if (placeInRoot) {
+    DriveApp.getFileById(spreadsheet.getId()).moveTo(rootFolder);
+  }
+  const localization = getInstallerLocalization_(
+    automationConfig.locale || 'en'
   );
+  const canConfigureSettings = created || placeInRoot ||
+    spreadsheet.getSheets().every(function (sheet) {
+      return sheet.getLastRow() === 0;
+    });
+  if (canConfigureSettings) {
+    spreadsheet.setSpreadsheetTimeZone(timeZone);
+    spreadsheet.setSpreadsheetLocale(localization.spreadsheetLocale);
+  } else {
+    if (spreadsheet.getSpreadsheetTimeZone() !== timeZone) {
+      throw new Error(
+        'Existing non-empty spreadsheet time zone must match: ' + timeZone
+      );
+    }
+    if (spreadsheet.getSpreadsheetLocale() !==
+      localization.spreadsheetLocale) {
+      throw new Error(
+        'Existing non-empty spreadsheet locale must match: ' +
+          localization.spreadsheetLocale
+      );
+    }
+  }
   initializeInstallerSheets_(spreadsheet, automationConfig, created);
   return spreadsheet;
 }
@@ -439,14 +485,30 @@ function getInstallerSheetHeaders_(locale) {
 }
 
 function getInstallerLocalization_(locale) {
-  return locale === 'it' ?
-    getItalianLocalization_() : getEnglishLocalization_();
+  const localization = getLocalizationRegistry_()[locale];
+  if (!localization || !String(localization.spreadsheetLocale || '').trim()) {
+    throw new Error('Unsupported installer locale: ' + locale);
+  }
+  return localization;
 }
 
 function validateInstallerSheetHeaders_(sheet, locale) {
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn())
     .getDisplayValues()[0]
     .map(normalizeHeader_);
+  const seenHeaders = Object.create(null);
+  headers.forEach(function (header) {
+    if (!header) {
+      return;
+    }
+    if (seenHeaders[header]) {
+      throw new Error(
+        'Existing spreadsheet tab ' + sheet.getName() +
+          ' contains duplicate normalized header: ' + header
+      );
+    }
+    seenHeaders[header] = true;
+  });
   const localization = getInstallerLocalization_(locale);
   ['issueDate', 'supplier', 'identifier', 'sourceFile'].forEach(function (key) {
     const aliases = localization.headerAliases[key].map(normalizeHeader_);
@@ -465,7 +527,7 @@ function validateInstallerSheetHeaders_(sheet, locale) {
 function validateInstallerConfiguredSheets_() {
   const automationConfig = getAutomationConfig_();
   const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
-  const checkedSheets = {};
+  const checkedSheets = Object.create(null);
   automationConfig.canonical_supplies.forEach(function (supply) {
     const sheetName = automationConfig.sheet_by_supply[supply];
     const sheet = spreadsheet.getSheetByName(sheetName);

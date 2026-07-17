@@ -12,6 +12,7 @@ Each installation uses its own Google resources and private credentials.
 - [Installer behavior](#installer-behavior)
 - [Documentation](#documentation)
 - [Publishing](#publishing)
+- [License](#license)
 
 ## Architecture
 
@@ -24,14 +25,20 @@ flowchart LR
   scan --> policy
   policy --> gemini[Gemini extraction]
   gemini --> verify[Verify result]
-  verify --> drive[Archive PDF]
-  verify --> sheets[Update Sheet]
-  verify --> mail[Send report]
+  verify --> journal[Record mutation journal]
+  journal --> sheets[Update Sheet for invoices]
+  sheets --> drive[Rename and archive PDF]
+  journal --> drive
+  drive --> outbox[Persist report]
+  outbox --> mail[Send email]
 ```
 
 The event path processes only the direct-root PDF identified by the event. The
 daily scan is the safety net for missed events and expired subscriptions.
 Unchanged `NEEDS REVIEW` and `DUPLICATE` files are not sent to Gemini again.
+All processing entry points share one lock. Interrupted Drive and Sheet
+mutations are recovered from a per-file journal before pending reports are
+sent.
 
 ## Security boundaries
 
@@ -73,10 +80,10 @@ The installer:
 - enables only the runtime APIs required by the selected Gemini mode;
 - creates a spreadsheet when none is supplied;
 - installs the Drive policy, Script Properties, event transport, and triggers;
-- transfers a Gemini key through short-lived Secret Manager input, never CLI
-  arguments;
+- transfers the complete private bootstrap payload through a short-lived
+  Secret Manager version, passing only its resource name to Apps Script;
 - validates the final Pub/Sub and Apps Script state;
-- stores no API key in repository or installer state.
+- stores no private bootstrap data in repository or installer state.
 
 Google account controls that have no supported CLI are presented as one
 resumable browser handoff. Run `make install-resume-debug` for non-secret
@@ -107,3 +114,7 @@ configuration, and policy template; then run:
 ```bash
 make check
 ```
+
+## License
+
+Licensed under the [MIT License](LICENSE).

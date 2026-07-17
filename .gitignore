@@ -1,4 +1,8 @@
 .clasp.json
+.clasp.json.tmp*
+client_secret_*.json
+oauth-client*.json
 config.local.json
+config.local.json.tmp*
 node_modules/
 .installer/

@@ -16,6 +16,18 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
       recreating live resources.
     - Add adoption and conflict regression tests.
 
+- [ ] **Add an explicit installed-project update and reconcile mode**
+  - Assessment: resuming a completed installation retries local secret cleanup
+    but does not deploy newer source or repair remote drift automatically.
+  - Actions:
+    - Compare the checkout, Apps Script deployment, triggers, Script
+      Properties, Pub/Sub, and Workspace Events topology without changing them.
+    - Separate read-only verification from explicitly approved source update
+      and remote repair.
+    - Preserve resource ownership checks and current private bootstrap
+      boundaries.
+    - Add completed-state drift, update, repair, and rollback tests.
+
 - [ ] **Implement remote uninstall and teardown**
   - Assessment: `make install-reset` removes only private local state; remote
     cleanup remains manual to avoid destructive mistakes.
@@ -47,6 +59,15 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
     - Add repository secret and personal-data scanning.
     - Pin CI tool versions and cache only non-sensitive dependencies.
     - Document required branch-protection checks.
+
+- [ ] **Lock the installer CLI dependency graph**
+  - Assessment: the installer pins `clasp` to version `3.3.0`, but `npx`
+    resolves its transitive dependency graph outside this repository.
+  - Actions:
+    - Add a minimal package manifest and lockfile for the installer toolchain.
+    - Use the locked local binary after an integrity-checked installation.
+    - Preserve the current preflight error and CLI-first remediation guidance.
+    - Add a clean-clone reproducibility test.
 
 - [ ] **Generate private configuration interactively**
   - Assessment: the installer creates `config.local.json`, but users must still

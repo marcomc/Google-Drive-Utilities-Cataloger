@@ -10,23 +10,59 @@ function runDailyUtilitiesCataloging() {
  */
 function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
-  const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-  const file = DriveApp.getFileById(fileId);
+  return withCatalogProcessingLock_('manual', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    recoverPendingMutations_(rootFolder);
+    flushPendingReports_();
+    const file = DriveApp.getFileById(fileId);
 
-  if (!isDirectIntakePdf_(file, rootFolder)) {
-    throw new Error('The specified file is not a PDF located directly in the intake folder.');
-  }
+    if (hasMutationJournal_(fileId)) {
+      throw new Error(
+        'The specified file has an unresolved mutation journal; review it first.'
+      );
+    }
+    if (!isDirectIntakePdf_(file, rootFolder)) {
+      throw new Error('The specified file is not a PDF located directly in the intake folder.');
+    }
 
-  const driveAgentsPolicy = loadDriveAgentsPolicy_(rootFolder);
-  logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
-  const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
-  logCatalogResult_(file, result);
-  sendReportEmail_([result]);
-  return result;
+    const driveAgentsPolicy = loadDriveAgentsPolicy_(rootFolder);
+    logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
+    const state = loadIntakeFileState_();
+    markIntakeFileProcessing_(state, file);
+    saveIntakeFileState_(state);
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+    logCatalogResult_(file, result);
+    persistCatalogResult_(state, file, rootFolder, result);
+    finalizeCatalogResults_(state, [result]);
+    return result;
+  });
 }
 
 function runUtilitiesCataloging_(triggerSource) {
   assertCatalogConfiguration_();
+  return withCatalogProcessingLock_(triggerSource, function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    const recoveredResults = recoverPendingMutations_(rootFolder);
+    flushPendingReports_();
+    const files = listDirectIntakePdfs_(rootFolder);
+    logCatalogEvent_('catalog-scan-completed', {
+      triggerSource: triggerSource,
+      intakePdfCount: files.length
+    });
+    const batch = processEligibleIntakeFiles_(files, rootFolder, triggerSource);
+    finalizeCatalogResults_(batch.state, batch.results);
+    const allResults = recoveredResults.concat(batch.results);
+
+    logCatalogEvent_('catalog-run-completed', {
+      triggerSource: triggerSource,
+      resultCount: allResults.length,
+      statuses: allResults.map(function (result) { return result.status; }).join(',')
+    });
+    return { triggerSource: triggerSource, results: allResults };
+  });
+}
+
+function withCatalogProcessingLock_(triggerSource, callback) {
   const lock = LockService.getScriptLock();
   logCatalogEvent_('catalog-run-start', { triggerSource: triggerSource });
 
@@ -40,24 +76,7 @@ function runUtilitiesCataloging_(triggerSource) {
   }
 
   try {
-    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-    const files = listDirectIntakePdfs_(rootFolder);
-    logCatalogEvent_('catalog-scan-completed', {
-      triggerSource: triggerSource,
-      intakePdfCount: files.length
-    });
-    const results = processEligibleIntakeFiles_(files, rootFolder, triggerSource);
-
-    if (results.length > 0) {
-      sendReportEmail_(results);
-    }
-
-    logCatalogEvent_('catalog-run-completed', {
-      triggerSource: triggerSource,
-      resultCount: results.length,
-      statuses: results.map(function (result) { return result.status; }).join(',')
-    });
-    return { triggerSource: triggerSource, results: results };
+    return callback();
   } finally {
     lock.releaseLock();
   }
@@ -71,6 +90,9 @@ function runUtilitiesCataloging_(triggerSource) {
 function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
   const startedAt = Date.now();
   const state = loadIntakeFileState_();
+  if (triggerSource === 'daily') {
+    pruneIntakeFileState_(state, files);
+  }
   const results = [];
   const eligible = files.filter(function (file) {
     if (shouldProcessIntakeFile_(file, state, triggerSource)) {
@@ -89,31 +111,40 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
       const result = buildErrorResult_(file, 'Execution time is nearly exhausted.',
         'The document remains in intake and will be retried by the next daily run.');
       results.push(result);
-      recordIntakeFileOutcome_(state, file, result);
+      persistCatalogResult_(state, file, rootFolder, result);
       logCatalogResult_(file, result);
       return;
     }
 
     logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
+    markIntakeFileProcessing_(state, file);
+    saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
     results.push(result);
-    recordIntakeFileOutcome_(state, file, result);
+    persistCatalogResult_(state, file, rootFolder, result);
     logCatalogResult_(file, result);
   });
 
-  saveIntakeFileState_(state);
-  return results;
+  return { results: results, state: state };
 }
 
 function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
   const originalName = file.getName();
-  const state = { renamed: false, moved: false, imported: false };
+  const state = {
+    renamed: false,
+    moved: false,
+    imported: false,
+    sheetRowCreated: false,
+    sheetLink: '',
+    mutationJournalStarted: false,
+    createdFolderPath: ''
+  };
 
   try {
     if (file.getSize() > CONFIG.MAX_PDF_BYTES) {
       return buildVerifyResult_(file, null,
-        'PDF exceeds the Gemini API size limit.',
-        'Reduce or reacquire the PDF below 50 MB.');
+        'PDF exceeds the safe inline request size.',
+        'Reduce or reacquire the PDF below 35 MB.');
     }
 
     const binaryHash = sha256ForFile_(file);
@@ -123,8 +154,17 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     if (!validation.valid) {
       return buildVerifyResult_(file, extracted, validation.problem, validation.action);
     }
+    const sheetValueValidation = validateTargetSheetValues_(extracted);
+    if (!sheetValueValidation.valid) {
+      return buildVerifyResult_(
+        file,
+        extracted,
+        sheetValueValidation.problem,
+        sheetValueValidation.action
+      );
+    }
 
-    const duplicate = findDuplicate_(extracted, binaryHash);
+    const duplicate = findDuplicate_(extracted, binaryHash, file.getId());
     if (duplicate.status === 'duplicate') {
       return buildDuplicateResult_(file, extracted, duplicate);
     }
@@ -133,43 +173,127 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     }
 
     const assignedName = buildAssignedName_(extracted);
+    saveMutationJournal_(file.getId(), {
+      originalName: originalName,
+      assignedName: assignedName,
+      stage: 'planning',
+      updatedAt: Date.now()
+    });
+    state.mutationJournalStarted = true;
     const destination = getDestinationFolder_(rootFolder, extracted);
-    const collision = getDestinationCollision_(destination, assignedName, binaryHash);
+    state.createdFolderPath = (destination.createdFolders || []).join(', ');
+    updateMutationJournal_(file.getId(), {
+      destinationPath: destination.path,
+      createdFolderPath: state.createdFolderPath
+    });
+    const collision = getDestinationCollision_(
+      destination, assignedName, binaryHash, file.getId()
+    );
     if (collision.status === 'duplicate') {
-      return buildDuplicateResult_(file, extracted, collision);
+      const result = buildDuplicateResult_(file, extracted, collision);
+      addRetainedFolderAction_(result, state.createdFolderPath);
+      return attachMutationJournal_(
+        result,
+        file.getId()
+      );
     }
     if (collision.status === 'conflict') {
-      return buildVerifyResult_(file, extracted,
+      const result = buildVerifyResult_(file, extracted,
         'A file with the destination name already exists but is not a confirmed duplicate.',
         'Manually compare the two PDFs before renaming or moving either file.');
+      addRetainedFolderAction_(result, state.createdFolderPath);
+      return attachMutationJournal_(
+        result,
+        file.getId()
+      );
     }
-
-    file.setName(assignedName);
-    state.renamed = true;
-    file.moveTo(destination.folder);
-    state.moved = true;
-    verifyMovedFile_(file, destination.folder, assignedName);
 
     let sheetLink = '';
     if (extracted.address_type === 'import' && extracted.document_type === 'Invoice') {
-      sheetLink = importUtilityInvoiceToSheet_(file, extracted);
+      const sheetImport = importUtilityInvoiceToSheet_(file, extracted);
+      sheetLink = sheetImport.link;
+      state.sheetLink = sheetImport.link;
       state.imported = true;
+      state.sheetRowCreated = sheetImport.created;
+      state.sheet = sheetImport.sheet;
+      state.sheetRow = sheetImport.row;
     }
 
-    return buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink);
+    updateMutationJournal_(file.getId(), { stage: 'renaming' });
+    file.setName(assignedName);
+    state.renamed = true;
+    updateMutationJournal_(file.getId(), { stage: 'renamed' });
+    updateMutationJournal_(file.getId(), { stage: 'moving' });
+    file.moveTo(destination.folder);
+    state.moved = true;
+    updateMutationJournal_(file.getId(), { stage: 'moved' });
+    verifyMovedFile_(file, destination.folder, assignedName);
+    if (state.imported) {
+      refreshImportedSourceLink_(state.sheet, state.sheetRow, file);
+      verifyImportedRow_(state.sheet, state.sheetRow,
+        getSheetLayout_(state.sheet), file, extracted);
+    }
+
+    return attachMutationJournal_(
+      buildSuccessResult_(
+        file, originalName, assignedName, destination, extracted, sheetLink
+      ),
+      file.getId()
+    );
   } catch (error) {
+    rollbackProcessingMutations_(file, rootFolder, originalName, state);
+    if (error.mutationRollbackIncomplete) {
+      state.rollbackErrors.push(
+        'A spreadsheet row may require journal recovery.'
+      );
+    }
     const errorMessage = describeError_(error);
-    console.error('Catalog file processing failed for file ID ' + file.getId() + ': ' +
-      errorMessage);
+    const errorCategory = classifyCatalogErrorForLog_(error);
+    console.error('Catalog file processing failed for file ID ' + file.getId() +
+      ' (' + errorCategory + ').');
     logCatalogEvent_('catalog-file-processing-error', {
       fileId: file.getId(),
-      fileName: originalName,
       errorType: error.name || 'Error',
-      errorMessage: errorMessage
+      errorCategory: errorCategory
     });
-    return buildErrorResult_(file, errorMessage,
-      'No further automatic changes were attempted. Verify the file state using the supplied link.',
-      originalName, state);
+    const errorResult = buildErrorResult_(file, errorMessage,
+        'No further automatic changes were attempted. Verify the file state using the supplied link.',
+        originalName, state);
+    errorResult.keepMutationJournal = state.rollbackErrors.length > 0;
+    return attachMutationJournal_(
+      errorResult,
+      state.mutationJournalStarted ? file.getId() : ''
+    );
+  }
+}
+
+function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
+  state.rollbackErrors = [];
+  if (state.moved) {
+    try {
+      file.moveTo(rootFolder);
+      state.moved = false;
+    } catch (error) {
+      state.rollbackErrors.push('Drive move rollback failed: ' + describeError_(error));
+    }
+  }
+  if (state.renamed) {
+    try {
+      file.setName(originalName);
+      state.renamed = false;
+    } catch (error) {
+      state.rollbackErrors.push('Drive rename rollback failed: ' + describeError_(error));
+    }
+  }
+  if (state.sheetRowCreated) {
+    try {
+      rollbackImportedRow_(state.sheet, state.sheetRow, file);
+      state.imported = false;
+      state.sheetRowCreated = false;
+      state.sheetLink = '';
+    } catch (error) {
+      state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
+    }
   }
 }
 
@@ -188,7 +312,8 @@ function listDirectIntakePdfs_(rootFolder) {
 }
 
 function isDirectIntakePdf_(file, rootFolder) {
-  if (file.getMimeType() !== MimeType.PDF || file.isTrashed()) {
+  if (file.getMimeType() !== MimeType.PDF || file.isTrashed() ||
+    String(file.getName() || '').charAt(0) === '.') {
     return false;
   }
 
@@ -224,7 +349,7 @@ function loadDriveAgentsPolicy_(rootFolder) {
 
   const policyFile = matches[0];
   if (policyFile.getSize() > CONFIG.MAX_AGENTS_FILE_BYTES) {
-    throw new Error(CONFIG.DRIVE_AGENTS_FILE_NAME + ' exceeds the 100 KiB policy limit.');
+    throw new Error(CONFIG.DRIVE_AGENTS_FILE_NAME + ' exceeds the 40 KiB policy limit.');
   }
 
   const policy = policyFile.getBlob().getDataAsString('UTF-8').trim();
@@ -236,21 +361,23 @@ function loadDriveAgentsPolicy_(rootFolder) {
 
 function extractUtilityData_(file, driveAgentsPolicy) {
   const blob = file.getBlob();
-  const headers = getAllSheetHeaders_();
-  const response = callGeminiForPdf_(blob, headers, driveAgentsPolicy, file);
+  const headersBySupply = getSheetHeadersBySupply_();
+  const response = callGeminiForPdf_(blob, headersBySupply, driveAgentsPolicy, file);
   const extracted = parseGeminiJson_(response);
+  validateRawExtractionShape_(extracted);
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
   return normalizeExtraction_(extracted);
 }
 
-function callGeminiForPdf_(blob, sheetHeaders, driveAgentsPolicy, file) {
-  return callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file,
+function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file) {
+  return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
+    driveAgentsPolicy, file,
     getEffectiveGeminiBackend_(), '');
 }
 
-function callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file, backend,
-  fallbackReason) {
+function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
+  driveAgentsPolicy, file, backend, fallbackReason) {
   const isVertexAi = backend === 'vertex_ai';
   const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
   const pdfPart = isVertexAi ? {
@@ -268,7 +395,12 @@ function callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, fil
     contents: [{
       role: 'user',
       parts: [
-        { text: buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) },
+        {
+          text: buildExtractionPrompt_(
+            sheetHeadersBySupply,
+            driveAgentsPolicy
+          )
+        },
         pdfPart
       ]
     }],
@@ -297,8 +429,23 @@ function callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, fil
     };
     if (isVertexAi) {
       requestOptions.headers = { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() };
+    } else {
+      requestOptions.headers = {
+        'x-goog-api-key': getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY)
+      };
     }
-    response = UrlFetchApp.fetch(endpoint, requestOptions);
+    try {
+      response = UrlFetchApp.fetch(endpoint, requestOptions);
+    } catch (error) {
+      if (attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
+        throw new Error('Gemini network request failed after retry: ' +
+          describeError_(error));
+      }
+      Utilities.sleep(
+        CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1)
+      );
+      continue;
+    }
     const code = response.getResponseCode();
     const responseLog = Object.assign(describeFileForLog_(file), {
       attempt: attempt,
@@ -314,8 +461,14 @@ function callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, fil
     if (backend === 'gemini_api' && isAutomaticVertexFallbackEnabled_() &&
       isGeminiFreeTierDailyQuotaExhausted_(response)) {
       activateTemporaryVertexFallback_(file);
-      return callGeminiForPdfWithBackend_(blob, sheetHeaders, driveAgentsPolicy, file,
-        'vertex_ai', 'free-tier-daily-quota-exhausted');
+      return callGeminiForPdfWithBackend_(
+        blob,
+        sheetHeadersBySupply,
+        driveAgentsPolicy,
+        file,
+        'vertex_ai',
+        'free-tier-daily-quota-exhausted'
+      );
     }
     if (!isTransientGeminiResponse_(code) || attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
       throw new Error(describeGeminiHttpError_(response));
@@ -402,8 +555,7 @@ function roundGeminiCostUsd_(value) {
 
 function getGeminiApiEndpoint_() {
   return 'https://generativelanguage.googleapis.com/v1beta/models/' +
-    encodeURIComponent(getGeminiModel_()) + ':generateContent?key=' +
-    encodeURIComponent(getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY));
+    encodeURIComponent(getGeminiModel_()) + ':generateContent';
 }
 
 function getVertexAiEndpoint_() {
@@ -414,7 +566,7 @@ function getVertexAiEndpoint_() {
 }
 
 function isTransientGeminiResponse_(statusCode) {
-  return [500, 502, 503, 504].indexOf(statusCode) >= 0;
+  return [408, 429, 500, 502, 503, 504].indexOf(statusCode) >= 0;
 }
 
 function isGeminiFreeTierDailyQuotaExhausted_(response) {
@@ -425,19 +577,12 @@ function isGeminiFreeTierDailyQuotaExhausted_(response) {
 }
 
 function activateTemporaryVertexFallback_(file) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(5000);
-  let effectiveUntil;
-  try {
-    const properties = PropertiesService.getScriptProperties();
-    const propertyKey = CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL;
-    const fallbackUntil = Date.now() + CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS;
-    const existingUntil = Number(properties.getProperty(propertyKey)) || 0;
-    effectiveUntil = Math.max(existingUntil, fallbackUntil);
-    properties.setProperty(propertyKey, String(effectiveUntil));
-  } finally {
-    lock.releaseLock();
-  }
+  const properties = PropertiesService.getScriptProperties();
+  const propertyKey = CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL;
+  const fallbackUntil = Date.now() + CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS;
+  const existingUntil = Number(properties.getProperty(propertyKey)) || 0;
+  const effectiveUntil = Math.max(existingUntil, fallbackUntil);
+  properties.setProperty(propertyKey, String(effectiveUntil));
   logCatalogEvent_('gemini-vertex-fallback-activated', Object.assign(describeFileForLog_(file), {
     reason: 'free-tier-daily-quota-exhausted',
     cooldownMinutes: CONFIG.GEMINI_VERTEX_FALLBACK_COOLDOWN_MS / 60000,
@@ -463,7 +608,7 @@ function describeGeminiHttpError_(response) {
   return 'Gemini API HTTP ' + statusCode + ': ' + message;
 }
 
-function buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) {
+function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
   const automationConfig = getAutomationConfig_();
   const localization = getLocalization_();
   return [
@@ -485,7 +630,7 @@ function buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) {
     '  "address_type": "import|archive_only|unknown",',
     '  "address_evidence": "printed service address or null",',
     '  "issue_date": "YYYY-MM-DD or null",',
-    '  "identifier": "invoice or contract number or null",',
+    '  "identifier": "invoice number, optional contract/report identifier, or null",',
     '  "contract_object": "at most four words or null",',
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
@@ -509,8 +654,14 @@ function buildExtractionPrompt_(sheetHeaders, driveAgentsPolicy) {
     'The reference year and month are the end of the last billed period.',
     'Use these canonical suppliers when recognized: ' +
       automationConfig.canonical_suppliers.join(', ') + '.',
-    'Use exactly one existing sheet header for sheet_values; do not send formula columns:',
-    JSON.stringify(sheetHeaders)
+    'Use one of these canonical supplies: ' +
+      automationConfig.canonical_supplies.join(', ') + '.',
+    'Apply these supply aliases: ' +
+      JSON.stringify(automationConfig.supply_aliases) + '.',
+    'Apply these supplier aliases: ' +
+      JSON.stringify(automationConfig.supplier_aliases) + '.',
+    'For an Invoice, first resolve supply_type, then use sheet_values headers only from the matching canonical supply entry below. Do not use headers from another supply or formula columns:',
+    JSON.stringify(sheetHeadersBySupply)
   ].join('\n');
 }
 
@@ -520,6 +671,62 @@ function parseGeminiJson_(text) {
     return JSON.parse(cleaned);
   } catch (error) {
     throw new Error('Invalid Gemini JSON: ' + error.message);
+  }
+}
+
+function validateRawExtractionShape_(extracted) {
+  if (!extracted || typeof extracted !== 'object' || Array.isArray(extracted)) {
+    throw new Error('Gemini extraction must be a JSON object.');
+  }
+  [
+    'document_type',
+    'supplier',
+    'supply_type',
+    'address_type',
+    'address_evidence',
+    'issue_date',
+    'identifier',
+    'contract_object',
+    'reference_month',
+    'frequency',
+    'period_start',
+    'period_end',
+    'consumption_description'
+  ].forEach(function (field) {
+    const value = extracted[field];
+    if (value !== null && value !== undefined && typeof value !== 'string') {
+      throw new Error('Gemini extraction field has an invalid type: ' + field);
+    }
+  });
+  ['cost_consumption', 'cost_non_consumption', 'vat', 'total'].forEach(
+    function (field) {
+      const value = extracted[field];
+      if (value !== null && value !== undefined &&
+        (typeof value !== 'number' || !isFinite(value))) {
+        throw new Error('Gemini extraction field has an invalid type: ' + field);
+      }
+    }
+  );
+  if (extracted.reference_year !== null &&
+    extracted.reference_year !== undefined &&
+    (typeof extracted.reference_year !== 'number' ||
+      !Number.isInteger(extracted.reference_year))) {
+    throw new Error('Gemini extraction field has an invalid type: reference_year');
+  }
+  ['issue_date', 'period_start', 'period_end'].forEach(function (field) {
+    const value = extracted[field];
+    if (value && !isValidIsoDate_(value)) {
+      throw new Error('Gemini extraction contains an invalid date: ' + field);
+    }
+  });
+  if (!Array.isArray(extracted.problems) ||
+    extracted.problems.some(function (problem) {
+      return typeof problem !== 'string';
+    })) {
+    throw new Error('Gemini extraction problems must be an array of strings.');
+  }
+  if (!Array.isArray(extracted.sheet_values)) {
+    throw new Error('Gemini extraction sheet_values must be an array.');
   }
 }
 
@@ -533,6 +740,9 @@ function normalizeExtraction_(extracted) {
   normalized.identifier = String(normalized.identifier || '').trim();
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
   normalized.reference_month = normalized.reference_month ? String(normalized.reference_month).padStart(2, '0') : null;
+  normalized.period_start = normalizeIsoDate_(normalized.period_start);
+  normalized.period_end = normalizeIsoDate_(normalized.period_end);
+  normalized.contract_object = String(normalized.contract_object || '').trim();
   normalized.cost_consumption = normalizeMoney_(normalized.cost_consumption);
   normalized.cost_non_consumption = normalizeMoney_(normalized.cost_non_consumption);
   normalized.vat = normalizeMoney_(normalized.vat);
@@ -552,18 +762,46 @@ function validateExtraction_(extracted) {
     return invalidExtraction_('Document type cannot be identified.',
       'Verify whether the PDF is an invoice, contract, or report.');
   }
-  if (!extracted.supplier || !extracted.supply_type || !extracted.issue_date || !extracted.identifier) {
-    return invalidExtraction_('Supplier, supply, date, or identifier is uncertain.',
+  if (!extracted.supplier || !extracted.supply_type || !extracted.issue_date) {
+    return invalidExtraction_('Supplier, supply, or date is uncertain.',
       'Manually verify the required data in the PDF.');
+  }
+  if (!normalizeCellText_(extracted.supplier) ||
+    !sanitizeFileNamePart_(extracted.supplier)) {
+    return invalidExtraction_('Supplier cannot be converted into a safe identity.',
+      'Manually verify the supplier name in the PDF.');
+  }
+  if (!isValidIsoDate_(extracted.issue_date) ||
+    (extracted.period_start && !isValidIsoDate_(extracted.period_start)) ||
+    (extracted.period_end && !isValidIsoDate_(extracted.period_end))) {
+    return invalidExtraction_('One or more document dates are not valid calendar dates.',
+      'Verify the issue date and billing period in the PDF.');
   }
   if (['import', 'archive_only'].indexOf(extracted.address_type) === -1) {
     return invalidExtraction_('Service address is absent, ambiguous, or does not match a configured rule.',
       'Verify the service address in the PDF.');
   }
   if (extracted.document_type === 'Invoice') {
-    if (!extracted.reference_year || !/^\d{2}$/.test(extracted.reference_month || '')) {
+    if (!extracted.identifier ||
+      !sanitizeFileNamePart_(extracted.identifier)) {
+      return invalidExtraction_('Invoice identifier is missing.',
+        'Verify the invoice number in the PDF.');
+    }
+    const referenceMonth = Number(extracted.reference_month);
+    if (!Number.isInteger(extracted.reference_year) ||
+      extracted.reference_year < 1900 || extracted.reference_year > 2200 ||
+      !/^\d{2}$/.test(extracted.reference_month || '') ||
+      referenceMonth < 1 || referenceMonth > 12) {
       return invalidExtraction_('Reference year or month is missing.',
         'Verify the end of the last billed period.');
+    }
+    if (extracted.period_end &&
+      (Number(extracted.period_end.slice(0, 4)) !== extracted.reference_year ||
+        extracted.period_end.slice(5, 7) !== extracted.reference_month)) {
+      return invalidExtraction_(
+        'Reference year and month do not match the end of the billed period.',
+        'Verify the final billing-period date.'
+      );
     }
     if ([extracted.cost_consumption, extracted.cost_non_consumption, extracted.vat, extracted.total]
       .some(function (value) { return value === null; })) {
@@ -576,6 +814,24 @@ function validateExtraction_(extracted) {
         'Verify the cost, VAT, and total breakdown in the PDF.');
     }
   }
+  if (extracted.document_type === 'Contract' &&
+    !sanitizeContractObject_(
+      extracted.contract_object || extracted.identifier
+    )) {
+    return invalidExtraction_('Contract identifier or object is missing.',
+      'Verify the contract number or concise subject in the PDF.');
+  }
+  const invalidSheetValue = extracted.sheet_values.some(function (entry) {
+    if (!entry || typeof entry.header !== 'string' || !entry.header.trim()) {
+      return true;
+    }
+    const value = entry.value;
+    return value !== null && ['string', 'number', 'boolean'].indexOf(typeof value) < 0;
+  });
+  if (invalidSheetValue) {
+    return invalidExtraction_('Gemini returned an invalid spreadsheet value.',
+      'Retry the document or enter the affected value manually.');
+  }
   return { valid: true };
 }
 
@@ -583,11 +839,58 @@ function invalidExtraction_(problem, action) {
   return { valid: false, problem: problem, action: action };
 }
 
-function findDuplicate_(extracted, binaryHash) {
-  const sheetDuplicate = findSpreadsheetDuplicate_(extracted);
-  if (!sheetDuplicate) {
+function validateTargetSheetValues_(extracted) {
+  if (extracted.document_type !== 'Invoice') {
+    return { valid: true };
+  }
+  const automationConfig = getAutomationConfig_();
+  const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+  const sheetName = automationConfig.sheet_by_supply[extracted.supply_type];
+  const sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    return invalidExtraction_(
+      'The configured target spreadsheet tab does not exist.',
+      'Create or repair the configured spreadsheet tab.'
+    );
+  }
+  const layout = getSheetLayout_(sheet);
+  const firstDataRow = layout.headerRow + 1;
+  const formulas = firstDataRow <= sheet.getLastRow() ?
+    sheet.getRange(firstDataRow, 1, 1, layout.headers.length).getFormulas()[0] :
+    layout.headers.map(function () { return ''; });
+  const invalid = extracted.sheet_values.filter(function (entry) {
+    const normalized = normalizeHeader_(entry.header);
+    const column = layout.lookup[normalized];
+    return !column || Boolean(formulas[column - 1]);
+  });
+  if (invalid.length > 0) {
+    return invalidExtraction_(
+      'Gemini returned values for headers unavailable in the target sheet.',
+      'Review the target tab headers and formula columns.'
+    );
+  }
+  return { valid: true };
+}
+
+function findDuplicate_(extracted, binaryHash, currentFileId) {
+  if (extracted.document_type !== 'Invoice') {
     return { status: 'none' };
   }
+  const sheetDuplicates = findSpreadsheetDuplicates_(extracted).filter(function (match) {
+    const sourceFile = getFileFromSourceCell_(match.cell);
+    return !sourceFile || sourceFile.getId() !== currentFileId;
+  });
+  if (sheetDuplicates.length === 0) {
+    return { status: 'none' };
+  }
+  if (sheetDuplicates.length > 1) {
+    return {
+      status: 'conflict',
+      problem: 'Multiple spreadsheet rows match the same invoice identity.',
+      action: 'Resolve the duplicate spreadsheet rows before continuing.'
+    };
+  }
+  const sheetDuplicate = sheetDuplicates[0];
 
   const storedFile = getFileFromSourceCell_(sheetDuplicate.cell);
   if (!storedFile) {
@@ -608,7 +911,7 @@ function findDuplicate_(extracted, binaryHash) {
   };
 }
 
-function findSpreadsheetDuplicate_(extracted) {
+function findSpreadsheetDuplicates_(extracted) {
   const automationConfig = getAutomationConfig_();
   const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
   const sheetName = automationConfig.sheet_by_supply[extracted.supply_type];
@@ -619,7 +922,7 @@ function findSpreadsheetDuplicate_(extracted) {
   const layout = getSheetLayout_(sheet);
   const dataRows = Math.max(0, sheet.getLastRow() - layout.headerRow);
   if (dataRows === 0) {
-    return null;
+    return [];
   }
   const values = sheet.getRange(layout.headerRow + 1, 1, dataRows, layout.headers.length).getValues();
   const dateColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('issueDate'));
@@ -631,19 +934,20 @@ function findSpreadsheetDuplicate_(extracted) {
     throw new Error('Required headers were not found in sheet ' + sheetName + '.');
   }
 
+  const matches = [];
   for (let index = 0; index < values.length; index += 1) {
     const row = values[index];
     if (normalizeCellText_(row[supplierColumn - 1]) === normalizeCellText_(extracted.supplier) &&
       normalizeCellText_(row[identifierColumn - 1]) === normalizeCellText_(extracted.identifier) &&
       dateMatches_(row[dateColumn - 1], extracted.issue_date, spreadsheet.getSpreadsheetTimeZone())) {
-      return {
+      matches.push({
         sheet: sheet,
         row: layout.headerRow + 1 + index,
         cell: sheet.getRange(layout.headerRow + 1 + index, sourceColumn)
-      };
+      });
     }
   }
-  return null;
+  return matches;
 }
 
 function getFileFromSourceCell_(cell) {
@@ -678,55 +982,110 @@ function getDestinationFolder_(rootFolder, extracted) {
     const path = configuredPath.replace('{year}', year);
     return { folder: getRequiredFolderByPath_(rootFolder, path), path: path };
   }
+  if (automationConfig.canonical_suppliers.indexOf(extracted.supplier) >= 0) {
+    throw new Error(
+      'No destination template is configured for this known supplier and supply.'
+    );
+  }
 
+  assertSafePathSegment_(extracted.supply_type, 'supply');
+  assertSafePathSegment_(extracted.supplier, 'supplier');
   const path = extracted.supply_type + '/' + extracted.supplier + '/' + year;
-  return { folder: getOrCreateFolderByPath_(rootFolder, path), path: path, newSupplier: true };
+  const ensured = ensureFolderPath_(rootFolder, path);
+  return {
+    folder: ensured.folder,
+    path: path,
+    newSupplier: true,
+    createdFolders: ensured.createdFolders
+  };
 }
 
 function getRequiredFolderByPath_(rootFolder, path) {
   let current = rootFolder;
   path.split('/').forEach(function (part) {
-    const folders = current.getFoldersByName(part);
-    if (!folders.hasNext()) {
-      throw new Error('Expected destination folder is missing: ' + path);
-    }
-    current = folders.next();
+    current = getUniqueChildFolder_(current, part, false, path);
   });
   return current;
+}
+
+function getUniqueChildFolder_(parent, name, createIfMissing, fullPath, onCreate) {
+  assertSafePathSegment_(name, 'folder');
+  const folders = parent.getFoldersByName(name);
+  const matches = [];
+  while (folders.hasNext()) {
+    matches.push(folders.next());
+  }
+  if (matches.length === 0) {
+    if (createIfMissing) {
+      const created = parent.createFolder(name);
+      if (onCreate) {
+        onCreate(created);
+      }
+      return created;
+    }
+    throw new Error('Expected destination folder is missing: ' + (fullPath || name));
+  }
+  if (matches.length > 1) {
+    throw new Error('Multiple destination folders match: ' + (fullPath || name));
+  }
+  return matches[0];
 }
 
 function getOrCreateFolderByPath_(rootFolder, path) {
-  let current = rootFolder;
-  path.split('/').forEach(function (part) {
-    const folders = current.getFoldersByName(part);
-    current = folders.hasNext() ? folders.next() : current.createFolder(part);
-  });
-  return current;
+  return ensureFolderPath_(rootFolder, path).folder;
 }
 
-function getDestinationCollision_(destination, name, sourceHash) {
+function ensureFolderPath_(rootFolder, path) {
+  let current = rootFolder;
+  const createdFolders = [];
+  const parts = path.split('/');
+  parts.forEach(function (part, index) {
+    const currentPath = parts.slice(0, index + 1).join('/');
+    current = getUniqueChildFolder_(
+      current,
+      part,
+      true,
+      path,
+      function () { createdFolders.push(currentPath); }
+    );
+  });
+  return { folder: current, createdFolders: createdFolders };
+}
+
+function getDestinationCollision_(destination, name, sourceHash, currentFileId) {
   const files = destination.folder.getFilesByName(name);
-  if (!files.hasNext()) {
-    return { status: 'none' };
+  let duplicate = null;
+  while (files.hasNext()) {
+    const existing = files.next();
+    if (existing.getId() === currentFileId) {
+      continue;
+    }
+    if (sha256ForFile_(existing) !== sourceHash) {
+      return { status: 'conflict', file: existing };
+    }
+    duplicate = existing;
   }
-  const existing = files.next();
-  return sha256ForFile_(existing) === sourceHash ?
-    { status: 'duplicate', file: existing } : { status: 'conflict', file: existing };
+  return duplicate ?
+    { status: 'duplicate', file: duplicate } : { status: 'none' };
 }
 
 function buildAssignedName_(extracted) {
   const date = extracted.issue_date.replace(/-/g, '');
   const type = extracted.document_type;
   const identifier = sanitizeFileNamePart_(extracted.identifier);
-  const documentLabel = getLocalization_().documentLabels[type] || type;
+  const supplier = sanitizeFileNamePart_(extracted.supplier);
+  const supplyType = sanitizeFileNamePart_(extracted.supply_type);
+  const documentLabel = sanitizeFileNamePart_(
+    getLocalization_().documentLabels[type] || type
+  );
   if (type === 'Invoice') {
-    return [date, extracted.supplier, documentLabel, extracted.supply_type, identifier].join(' - ') + '.pdf';
+    return [date, supplier, documentLabel, supplyType, identifier].join(' - ') + '.pdf';
   }
   if (type === 'Contract') {
     const object = sanitizeContractObject_(extracted.contract_object || identifier);
-    return [date, extracted.supplier, documentLabel, extracted.supply_type, object].join(' - ') + '.pdf';
+    return [date, supplier, documentLabel, supplyType, object].join(' - ') + '.pdf';
   }
-  return [date, extracted.supplier, documentLabel, extracted.supply_type].join(' - ') + '.pdf';
+  return [date, supplier, documentLabel, supplyType].join(' - ') + '.pdf';
 }
 
 function verifyMovedFile_(file, destinationFolder, assignedName) {
@@ -755,12 +1114,103 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
   const layout = getSheetLayout_(sheet);
+  const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
+  if (existingRow) {
+    updateMutationJournal_(file.getId(), {
+      stage: 'sheet-existing',
+      sheetName: sheetName,
+      sheetRow: existingRow,
+      sheetRowCreated: false,
+      sheetRowPreexisting: true
+    });
+    verifyImportedRow_(sheet, existingRow, layout, file, extracted);
+    return {
+      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + existingRow,
+      sheet: sheet,
+      row: existingRow,
+      created: false
+    };
+  }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
+  updateMutationJournal_(file.getId(), {
+    stage: 'sheet-insert-planned',
+    sheetName: sheetName,
+    sheetRow: targetRow,
+    sheetRowCreated: false,
+    sheetRowPreexisting: false
+  });
   insertBlankRowAt_(sheet, targetRow);
-  copyRowStyleAndFormulas_(sheet, targetRow, layout.headers.length);
-  writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
-  verifyImportedRow_(sheet, targetRow, layout, file, extracted);
-  return spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow;
+  try {
+    copyRowStyleAndFormulas_(sheet, targetRow, layout);
+    refreshImportedSourceLink_(sheet, targetRow, file);
+    updateMutationJournal_(file.getId(), {
+      stage: 'sheet-marker-written',
+      sheetRowCreated: true
+    });
+    writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
+    verifyImportedRow_(sheet, targetRow, layout, file, extracted);
+    updateMutationJournal_(file.getId(), { stage: 'sheet-written' });
+  } catch (error) {
+    try {
+      sheet.deleteRow(targetRow);
+    } catch (rollbackError) {
+      updateMutationJournal_(file.getId(), { stage: 'sheet-rollback-failed' });
+      error.mutationRollbackIncomplete = true;
+      error.message += ' Spreadsheet rollback also failed: ' +
+        describeError_(rollbackError);
+    }
+    throw error;
+  }
+  return {
+    link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
+    sheet: sheet,
+    row: targetRow,
+    created: true
+  };
+}
+
+function refreshImportedSourceLink_(sheet, row, file) {
+  const layout = getSheetLayout_(sheet);
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+  if (!sourceColumn) {
+    throw new Error('Source file column was not found.');
+  }
+  sheet.getRange(row, sourceColumn).setRichTextValue(
+    SpreadsheetApp.newRichTextValue()
+      .setText(buildDrivePathLabel_(file))
+      .setLinkUrl(file.getUrl())
+      .build()
+  );
+}
+
+function findSpreadsheetRowBySourceFile_(sheet, layout, fileId) {
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+  const dataRows = Math.max(0, sheet.getLastRow() - layout.headerRow);
+  if (!sourceColumn || dataRows === 0) {
+    return 0;
+  }
+  for (let offset = 0; offset < dataRows; offset += 1) {
+    const row = layout.headerRow + 1 + offset;
+    const sourceFile = getFileFromSourceCell_(sheet.getRange(row, sourceColumn));
+    if (sourceFile && sourceFile.getId() === fileId) {
+      return row;
+    }
+  }
+  return 0;
+}
+
+function rollbackImportedRow_(sheet, row, file) {
+  if (!sheet || !row) {
+    return;
+  }
+  const layout = getSheetLayout_(sheet);
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+  const sourceFile = sourceColumn ?
+    getFileFromSourceCell_(sheet.getRange(row, sourceColumn)) : null;
+  if (!sourceFile || sourceFile.getId() !== file.getId()) {
+    throw new Error('Refusing to delete a spreadsheet row whose source file changed.');
+  }
+  sheet.deleteRow(row);
 }
 
 function insertBlankRowAt_(sheet, targetRow) {
@@ -777,32 +1227,52 @@ function getSheetLayout_(sheet) {
   const rows = sheet.getRange(1, 1, rowsToInspect, width).getDisplayValues();
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const headers = rows[rowIndex];
-    const lookup = {};
+    const lookup = Object.create(null);
+    const duplicateHeaders = Object.create(null);
     headers.forEach(function (header, index) {
       const normalized = normalizeHeader_(header);
       if (normalized) {
-        lookup[normalized] = index + 1;
+        if (lookup[normalized]) {
+          duplicateHeaders[normalized] = true;
+        } else {
+          lookup[normalized] = index + 1;
+        }
       }
     });
     if (findHeaderIndex_(lookup, getHeaderAliases_('issueDate')) &&
       findHeaderIndex_(lookup, getHeaderAliases_('supplier'))) {
+      const duplicates = Object.keys(duplicateHeaders);
+      if (duplicates.length > 0) {
+        throw new Error(
+          'Duplicate normalized spreadsheet headers in sheet ' +
+            sheet.getName() + ': ' + duplicates.join(', ')
+        );
+      }
       return { headerRow: rowIndex + 1, headers: headers, lookup: lookup };
     }
   }
   throw new Error('Header row could not be identified in sheet ' + sheet.getName() + '.');
 }
 
-function getAllSheetHeaders_() {
+function getSheetHeadersBySupply_() {
   const automationConfig = getAutomationConfig_();
   const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
-  return automationConfig.canonical_supplies.reduce(function (headers, supply) {
+  return automationConfig.canonical_supplies.reduce(function (headersBySupply, supply) {
     const sheetName = automationConfig.sheet_by_supply[supply];
     const sheet = spreadsheet.getSheetByName(sheetName);
     if (!sheet) {
       throw new Error('Configured sheet was not found: ' + sheetName);
     }
-    return headers.concat(getSheetLayout_(sheet).headers.filter(Boolean));
-  }, []);
+    const layout = getSheetLayout_(sheet);
+    const firstDataRow = layout.headerRow + 1;
+    const formulas = firstDataRow <= sheet.getLastRow() ?
+      sheet.getRange(firstDataRow, 1, 1, layout.headers.length).getFormulas()[0] :
+      layout.headers.map(function () { return ''; });
+    headersBySupply[supply] = layout.headers.filter(function (header, index) {
+      return header && !formulas[index];
+    });
+    return headersBySupply;
+  }, {});
 }
 
 function getInsertionRow_(sheet, layout, issueDate) {
@@ -818,20 +1288,26 @@ function getInsertionRow_(sheet, layout, issueDate) {
   return Math.max(firstDataRow, lastRow + 1);
 }
 
-function copyRowStyleAndFormulas_(sheet, targetRow, width) {
-  const sourceRow = targetRow > 1 ? targetRow - 1 : targetRow + 1;
-  if (sourceRow > sheet.getMaxRows()) {
+function copyRowStyleAndFormulas_(sheet, targetRow, layout) {
+  const firstDataRow = layout.headerRow + 1;
+  let sourceRow = 0;
+  if (targetRow > firstDataRow) {
+    sourceRow = targetRow - 1;
+  } else if (targetRow + 1 <= sheet.getLastRow()) {
+    sourceRow = targetRow + 1;
+  }
+  if (!sourceRow) {
     return;
   }
-  const source = sheet.getRange(sourceRow, 1, 1, width);
-  const target = sheet.getRange(targetRow, 1, 1, width);
+  const source = sheet.getRange(sourceRow, 1, 1, layout.headers.length);
+  const target = sheet.getRange(targetRow, 1, 1, layout.headers.length);
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
   // Copying formulas as a range preserves relative references for the new row.
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
 }
 
 function writeInvoiceRow_(sheet, row, layout, file, extracted) {
-  const values = {};
+  const values = Object.create(null);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('issueDate'), isoDateToDate_(extracted.issue_date));
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('supplier'), extracted.supplier);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'), extracted.identifier);
@@ -843,9 +1319,13 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('vat'), extracted.vat);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('total'), extracted.total);
 
-  const allowedHeaders = {};
-  const formulaColumns = sheet.getRange(Math.max(1, row - 1), 1, 1, layout.headers.length)
-    .getFormulas()[0];
+  const allowedHeaders = Object.create(null);
+  const firstDataRow = layout.headerRow + 1;
+  const referenceRow = row > firstDataRow ? row - 1 :
+    (row + 1 <= sheet.getLastRow() ? row + 1 : 0);
+  const formulaColumns = referenceRow ?
+    sheet.getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0] :
+    layout.headers.map(function () { return ''; });
   layout.headers.forEach(function (header) {
     allowedHeaders[normalizeHeader_(header)] = header;
   });
@@ -861,8 +1341,10 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
 
   Object.keys(values).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
-    if (column && values[normalizedHeader] !== null && values[normalizedHeader] !== undefined) {
-      sheet.getRange(row, column).setValue(values[normalizedHeader]);
+    if (column && !formulaColumns[column - 1] &&
+      values[normalizedHeader] !== null &&
+      values[normalizedHeader] !== undefined) {
+      setLiteralSheetValue_(sheet.getRange(row, column), values[normalizedHeader]);
     }
   });
 
@@ -876,6 +1358,16 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   );
 }
 
+function setLiteralSheetValue_(range, value) {
+  if (typeof value === 'string') {
+    range.setRichTextValue(
+      SpreadsheetApp.newRichTextValue().setText(value).build()
+    );
+    return;
+  }
+  range.setValue(value);
+}
+
 function setValueForHeaders_(values, lookup, aliases, value) {
   const column = findHeaderIndex_(lookup, aliases);
   if (column) {
@@ -887,19 +1379,81 @@ function setValueForHeaders_(values, lookup, aliases, value) {
 }
 
 function verifyImportedRow_(sheet, row, layout, file, extracted) {
-  const dateColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('issueDate'));
-  const supplierColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('supplier'));
-  const identifierColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('identifier'));
-  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
-  if (!dateMatches_(sheet.getRange(row, dateColumn).getValue(), extracted.issue_date) ||
-    normalizeCellText_(sheet.getRange(row, supplierColumn).getValue()) !== normalizeCellText_(extracted.supplier) ||
-    normalizeCellText_(sheet.getRange(row, identifierColumn).getValue()) !== normalizeCellText_(extracted.identifier)) {
-    throw new Error('Spreadsheet row verification failed.');
+  const expected = Object.create(null);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('issueDate'),
+    isoDateToDate_(extracted.issue_date));
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('supplier'),
+    extracted.supplier);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('identifier'),
+    extracted.identifier);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('year'),
+    extracted.reference_year);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('month'),
+    Number(extracted.reference_month));
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('frequency'),
+    extracted.frequency || '');
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('consumptionCost'),
+    extracted.cost_consumption);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('nonConsumptionCosts'),
+    extracted.cost_non_consumption);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('vat'), extracted.vat);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('total'), extracted.total);
+  extracted.sheet_values.forEach(function (entry) {
+    const normalized = normalizeHeader_(entry.header);
+    if (layout.lookup[normalized] && expected[normalized] === undefined) {
+      expected[normalized] = entry.value;
+    }
+  });
+
+  const rowFormulas = sheet.getRange(row, 1, 1, layout.headers.length)
+    .getFormulas()[0];
+  Object.keys(expected).forEach(function (normalizedHeader) {
+    const column = layout.lookup[normalizedHeader];
+    if (column && !rowFormulas[column - 1] &&
+      !sheetValuesMatch_(
+        sheet.getRange(row, column).getValue(),
+        expected[normalizedHeader],
+        extracted.issue_date
+      )) {
+      throw new Error('Spreadsheet value verification failed for: ' +
+        layout.headers[column - 1]);
+    }
+  });
+
+  const firstDataRow = layout.headerRow + 1;
+  const referenceRow = row > firstDataRow ? row - 1 :
+    (row + 1 <= sheet.getLastRow() ? row + 1 : 0);
+  if (referenceRow) {
+    const referenceFormulas = sheet
+      .getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0];
+    referenceFormulas.forEach(function (formula, index) {
+      if (formula && !rowFormulas[index]) {
+        throw new Error('Spreadsheet formula was not preserved for: ' +
+          layout.headers[index]);
+      }
+    });
   }
+
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const source = sheet.getRange(row, sourceColumn).getRichTextValue();
   if (!source || source.getLinkUrl() !== file.getUrl()) {
     throw new Error('Source file link verification failed.');
   }
+}
+
+function sheetValuesMatch_(actual, expected, issueDate) {
+  if (Object.prototype.toString.call(expected) === '[object Date]') {
+    return dateMatches_(actual, issueDate);
+  }
+  if (typeof expected === 'number') {
+    return typeof actual === 'number' &&
+      Math.abs(actual - expected) <= CONFIG.MONEY_TOLERANCE;
+  }
+  if (typeof expected === 'boolean') {
+    return actual === expected;
+  }
+  return String(actual === null || actual === undefined ? '' : actual) ===
+    String(expected === null || expected === undefined ? '' : expected);
 }
 
 function sha256ForFile_(file) {
@@ -914,16 +1468,37 @@ function sha256ForFile_(file) {
 }
 
 function normalizeSupplier_(supplier) {
-  const upper = String(supplier || '').trim().toUpperCase();
-  if (!upper) {
+  const value = String(supplier || '').trim();
+  if (!value) {
     return '';
   }
-  return getAutomationConfig_().supplier_aliases[upper] || upper;
+  const automationConfig = getAutomationConfig_();
+  const normalized = normalizeCellText_(value);
+  const canonical = automationConfig.canonical_suppliers.filter(function (item) {
+    return normalizeCellText_(item) === normalized;
+  })[0];
+  if (canonical) {
+    return canonical;
+  }
+  const aliasKey = Object.keys(automationConfig.supplier_aliases).filter(function (key) {
+    return normalizeCellText_(key) === normalized;
+  })[0];
+  return aliasKey ? automationConfig.supplier_aliases[aliasKey] : value.toUpperCase();
 }
 
 function normalizeSupplyType_(supplyType) {
   const normalized = normalizeCellText_(supplyType);
-  return getAutomationConfig_().supply_aliases[normalized] || '';
+  const automationConfig = getAutomationConfig_();
+  const canonical = automationConfig.canonical_supplies.filter(function (item) {
+    return normalizeCellText_(item) === normalized;
+  })[0];
+  if (canonical) {
+    return canonical;
+  }
+  const aliasKey = Object.keys(automationConfig.supply_aliases).filter(function (key) {
+    return normalizeCellText_(key) === normalized;
+  })[0];
+  return aliasKey ? automationConfig.supply_aliases[aliasKey] : '';
 }
 
 function applyFrequencyOverride_(extracted) {
@@ -942,11 +1517,17 @@ function classifyAddress_(addressEvidence) {
     const fallback = automationConfig.address_missing_type;
     return ['import', 'archive_only'].indexOf(fallback) >= 0 ? fallback : 'unknown';
   }
-  const rule = automationConfig.address_rules.filter(function (item) {
+  const matchingTypes = automationConfig.address_rules.filter(function (item) {
     return item && item.match && item.type &&
       normalizedAddress.indexOf(normalizeCellText_(item.match)) >= 0;
-  })[0];
-  return rule && ['import', 'archive_only'].indexOf(rule.type) >= 0 ? rule.type : 'unknown';
+  }).map(function (item) {
+    return item.type;
+  }).filter(function (type, index, values) {
+    return values.indexOf(type) === index;
+  });
+  return matchingTypes.length === 1 &&
+    ['import', 'archive_only'].indexOf(matchingTypes[0]) >= 0 ?
+    matchingTypes[0] : 'unknown';
 }
 
 function normalizeDocumentType_(documentType) {
@@ -966,8 +1547,20 @@ function normalizeIsoDate_(value) {
   return match ? match[0] : '';
 }
 
+function isValidIsoDate_(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) {
+    return false;
+  }
+  const parts = value.split('-').map(Number);
+  const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  return date.getUTCFullYear() === parts[0] &&
+    date.getUTCMonth() === parts[1] - 1 &&
+    date.getUTCDate() === parts[2];
+}
+
 function normalizeMoney_(value) {
-  if (value === null || value === undefined || value === '') {
+  if (value === null || value === undefined ||
+    (typeof value === 'string' && !value.trim())) {
     return null;
   }
   const number = Number(value);
@@ -1011,27 +1604,63 @@ function dateForValue_(value, timeZone) {
 }
 
 function loadIntakeFileState_() {
-  const raw = getScriptProperty_(CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE);
-  if (!raw) {
-    return {};
+  const properties = PropertiesService.getScriptProperties().getProperties();
+  const prefix = CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE_PREFIX;
+  const state = {};
+  Object.keys(properties).forEach(function (key) {
+    if (key.indexOf(prefix) !== 0) {
+      return;
+    }
+    try {
+      const value = JSON.parse(properties[key]);
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        state[key.slice(prefix.length)] = value;
+      }
+    } catch (error) {
+      console.warn('Ignoring malformed intake state for one file.');
+    }
+  });
+  const legacy = properties[CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE];
+  if (legacy) {
+    try {
+      const parsed = JSON.parse(legacy);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        Object.keys(parsed).forEach(function (fileId) {
+          if (!state[fileId]) {
+            state[fileId] = parsed[fileId];
+          }
+        });
+      }
+    } catch (error) {
+      console.warn('Ignoring malformed legacy intake processing state.');
+    }
   }
-  try {
-    const state = JSON.parse(raw);
-    return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
-  } catch (error) {
-    console.warn('Ignoring malformed intake processing state.');
-    return {};
-  }
+  return state;
 }
 
 function shouldProcessIntakeFile_(file, state, triggerSource) {
+  if (hasMutationJournal_(file.getId())) {
+    return false;
+  }
   const previous = state[file.getId()];
   const fingerprint = intakeFileFingerprint_(file);
   if (!previous || previous.fingerprint !== fingerprint) {
     return true;
   }
+  if (previous.status === 'PROCESSING') {
+    return Date.now() - Number(previous.updatedAt || 0) > 10 * 60 * 1000;
+  }
   return triggerSource === 'daily' && previous.status === 'ERROR' &&
     previous.attemptDate !== intakeStateDate_();
+}
+
+function markIntakeFileProcessing_(state, file) {
+  state[file.getId()] = {
+    fingerprint: intakeFileFingerprint_(file),
+    status: 'PROCESSING',
+    attemptDate: intakeStateDate_(),
+    updatedAt: Date.now()
+  };
 }
 
 function recordIntakeFileOutcome_(state, file, result) {
@@ -1043,6 +1672,245 @@ function recordIntakeFileOutcome_(state, file, result) {
   };
 }
 
+function persistCatalogResult_(state, file, rootFolder, result) {
+  updateIntakeStateForResult_(state, file, rootFolder, result);
+  queuePendingReports_([result]);
+  saveIntakeFileState_(state);
+  if (result.mutationJournalFileId && !result.keepMutationJournal) {
+    clearMutationJournal_(result.mutationJournalFileId);
+  }
+}
+
+function attachMutationJournal_(result, fileId) {
+  if (fileId) {
+    result.mutationJournalFileId = fileId;
+  }
+  return result;
+}
+
+function saveMutationJournal_(fileId, journal) {
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId,
+    JSON.stringify(journal)
+  );
+}
+
+function updateMutationJournal_(fileId, changes) {
+  const properties = PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
+  let journal = {};
+  const raw = properties.getProperty(key);
+  if (raw) {
+    try {
+      journal = JSON.parse(raw);
+    } catch (error) {
+      throw new Error('Mutation journal is malformed for file ID ' + fileId + '.');
+    }
+  }
+  Object.keys(changes).forEach(function (property) {
+    journal[property] = changes[property];
+  });
+  journal.updatedAt = Date.now();
+  properties.setProperty(key, JSON.stringify(journal));
+}
+
+function clearMutationJournal_(fileId) {
+  const properties = PropertiesService.getScriptProperties();
+  properties.deleteProperty(
+    CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId
+  );
+  properties.deleteProperty(
+    CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId
+  );
+}
+
+function hasMutationJournal_(fileId) {
+  return Boolean(PropertiesService.getScriptProperties().getProperty(
+    CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId
+  ));
+}
+
+function recoverPendingMutations_(rootFolder) {
+  const properties = PropertiesService.getScriptProperties();
+  const allProperties = properties.getProperties();
+  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX;
+  const results = [];
+  const state = loadIntakeFileState_();
+  Object.keys(allProperties).filter(function (key) {
+    return key.indexOf(prefix) === 0;
+  }).forEach(function (key) {
+    const fileId = key.slice(prefix.length);
+    const recoveryAlertKey =
+      CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId;
+    let file = null;
+    let journal = null;
+    try {
+      journal = JSON.parse(allProperties[key]);
+      if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
+        throw new Error('The mutation journal is not a JSON object.');
+      }
+      file = DriveApp.getFileById(fileId);
+      if (!isFileInFolder_(file, rootFolder)) {
+        file.moveTo(rootFolder);
+      }
+      if (journal.originalName && file.getName() !== journal.originalName) {
+        file.setName(journal.originalName);
+      }
+      const sheetRecovery = rollbackJournalSheetRow_(journal, file);
+      const result = buildErrorResult_(
+        file,
+        'A previously interrupted mutation was recovered safely.',
+        'Review the PDF in intake; the daily run can retry it on the next day.',
+        journal.originalName || file.getName(),
+        { renamed: false, moved: false, imported: false }
+      );
+      if (journal.createdFolderPath) {
+        result.actions += ' Empty destination folders may remain at ' +
+          journal.createdFolderPath + '.';
+      }
+      if (sheetRecovery.unmarkedRowMayRemain) {
+        result.actions +=
+          ' An unmarked spreadsheet row may remain at the planned position.';
+      }
+      recordIntakeFileOutcome_(state, file, result);
+      queuePendingReports_([result]);
+      saveIntakeFileState_(state);
+      clearMutationJournal_(fileId);
+      logCatalogEvent_('catalog-mutation-recovered', { fileId: fileId });
+      results.push(result);
+    } catch (error) {
+      const recoveryAlreadyReported =
+        Boolean(properties.getProperty(recoveryAlertKey)) ||
+        Boolean(journal && journal.recoveryReported);
+      if (!recoveryAlreadyReported) {
+        let result;
+        if (file) {
+          result = buildErrorResult_(
+            file,
+            'An interrupted mutation requires manual spreadsheet review: ' +
+              describeError_(error),
+            'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
+            (journal && journal.originalName) || file.getName(),
+            { renamed: false, moved: false, imported: true }
+          );
+          recordIntakeFileOutcome_(state, file, result);
+          saveIntakeFileState_(state);
+        } else {
+          result = buildUnavailableRecoveryResult_(fileId, journal, error);
+        }
+        queuePendingReports_([result]);
+        results.push(result);
+        properties.setProperty(recoveryAlertKey, String(Date.now()));
+        logCatalogEvent_('catalog-mutation-recovery-failed', {
+          fileId: fileId,
+          errorType: error.name || 'Error',
+          errorCategory: classifyCatalogErrorForLog_(error)
+        });
+      }
+    }
+  });
+  return results;
+}
+
+function buildUnavailableRecoveryResult_(fileId, journal, error) {
+  return {
+    status: 'ERROR',
+    originalName: journal && journal.originalName ?
+      journal.originalName : 'Unavailable Drive file',
+    assignedName: '',
+    fileUrl: 'https://drive.google.com/open?id=' + encodeURIComponent(fileId),
+    destination: '',
+    supplySupplier: '',
+    extracted: {},
+    sheetLink: '',
+    actions: 'No automatic cleanup was completed; the mutation journal remains.',
+    problem: 'An interrupted mutation requires manual review: ' +
+      describeError_(error),
+    recommendedAction:
+      'Restore or locate the Drive file, then reconcile its journaled Drive and Sheet state.'
+  };
+}
+
+function rollbackJournalSheetRow_(journal, file) {
+  if (!journal.sheetName || !journal.sheetRow) {
+    return { unmarkedRowMayRemain: false };
+  }
+  const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+  const sheet = spreadsheet.getSheetByName(journal.sheetName);
+  if (!sheet) {
+    throw new Error(
+      'The journaled spreadsheet sheet no longer exists: ' +
+        journal.sheetName + '.'
+    );
+  }
+  const layout = getSheetLayout_(sheet);
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+  if (!sourceColumn) {
+    throw new Error('The journaled spreadsheet source column no longer exists.');
+  }
+  const matches = [];
+  for (let row = layout.headerRow + 1; row <= sheet.getLastRow(); row += 1) {
+    const sourceFile =
+      getFileFromSourceCell_(sheet.getRange(row, sourceColumn));
+    if (sourceFile && sourceFile.getId() === file.getId()) {
+      matches.push(row);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      'Expected exactly one source-marked spreadsheet row; found ' +
+        matches.length + '.'
+    );
+  }
+  const isPreexistingRow = journal.sheetRowPreexisting === true ||
+    (journal.sheetRowPreexisting === undefined &&
+      journal.sheetRowCreated === false &&
+      journal.stage !== 'sheet-insert-planned');
+  if (isPreexistingRow) {
+    if (matches.length === 0) {
+      throw new Error('The pre-existing spreadsheet source row is missing.');
+    }
+    refreshImportedSourceLink_(sheet, matches[0], file);
+    return { unmarkedRowMayRemain: false };
+  }
+  if (matches.length === 0) {
+    if (journal.sheetRowCreated) {
+      throw new Error('The journaled spreadsheet source marker is missing.');
+    }
+    return { unmarkedRowMayRemain: true };
+  }
+  sheet.deleteRow(matches[0]);
+  return { unmarkedRowMayRemain: false };
+}
+
+function isFileInFolder_(file, folder) {
+  const parents = file.getParents();
+  while (parents.hasNext()) {
+    if (parents.next().getId() === folder.getId()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function updateIntakeStateForResult_(state, file, rootFolder, result) {
+  if (isDirectIntakePdf_(file, rootFolder)) {
+    recordIntakeFileOutcome_(state, file, result);
+  } else {
+    delete state[file.getId()];
+  }
+}
+
+function pruneIntakeFileState_(state, files) {
+  const present = {};
+  files.forEach(function (file) { present[file.getId()] = true; });
+  Object.keys(state).forEach(function (fileId) {
+    if (!present[fileId]) {
+      delete state[fileId];
+    }
+  });
+}
+
 function intakeFileFingerprint_(file) {
   return String(file.getLastUpdated().getTime()) + ':' + String(file.getSize());
 }
@@ -1052,16 +1920,22 @@ function intakeStateDate_() {
 }
 
 function saveIntakeFileState_(state) {
-  const entries = Object.keys(state).map(function (fileId) {
-    return { fileId: fileId, value: state[fileId] };
-  }).sort(function (left, right) {
-    return right.value.updatedAt - left.value.updatedAt;
-  }).slice(0, CONFIG.MAX_INTAKE_STATE_ENTRIES);
-  const pruned = {};
-  entries.forEach(function (entry) { pruned[entry.fileId] = entry.value; });
-  PropertiesService.getScriptProperties().setProperty(
-    CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE, JSON.stringify(pruned)
-  );
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const current = scriptProperties.getProperties();
+  const prefix = CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE_PREFIX;
+  Object.keys(current).forEach(function (key) {
+    if (key.indexOf(prefix) === 0 && !state[key.slice(prefix.length)]) {
+      scriptProperties.deleteProperty(key);
+    }
+  });
+  const values = {};
+  Object.keys(state).forEach(function (fileId) {
+    values[prefix + fileId] = JSON.stringify(state[fileId]);
+  });
+  if (Object.keys(values).length > 0) {
+    scriptProperties.setProperties(values, false);
+  }
+  scriptProperties.deleteProperty(CONFIG.PROPERTY_KEYS.INTAKE_FILE_STATE);
 }
 
 function isoDateToDate_(isoDate) {
@@ -1070,7 +1944,18 @@ function isoDateToDate_(isoDate) {
 }
 
 function sanitizeFileNamePart_(value) {
-  return String(value || '').replace(/[\\/:*?"<>|]/g, '').trim();
+  return String(value || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 80);
+}
+
+function assertSafePathSegment_(value, label) {
+  const segment = String(value || '');
+  if (!segment || segment === '.' || segment === '..' ||
+    /[\/\\\u0000-\u001f]/.test(segment)) {
+    throw new Error('Unsafe ' + label + ' path segment.');
+  }
 }
 
 function sanitizeContractObject_(value) {
@@ -1084,8 +1969,10 @@ function buildDrivePathLabel_(file) {
 }
 
 function buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink) {
+  const imported = extracted.address_type === 'import' &&
+    extracted.document_type === 'Invoice';
   return {
-    status: extracted.address_type === 'archive_only' ? 'ARCHIVED WITHOUT IMPORT' : 'IMPORTED',
+    status: imported ? 'IMPORTED' : 'ARCHIVED WITHOUT IMPORT',
     originalName: originalName,
     assignedName: assignedName,
     fileUrl: file.getUrl(),
@@ -1093,11 +1980,20 @@ function buildSuccessResult_(file, originalName, assignedName, destination, extr
     supplySupplier: extracted.supply_type + ' / ' + extracted.supplier,
     extracted: extracted,
     sheetLink: sheetLink,
-    actions: destination.newSupplier ?
-      'PDF renamed, archived, and new supplier path created.' : 'PDF renamed and archived.',
-    problem: extracted.address_type === 'archive_only' ?
-      'Spreadsheet was not changed because this document is archive-only.' : ''
+    actions: destination.createdFolders && destination.createdFolders.length > 0 ?
+      'PDF renamed, archived, and destination folders created: ' +
+        destination.createdFolders.join(', ') + '.' :
+      'PDF renamed and archived.',
+    problem: imported ? '' :
+      'Spreadsheet was not changed because this document is not an importable invoice.'
   };
+}
+
+function addRetainedFolderAction_(result, createdFolderPath) {
+  if (createdFolderPath) {
+    result.actions += ' Empty destination folders were created and retained at ' +
+      createdFolderPath + '.';
+  }
 }
 
 function buildDuplicateResult_(file, extracted, duplicate) {
@@ -1134,10 +2030,24 @@ function buildVerifyResult_(file, extracted, problem, action) {
 
 function buildErrorResult_(file, problem, action, originalName, state) {
   const reached = state || { renamed: false, moved: false, imported: false };
-  const actions = reached.moved ? 'PDF was renamed and moved before the error; spreadsheet ' +
-    (reached.imported ? 'was already changed.' : 'was not changed.') :
-    (reached.renamed ? 'PDF was renamed but not moved before the error.' :
-      'Operation stopped before the PDF was renamed or moved.');
+  const changes = [];
+  if (reached.renamed) {
+    changes.push('the PDF may remain renamed');
+  }
+  if (reached.moved) {
+    changes.push('the PDF may remain moved');
+  }
+  if (reached.imported) {
+    changes.push('the spreadsheet row may remain');
+  }
+  const rollbackProblems = reached.rollbackErrors || [];
+  let actions = changes.length > 0 ?
+    'Automatic rollback was incomplete: ' + changes.join(', ') + '.' :
+    'Any partial Drive or spreadsheet mutation was rolled back.';
+  if (reached.createdFolderPath) {
+    actions += ' Empty destination folders may remain at ' +
+      reached.createdFolderPath + '.';
+  }
   return {
     status: 'ERROR',
     originalName: originalName || file.getName(),
@@ -1146,24 +2056,135 @@ function buildErrorResult_(file, problem, action, originalName, state) {
     destination: '',
     supplySupplier: '',
     extracted: {},
-    sheetLink: '',
+    sheetLink: reached.sheetLink || '',
     actions: actions,
-    problem: problem,
+    problem: problem + (rollbackProblems.length > 0 ?
+      ' ' + rollbackProblems.join(' ') : ''),
     recommendedAction: action
   };
 }
 
 function sendReportEmail_(results) {
+  sendReportBodies_(results.map(formatResult_));
+}
+
+function sendReportBodies_(bodies) {
   const recipient = getScriptProperty_(CONFIG.PROPERTY_KEYS.NOTIFICATION_RECIPIENT);
   const reportLabels = getLocalization_().reportLabels;
-  const body = results.map(formatResult_).join('\n\n');
-  logCatalogEvent_('report-email-send-start', { resultCount: results.length });
+  const body = bodies.join('\n\n');
+  logCatalogEvent_('report-email-send-start', { resultCount: bodies.length });
   MailApp.sendEmail({
     to: recipient,
-    subject: reportLabels.emailSubject.replace('{count}', String(results.length)),
+    subject: reportLabels.emailSubject.replace('{count}', String(bodies.length)),
     body: body
   });
-  logCatalogEvent_('report-email-sent', { resultCount: results.length });
+  logCatalogEvent_('report-email-sent', { resultCount: bodies.length });
+}
+
+function finalizeCatalogResults_(state, results) {
+  saveIntakeFileState_(state);
+  flushPendingReports_();
+}
+
+function queuePendingReports_(results) {
+  const prefix = CONFIG.PROPERTY_KEYS.PENDING_REPORT_PREFIX;
+  const scriptProperties = PropertiesService.getScriptProperties();
+  let existingProperties = scriptProperties.getProperties();
+  results.forEach(function (result, index) {
+    const fileIdMatch = String(result.fileUrl || '').match(/[-\w]{25,}/);
+    const correlationId = fileIdMatch ? fileIdMatch[0] :
+      String(Date.now()) + '-' + String(index);
+    const propertyKey = prefix + correlationId;
+    const propertyValue = JSON.stringify({
+      body: truncatePendingReportBody_(formatResult_(result))
+    });
+    const existingValue = existingProperties[propertyKey] || '';
+    const projectedBytes = pendingReportStorageBytes_(existingProperties, prefix) -
+      propertyStorageBytes_(propertyKey, existingValue) +
+      propertyStorageBytes_(propertyKey, propertyValue);
+    if (projectedBytes > CONFIG.MAX_PENDING_REPORT_BYTES) {
+      flushPendingReports_();
+      existingProperties = scriptProperties.getProperties();
+    }
+    scriptProperties.setProperty(propertyKey, propertyValue);
+    existingProperties[propertyKey] = propertyValue;
+  });
+}
+
+function pendingReportStorageBytes_(properties, prefix) {
+  return Object.keys(properties).reduce(function (total, key) {
+    if (key.indexOf(prefix) !== 0) {
+      return total;
+    }
+    return total + propertyStorageBytes_(key, properties[key]);
+  }, 0);
+}
+
+function propertyStorageBytes_(key, value) {
+  if (!value) {
+    return 0;
+  }
+  return Utilities.newBlob(String(key) + String(value)).getBytes().length;
+}
+
+function flushPendingReports_() {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const properties = scriptProperties.getProperties();
+  const prefix = CONFIG.PROPERTY_KEYS.PENDING_REPORT_PREFIX;
+  const keys = Object.keys(properties).filter(function (key) {
+    return key.indexOf(prefix) === 0;
+  }).sort();
+  if (keys.length === 0) {
+    return { sent: 0 };
+  }
+  let sent = 0;
+  while (keys.length > 0) {
+    const batchKeys = [];
+    const bodies = [];
+    let batchCharacters = 0;
+    while (keys.length > 0 && batchKeys.length < 10) {
+      const key = keys[0];
+      let body;
+      try {
+        const queued = JSON.parse(properties[key]);
+        if (!queued || typeof queued.body !== 'string') {
+          throw new Error('missing body');
+        }
+        body = queued.body;
+      } catch (error) {
+        body = 'A pending catalog report could not be decoded. ' +
+          'Inspect Cloud Logging using correlation key ' +
+          key.slice(prefix.length) + '.';
+      }
+      if (batchKeys.length > 0 &&
+        batchCharacters + body.length > 40000) {
+        break;
+      }
+      keys.shift();
+      batchKeys.push(key);
+      bodies.push(body);
+      batchCharacters += body.length;
+    }
+    sendReportBodies_(bodies);
+    batchKeys.forEach(function (key) {
+      scriptProperties.deleteProperty(key);
+    });
+    sent += bodies.length;
+  }
+  return { sent: sent };
+}
+
+function truncatePendingReportBody_(body) {
+  const marker = '\n[Report truncated; inspect the source PDF.]';
+  let candidate = body;
+  while (candidate.length > 100 &&
+    Utilities.newBlob(JSON.stringify({ body: candidate }))
+      .getBytes().length > 8000) {
+    candidate = candidate.slice(0, Math.floor(candidate.length * 0.8));
+  }
+  return candidate.length < body.length ?
+    candidate.slice(0, Math.max(0, candidate.length - marker.length)) + marker :
+    candidate;
 }
 
 /**
@@ -1179,7 +2200,7 @@ function logCatalogEvent_(event, details) {
 }
 
 function describeFileForLog_(file) {
-  return { fileId: file.getId(), fileName: file.getName() };
+  return { fileId: file.getId() };
 }
 
 function describeError_(error) {
@@ -1189,12 +2210,27 @@ function describeError_(error) {
   return String(error || 'Unknown error');
 }
 
+function classifyCatalogErrorForLog_(error) {
+  const message = describeError_(error).toLowerCase();
+  if (/gemini|vertex|quota|http|network/.test(message)) {
+    return 'model-api';
+  }
+  if (/spreadsheet|sheet|row|header|formula/.test(message)) {
+    return 'spreadsheet';
+  }
+  if (/drive|folder|file|rename|move/.test(message)) {
+    return 'drive';
+  }
+  if (/journal|recovery|rollback/.test(message)) {
+    return 'recovery';
+  }
+  return 'processing';
+}
+
 function logCatalogResult_(file, result) {
   logCatalogEvent_('catalog-file-processing-completed', {
     fileId: file.getId(),
-    fileName: file.getName(),
-    status: result.status,
-    action: result.actions || ''
+    status: result.status
   });
 }
 
@@ -1202,32 +2238,52 @@ function formatResult_(result) {
   const data = result.extracted || {};
   const localization = getLocalization_();
   const labels = localization.reportLabels;
-  const fileLink = result.fileUrl || labels.notAvailable;
-  const period = [data.issue_date, data.period_start, data.period_end].filter(Boolean).join(' | ');
+  const fileLink = oneLineReportText_(result.fileUrl || labels.notAvailable);
+  const period = [data.issue_date, data.period_start, data.period_end]
+    .filter(Boolean)
+    .map(oneLineReportText_)
+    .join(' | ');
   const total = data.total === null || data.total === undefined ? '' : Number(data.total).toFixed(2);
   const calculated = [data.cost_consumption, data.cost_non_consumption, data.vat]
     .every(function (value) { return value !== null && value !== undefined; }) ?
     (data.cost_consumption + data.cost_non_consumption + data.vat).toFixed(2) : '';
+  const issue = [
+    result.problem || labels.noIssue,
+    result.recommendedAction || '',
+    result.sheetLink ? 'Spreadsheet: ' + result.sheetLink : ''
+  ].filter(Boolean).join(' ');
   return [
     labels.status + ': ' + localizeStatus_(result.status, localization),
-    labels.originalFile + ': ' + result.originalName + ' (' + fileLink + ')',
-    labels.assignedName + ': ' + (result.assignedName || labels.notChanged),
-    labels.destination + ': ' + (result.destination || labels.notChanged),
-    labels.supplySupplier + ': ' + (result.supplySupplier || labels.notIdentified),
-    labels.identifier + ': ' + (data.identifier || labels.notIdentified),
+    labels.originalFile + ': ' +
+      oneLineReportText_(result.originalName) + ' (' + fileLink + ')',
+    labels.assignedName + ': ' +
+      oneLineReportText_(result.assignedName || labels.notChanged),
+    labels.destination + ': ' +
+      oneLineReportText_(result.destination || labels.notChanged),
+    labels.supplySupplier + ': ' +
+      oneLineReportText_(result.supplySupplier || labels.notIdentified),
+    labels.identifier + ': ' +
+      oneLineReportText_(data.identifier || labels.notIdentified),
     labels.period + ': ' + (period || labels.notIdentified),
-    labels.consumption + ': ' + (data.consumption_description || labels.notAvailable),
+    labels.consumption + ': ' +
+      oneLineReportText_(
+        data.consumption_description || labels.notAvailable
+      ),
     labels.consumptionCost + ': ' + formatEuro_(data.cost_consumption),
     labels.nonConsumptionCosts + ': ' + formatEuro_(data.cost_non_consumption),
     labels.vat + ': ' + formatEuro_(data.vat),
     labels.total + ': ' + (total ? total + ' EUR' : labels.notAvailable),
     labels.reconciliation + ': ' +
       (total && calculated ? calculated + ' EUR / ' + total + ' EUR' : labels.notApplicable),
-    labels.actions + ': ' + result.actions,
-    labels.issue + ': ' + (result.problem || labels.noIssue) +
-      (result.recommendedAction ? ' ' + result.recommendedAction : '') +
-      (result.sheetLink ? ' Spreadsheet: ' + result.sheetLink : '')
+    labels.actions + ': ' + oneLineReportText_(result.actions),
+    labels.issue + ': ' + oneLineReportText_(issue)
   ].join('\n');
+}
+
+function oneLineReportText_(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function formatEuro_(value) {

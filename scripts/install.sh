@@ -2,6 +2,7 @@
 
 set +x
 set -Eeuo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
@@ -14,7 +15,9 @@ DEFAULT_STATE_DIR="${PROJECT_ROOT}/.installer"
 STATE_DIR="${GDUC_STATE_DIR:-${DEFAULT_STATE_DIR}}"
 STATE_FILE="${STATE_DIR}/state.json"
 AUTH_DIR="${STATE_DIR}/clasp-auth"
+MANAGEMENT_AUTH_DIR="${STATE_DIR}/clasp-management-auth"
 STATE_MARKER="${STATE_DIR}/.gduc-installer-state"
+INSTALL_LOCK_DIR="${STATE_DIR}/installer.lock"
 CUSTOM_STATE_DIR_REQUESTED=0
 if [[ -n "${GDUC_STATE_DIR:-}" ]]; then
   CUSTOM_STATE_DIR_REQUESTED=1
@@ -23,6 +26,7 @@ INSTALL_DOC="docs/INSTALLATION.md"
 CLASP_VERSION="3.3.0"
 CLASP=(npx --yes "@google/clasp@${CLASP_VERSION}")
 TEMP_PATHS=()
+INSTALL_LOCK_HELD=0
 
 MODE="install"
 DEBUG=0
@@ -59,6 +63,7 @@ cleanup() {
       rm -rf "${temp_path}"
     fi
   done
+  release_installer_lock
 }
 trap cleanup EXIT
 
@@ -151,7 +156,7 @@ directory_contains_only_installer_state() {
           return 1
         fi
         ;;
-      clasp-auth)
+      clasp-auth | clasp-management-auth | installer.lock)
         if [[ -L "${entry}" || ! -d "${entry}" ]]; then
           return 1
         fi
@@ -214,7 +219,9 @@ validate_state_directory_setting() {
   STATE_DIR="${canonical_state_dir}"
   STATE_FILE="${STATE_DIR}/state.json"
   AUTH_DIR="${STATE_DIR}/clasp-auth"
+  MANAGEMENT_AUTH_DIR="${STATE_DIR}/clasp-management-auth"
   STATE_MARKER="${STATE_DIR}/.gduc-installer-state"
+  INSTALL_LOCK_DIR="${STATE_DIR}/installer.lock"
 
   if [[ "${CUSTOM_STATE_DIR_REQUESTED}" -eq 1 ]]; then
     case "${STATE_DIR}/" in
@@ -272,6 +279,57 @@ ensure_state_directory() {
   if [[ ! -f "${STATE_MARKER}" ]]; then
     printf '%s\n' "google-drive-utilities-cataloger" >"${STATE_MARKER}"
     chmod 600 "${STATE_MARKER}"
+  fi
+  [[ ! -f "${STATE_FILE}" ]] || chmod 600 "${STATE_FILE}"
+  [[ ! -d "${AUTH_DIR}" ]] || chmod 700 "${AUTH_DIR}"
+  [[ ! -f "${AUTH_DIR}/.clasprc.json" ]] ||
+    chmod 600 "${AUTH_DIR}/.clasprc.json"
+  [[ ! -d "${MANAGEMENT_AUTH_DIR}" ]] ||
+    chmod 700 "${MANAGEMENT_AUTH_DIR}"
+  [[ ! -f "${MANAGEMENT_AUTH_DIR}/.clasprc.json" ]] ||
+    chmod 600 "${MANAGEMENT_AUTH_DIR}/.clasprc.json"
+}
+
+acquire_installer_lock() {
+  local lock_pid=""
+  local wait_attempt
+
+  ensure_state_directory
+  if ! mkdir "${INSTALL_LOCK_DIR}" 2>/dev/null; then
+    wait_attempt=0
+    while [[ ! -f "${INSTALL_LOCK_DIR}/pid" &&
+      "${wait_attempt}" -lt 5 ]]; do
+      sleep 1
+      wait_attempt=$((wait_attempt + 1))
+    done
+    if [[ -f "${INSTALL_LOCK_DIR}/pid" ]]; then
+      lock_pid="$(<"${INSTALL_LOCK_DIR}/pid")"
+    fi
+    if [[ ! "${lock_pid}" =~ ^[0-9]+$ ]] ||
+      ! kill -0 "${lock_pid}" 2>/dev/null; then
+      warning "Removing a stale installer lock."
+      rm -rf "${INSTALL_LOCK_DIR}"
+      mkdir "${INSTALL_LOCK_DIR}"
+    else
+      die "Another installer process is already using this state directory." \
+        "${INSTALL_DOC}#resetting-private-installer-state"
+    fi
+  fi
+  INSTALL_LOCK_HELD=1
+  chmod 700 "${INSTALL_LOCK_DIR}"
+  printf '%s\n' "$$" >"${INSTALL_LOCK_DIR}/pid"
+  chmod 600 "${INSTALL_LOCK_DIR}/pid"
+}
+
+release_installer_lock() {
+  if [[ "${INSTALL_LOCK_HELD:-0}" -eq 1 ]]; then
+    if [[ -f "${INSTALL_LOCK_DIR}/pid" ]] &&
+      [[ "$(<"${INSTALL_LOCK_DIR}/pid")" == "$$" ]]; then
+      rm -rf "${INSTALL_LOCK_DIR}"
+    else
+      warning "Installer lock ownership changed; leaving it untouched."
+    fi
+    INSTALL_LOCK_HELD=0
   fi
 }
 
@@ -354,7 +412,8 @@ check_local_tools() {
     sed \
     sleep \
     tr \
-    uname; do
+    uname \
+    wc; do
     if command -v "${command_name}" >/dev/null 2>&1; then
       success "${command_name}"
     else
@@ -396,14 +455,10 @@ active_gcloud_account() {
 }
 
 authorized_clasp_account() {
-  local auth_dir="${1:-}"
+  local auth_dir="$1"
   local clasp_output
-  local clasp_command=("${CLASP[@]}")
 
-  if [[ -n "${auth_dir}" ]]; then
-    clasp_command+=(-A "${auth_dir}")
-  fi
-  if ! clasp_output="$("${clasp_command[@]}" --json \
+  if ! clasp_output="$("${CLASP[@]}" -A "${auth_dir}" --json \
     show-authorized-user 2>/dev/null)"; then
     return 1
   fi
@@ -412,7 +467,7 @@ authorized_clasp_account() {
 }
 
 verify_clasp_owner_account() {
-  local auth_dir="${1:-}"
+  local auth_dir="$1"
   local clasp_account
   local clasp_status
   local cloud_account
@@ -656,6 +711,7 @@ write_initial_state() {
   local gemini_api_key_required
   local gemini_vertex_required
   local gemini_auto_vertex_fallback
+  local temp_file
 
   gemini_mode="$(jq -r '.geminiMode // empty' <<<"${settings_json}")"
   gemini_metadata="$(gemini_mode_metadata "${gemini_mode}")"
@@ -666,6 +722,8 @@ write_initial_state() {
     gemini_auto_vertex_fallback <<<"${gemini_metadata}"
 
   ensure_state_directory
+  temp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+  TEMP_PATHS+=("${temp_file}")
   jq \
     --argjson installerVersion "${INSTALLER_VERSION}" \
     --arg phase "collected" \
@@ -680,8 +738,9 @@ write_initial_state() {
       geminiApiKeyRequired: $geminiApiKeyRequired,
       geminiVertexRequired: $geminiVertexRequired,
       geminiAutoVertexFallback: $geminiAutoVertexFallback
-    }' <<<"${settings_json}" >"${STATE_FILE}"
-  chmod 600 "${STATE_FILE}"
+    }' <<<"${settings_json}" >"${temp_file}"
+  chmod 600 "${temp_file}"
+  mv "${temp_file}" "${STATE_FILE}"
 }
 
 state_get() {
@@ -696,7 +755,10 @@ state_get() {
 state_set() {
   local key="$1"
   local value="$2"
-  local temp_file="${STATE_FILE}.tmp"
+  local temp_file
+
+  temp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+  TEMP_PATHS+=("${temp_file}")
 
   jq --arg value "${value}" ".${key} = \$value" \
     "${STATE_FILE}" >"${temp_file}"
@@ -737,6 +799,7 @@ collect_installation_inputs() {
   local initial_settings
   local reuse_project_value
   local extraction_status
+  local supported_locales
 
   print_heading "Installation settings"
   account="$(active_gcloud_account)"
@@ -786,13 +849,15 @@ collect_installation_inputs() {
       "${INSTALL_DOC}#cloud-billing"
   fi
   success "Billing account is open and accessible"
+  supported_locales="$(node "${PROJECT_ROOT}/scripts/list-locales.js")"
   prompt_value locale \
-    "Output locale (en or it)" \
+    "Output locale (${supported_locales})" \
     "en" \
     "${GDUC_LOCALE:-}"
   evaluate_predicate is_supported_locale "${locale}"
   if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
-    die "Locale must be en or it." "${INSTALL_DOC}#project-settings"
+    die "Locale must be one of: ${supported_locales}." \
+      "${INSTALL_DOC}#project-settings"
   fi
   prompt_value time_zone \
     "Apps Script IANA time zone" \
@@ -903,7 +968,8 @@ prepare_local_config() {
     return 0
   fi
 
-  temp_file="${PROJECT_ROOT}/config.local.json.tmp"
+  temp_file="$(mktemp "${PROJECT_ROOT}/config.local.json.tmp.XXXXXX")"
+  TEMP_PATHS+=("${temp_file}")
   jq --arg locale "${locale}" '.locale = $locale' \
     "${PROJECT_ROOT}/config.example.json" >"${temp_file}"
   chmod 600 "${temp_file}"
@@ -921,7 +987,7 @@ validate_local_config_for_installation() {
       "docs/CONFIGURATION.md#local-configuration-file"
   fi
   if ! jq -e '
-    (.locale == "en" or .locale == "it") and
+    (.locale | type == "string" and length > 0) and
     (.canonical_supplies | type == "array" and length > 0) and
     (.canonical_suppliers | type == "array" and length > 0) and
     (.supply_aliases | type == "object") and
@@ -932,6 +998,11 @@ validate_local_config_for_installation() {
     (.sheet_by_supply | type == "object")
   ' "${PROJECT_ROOT}/config.local.json" >/dev/null; then
     die "config.local.json does not satisfy the required schema." \
+      "docs/CONFIGURATION.md#local-configuration-file"
+  fi
+  if ! node "${PROJECT_ROOT}/scripts/validate-config.js" \
+    "${PROJECT_ROOT}/config.local.json" >/dev/null; then
+    die "config.local.json failed nested schema validation." \
       "docs/CONFIGURATION.md#local-configuration-file"
   fi
 
@@ -960,21 +1031,17 @@ validate_local_config_for_installation() {
 }
 
 required_cloud_services() {
-  local gemini_api_key_required
   local gemini_vertex_required
 
-  gemini_api_key_required="$(state_get '.geminiApiKeyRequired')"
   gemini_vertex_required="$(state_get '.geminiVertexRequired')"
   printf '%s\n' \
     drive.googleapis.com \
     logging.googleapis.com \
     pubsub.googleapis.com \
     script.googleapis.com \
+    secretmanager.googleapis.com \
     sheets.googleapis.com \
     workspaceevents.googleapis.com
-  if [[ "${gemini_api_key_required}" == "true" ]]; then
-    printf '%s\n' secretmanager.googleapis.com
-  fi
   if [[ "${gemini_vertex_required}" == "true" ]]; then
     printf '%s\n' aiplatform.googleapis.com
   fi
@@ -1013,6 +1080,20 @@ provision_cloud_project() {
     "${billing_enabled}" != "True" &&
     "${billing_enabled}" != "true"
   ) || "${billing_account_name#billingAccounts/}" != "${billing_account_id}" ]]; then
+    if [[ -n "${billing_account_name}" &&
+      "${billing_account_name#billingAccounts/}" != "${billing_account_id}" &&
+      "${GDUC_ALLOW_BILLING_RELINK:-false}" != "true" ]]; then
+      if [[ "${NON_INTERACTIVE}" -eq 1 ]]; then
+        die "Set GDUC_ALLOW_BILLING_RELINK=true to change existing project billing." \
+          "${INSTALL_DOC}#environment-variable-reference"
+      fi
+      warning "Project billing currently uses ${billing_account_name#billingAccounts/}."
+      confirm "Relink it to billing account ${billing_account_id}?" "no"
+      if [[ "${CONFIRM_RESULT}" -ne 1 ]]; then
+        die "Cloud billing was not changed." \
+          "${INSTALL_DOC}#cloud-billing"
+      fi
+    fi
     debug "Linking billing account ${billing_account_id}"
     gcloud billing projects link "${project_id}" \
       --billing-account="${billing_account_id}" \
@@ -1035,19 +1116,31 @@ provision_cloud_project() {
 }
 
 ensure_clasp_management_access() {
+  local auth_output
+
   print_heading "Apps Script CLI authorization"
-  if ! "${CLASP[@]}" show-authorized-user >/dev/null 2>&1; then
+  if [[ -f "${MANAGEMENT_AUTH_DIR}/.clasprc.json" ]] &&
+    auth_output="$("${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json \
+      show-authorized-user 2>/dev/null)" &&
+    printf '%s' "${auth_output}" |
+      jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
+    success "Reusing isolated Apps Script management authorization"
+  else
+    rm -rf "${MANAGEMENT_AUTH_DIR}"
     warning "clasp is not authorized for an Apps Script account."
     confirm "Open the clasp Google login now?" "yes"
     if [[ "${CONFIRM_RESULT}" -ne 1 ]]; then
       die "Authorize clasp before continuing." "${INSTALL_DOC}#clasp"
     fi
-    "${CLASP[@]}" login
+    mkdir -p "${MANAGEMENT_AUTH_DIR}"
+    chmod 700 "${MANAGEMENT_AUTH_DIR}"
+    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" login
+    chmod 600 "${MANAGEMENT_AUTH_DIR}/.clasprc.json"
   fi
   success "clasp account authorization"
-  verify_clasp_owner_account
+  verify_clasp_owner_account "${MANAGEMENT_AUTH_DIR}"
 
-  if ! "${CLASP[@]}" --json list >/dev/null 2>&1; then
+  if ! "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json list >/dev/null 2>&1; then
     warning "The account-level Google Apps Script API is not enabled."
     if [[ "${NO_OPEN}" -eq 0 ]]; then
       set +e
@@ -1065,24 +1158,22 @@ check_clasp_readiness() {
   local clasp_output
 
   print_heading "Apps Script CLI access"
-  if ! clasp_output="$("${CLASP[@]}" --json \
-    show-authorized-user 2>/dev/null)"; then
-    die "clasp is not authorized. Run: npx --yes @google/clasp@3.3.0 login" \
+  if [[ ! -f "${MANAGEMENT_AUTH_DIR}/.clasprc.json" ]]; then
+    info "Isolated clasp authorization will be created by make install."
+    return 0
+  fi
+  if ! clasp_output="$("${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json \
+    show-authorized-user 2>/dev/null)" ||
+    ! printf '%s' "${clasp_output}" |
+      jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
+    die "The isolated clasp authorization is invalid; run make install." \
       "${INSTALL_DOC}#clasp"
   fi
-  if ! printf '%s' "${clasp_output}" |
-    jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
-    die "clasp is not authorized. Run: npx --yes @google/clasp@3.3.0 login" \
-      "${INSTALL_DOC}#clasp"
-  fi
-  success "clasp account authorization"
-  verify_clasp_owner_account
-
-  if ! "${CLASP[@]}" --json list >/dev/null 2>&1; then
+  verify_clasp_owner_account "${MANAGEMENT_AUTH_DIR}"
+  "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json list >/dev/null 2>&1 ||
     die "Enable the account-level Google Apps Script API." \
       "${INSTALL_DOC}#apps-script-api"
-  fi
-  success "Account-level Apps Script API enabled"
+  success "Isolated clasp authorization is ready"
 }
 
 create_apps_script_project() {
@@ -1132,7 +1223,7 @@ create_apps_script_project() {
   debug "Creating Apps Script project outside the source checkout"
   (
     cd "${bootstrap_dir}"
-    "${CLASP[@]}" create \
+    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" create \
       --type standalone \
       --title "${project_name}"
   )
@@ -1141,7 +1232,7 @@ create_apps_script_project() {
       "${INSTALL_DOC}#apps-script-project"
   fi
 
-  temp_file="${PROJECT_ROOT}/.clasp.json.tmp"
+  temp_file="${bootstrap_dir}/.clasp.project.json"
   jq --arg projectId "${project_id}" \
     '.projectId = $projectId | .rootDir = "."' \
     "${bootstrap_dir}/.clasp.json" >"${temp_file}"
@@ -1154,11 +1245,10 @@ create_apps_script_project() {
 }
 
 push_apps_script_source() {
-  local auth_dir="${1:-}"
+  local auth_dir="$1"
   local staging_dir
   local time_zone
   local source_file
-  local clasp_command=("${CLASP[@]}")
 
   staging_dir="$(mktemp -d)"
   TEMP_PATHS+=("${staging_dir}")
@@ -1172,11 +1262,8 @@ push_apps_script_source() {
   mkdir -p "${staging_dir}/locales"
   cp "${PROJECT_ROOT}"/locales/*.gs "${staging_dir}/locales/"
 
-  if [[ -n "${auth_dir}" ]]; then
-    clasp_command+=(-A "${auth_dir}")
-  fi
   debug "Uploading Apps Script source with time zone ${time_zone}"
-  "${clasp_command[@]}" -P "${staging_dir}" push --force
+  "${CLASP[@]}" -A "${auth_dir}" -P "${staging_dir}" push --force
   success "Apps Script source uploaded"
 }
 
@@ -1250,13 +1337,16 @@ continue_initial_install() {
     phase="script_ready"
   fi
   if [[ "${phase}" == "script_ready" ]]; then
-    push_apps_script_source
+    push_apps_script_source "${MANAGEMENT_AUTH_DIR}"
     open_browser_handoff
   fi
 }
 
 validate_oauth_client() {
   local client_file="$1"
+  local canonical_client_dir
+  local canonical_client_file
+  local client_basename
   local client_id
   local project_number
 
@@ -1264,6 +1354,28 @@ validate_oauth_client() {
     die "OAuth client JSON file not found: ${client_file}" \
       "${INSTALL_DOC}#desktop-oauth-client"
   fi
+  if [[ -L "${client_file}" ]]; then
+    die "OAuth client JSON must not be a symbolic link." \
+      "${INSTALL_DOC}#desktop-oauth-client"
+  fi
+  chmod 600 "${client_file}" ||
+    die "Could not restrict OAuth client JSON permissions." \
+      "${INSTALL_DOC}#desktop-oauth-client"
+  canonical_client_dir="$(
+    cd -P "$(dirname "${client_file}")" 2>/dev/null &&
+      pwd -P
+  )" || die "Could not resolve the OAuth client path." \
+    "${INSTALL_DOC}#desktop-oauth-client"
+  client_basename="$(basename "${client_file}")"
+  canonical_client_file="${canonical_client_dir}/${client_basename}"
+  case "${canonical_client_file}" in
+    "${PROJECT_ROOT}"/*)
+      die "Keep the OAuth client JSON outside the repository checkout." \
+        "${INSTALL_DOC}#desktop-oauth-client"
+      ;;
+    *)
+      ;;
+  esac
   if ! jq empty "${client_file}" >/dev/null 2>&1; then
     die "OAuth client file is not valid JSON." \
       "${INSTALL_DOC}#desktop-oauth-client"
@@ -1358,7 +1470,7 @@ read_gemini_key() {
     return 0
   fi
   if [[ -z "${entered_key}" && "${NON_INTERACTIVE}" -eq 0 ]]; then
-    printf 'Paste the Gemini Developer API key from Bitwarden.\n'
+    printf 'Paste the Gemini Developer API key from your password manager.\n'
     read -r -s -p "GEMINI_API_KEY: " entered_key
     printf '\n'
   fi
@@ -1370,7 +1482,7 @@ read_gemini_key() {
   printf -v "${result_variable}" '%s' "${entered_key}"
 }
 
-gemini_transfer_secret_is_available() {
+bootstrap_transfer_secret_is_available() {
   local secret_resource="$1"
   local project_id
   local secret_id
@@ -1379,7 +1491,7 @@ gemini_transfer_secret_is_available() {
   local version_id
 
   project_id="$(state_get '.projectId')"
-  secret_id="$(gemini_transfer_secret_id)"
+  secret_id="$(bootstrap_transfer_secret_id)"
   expected_prefix="projects/${project_id}/secrets/${secret_id}/versions/"
   if [[ "${secret_resource}" != "${expected_prefix}"* ]]; then
     return 1
@@ -1397,7 +1509,7 @@ gemini_transfer_secret_is_available() {
   [[ "${secret_state}" == "ENABLED" ]]
 }
 
-gemini_transfer_secret_id() {
+bootstrap_transfer_secret_id() {
   local script_id
 
   script_id="$(state_get '.scriptId')"
@@ -1409,7 +1521,7 @@ gemini_transfer_secret_id() {
   printf 'drive-utilities-cataloger-%s\n' "${script_id}"
 }
 
-ensure_gemini_transfer_secret() {
+ensure_bootstrap_transfer_secret() {
   local project_id="$1"
   local secret_id="$2"
   local attempt
@@ -1445,11 +1557,11 @@ ensure_gemini_transfer_secret() {
       sleep 5
     fi
   done
-  die "Could not create the temporary Gemini credential handoff." \
-    "${INSTALL_DOC}#gemini-api-key"
+  die "Could not create the temporary installer bootstrap handoff." \
+    "${INSTALL_DOC}#google-resource-bootstrap"
 }
 
-grant_gemini_transfer_secret_access() {
+grant_bootstrap_transfer_secret_access() {
   local project_id="$1"
   local secret_id="$2"
   local clasp_account
@@ -1473,11 +1585,13 @@ grant_gemini_transfer_secret_access() {
   fi
 }
 
-prepare_gemini_transfer_secret() {
+prepare_bootstrap_transfer_secret() {
   local result_variable="$1"
   local gemini_api_key_required
   local replace_existing=0
   local api_key
+  local bootstrap_payload
+  local bootstrap_payload_bytes
   local project_id
   local secret_id
   local secret_resource
@@ -1485,56 +1599,67 @@ prepare_gemini_transfer_secret() {
   local version_name
 
   gemini_api_key_required="$(state_get '.geminiApiKeyRequired')"
-  if [[ "${gemini_api_key_required}" != "true" ]]; then
-    unset GDUC_GEMINI_API_KEY
-    printf -v "${result_variable}" '%s' ""
-    return 0
-  fi
-  if [[ -n "${GDUC_GEMINI_API_KEY:-}" ]]; then
+  if [[ "${gemini_api_key_required}" == "true" &&
+    -n "${GDUC_GEMINI_API_KEY:-}" ]]; then
     replace_existing=1
   fi
 
   project_id="$(state_get '.projectId')"
-  secret_id="$(gemini_transfer_secret_id)"
-  secret_resource="$(state_get '.geminiSecretVersion')"
+  secret_id="$(bootstrap_transfer_secret_id)"
+  secret_resource="$(state_get '.bootstrapSecretVersion')"
   if [[ -n "${secret_resource}" && "${replace_existing}" -eq 0 ]]; then
     evaluate_predicate \
-      gemini_transfer_secret_is_available "${secret_resource}"
+      bootstrap_transfer_secret_is_available "${secret_resource}"
     if [[ "${PREDICATE_STATUS}" -eq 0 ]]; then
-      grant_gemini_transfer_secret_access "${project_id}" "${secret_id}"
-      success "Reusing the private Gemini credential handoff"
+      grant_bootstrap_transfer_secret_access "${project_id}" "${secret_id}"
+      success "Reusing the private installer bootstrap handoff"
       printf -v "${result_variable}" '%s' "${secret_resource}"
       return 0
     fi
-    state_set "geminiSecretVersion" ""
+    state_set "bootstrapSecretVersion" ""
   fi
 
-  read_gemini_key api_key
-  ensure_gemini_transfer_secret "${project_id}" "${secret_id}"
-  grant_gemini_transfer_secret_access "${project_id}" "${secret_id}"
-  if ! version_name="$(printf '%s' "${api_key}" |
+  api_key=""
+  if [[ "${gemini_api_key_required}" == "true" ]]; then
+    read_gemini_key api_key
+  else
+    unset GDUC_GEMINI_API_KEY
+  fi
+  build_bootstrap_payload "${api_key}" bootstrap_payload
+  bootstrap_payload_bytes="$(
+    printf '%s' "${bootstrap_payload}" | LC_ALL=C wc -c | tr -d ' '
+  )"
+  if [[ "${bootstrap_payload_bytes}" -gt 60000 ]]; then
+    unset api_key bootstrap_payload
+    die "Private installer bootstrap data exceeds the safe 60 KB limit." \
+      "${INSTALL_DOC}#google-resource-bootstrap"
+  fi
+  ensure_bootstrap_transfer_secret "${project_id}" "${secret_id}"
+  grant_bootstrap_transfer_secret_access "${project_id}" "${secret_id}"
+  if ! version_name="$(printf '%s' "${bootstrap_payload}" |
     gcloud secrets versions add "${secret_id}" \
       --project="${project_id}" \
       --data-file=- \
       --format='value(name)' \
       --quiet 2>/dev/null)"; then
     unset api_key
-    die "Could not stage the Gemini credential in Secret Manager." \
-      "${INSTALL_DOC}#gemini-api-key"
+    unset bootstrap_payload
+    die "Could not stage the private installer bootstrap data." \
+      "${INSTALL_DOC}#google-resource-bootstrap"
   fi
-  unset api_key
+  unset api_key bootstrap_payload
   version_id="${version_name##*/}"
   if [[ ! "${version_id}" =~ ^[0-9]+$ ]]; then
     die "Secret Manager did not return a valid credential version." \
       "${INSTALL_DOC}#gemini-api-key"
   fi
   secret_resource="projects/${project_id}/secrets/${secret_id}/versions/${version_id}"
-  state_set "geminiSecretVersion" "${secret_resource}"
-  success "Staged Gemini credential through private Secret Manager input"
+  state_set "bootstrapSecretVersion" "${secret_resource}"
+  success "Staged private installer data through Secret Manager"
   printf -v "${result_variable}" '%s' "${secret_resource}"
 }
 
-remove_gemini_transfer_secret() {
+remove_bootstrap_transfer_secret() {
   local secret_resource="$1"
   local project_id
   local secret_id
@@ -1544,7 +1669,7 @@ remove_gemini_transfer_secret() {
     return 0
   fi
   project_id="$(state_get '.projectId')"
-  secret_id="$(gemini_transfer_secret_id)"
+  secret_id="$(bootstrap_transfer_secret_id)"
   if ! ownership_label="$(gcloud secrets describe "${secret_id}" \
     --project="${project_id}" \
     --format='value(labels.managed_by)' 2>/dev/null)" ||
@@ -1555,82 +1680,66 @@ remove_gemini_transfer_secret() {
   if gcloud secrets delete "${secret_id}" \
     --project="${project_id}" \
     --quiet >/dev/null 2>&1; then
-    state_set "geminiSecretVersion" ""
-    success "Removed temporary Gemini credential handoff"
+    state_set "bootstrapSecretVersion" ""
+    success "Removed temporary installer bootstrap handoff"
   else
-    warning "Temporary Gemini credential remains in Secret Manager."
+    warning "Temporary private bootstrap data remains in Secret Manager."
     warning "Remove it after confirming installation: ${secret_id}"
   fi
 }
 
-discard_rejected_gemini_credential_if_needed() {
+discard_rejected_bootstrap_if_needed() {
   local output="$1"
   local secret_resource="$2"
 
   if [[ "${output}" == *"Gemini Developer API key or model validation failed"* ||
     "${output}" == *"does not support generateContent"* ]]; then
     warning "Gemini validation failed; discarding the staged credential."
-    remove_gemini_transfer_secret "${secret_resource}"
+    remove_bootstrap_transfer_secret "${secret_resource}"
   fi
 }
 
-build_bootstrap_parameters() {
-  local gemini_secret_version="$1"
-  local project_id
-  local root_folder_id
-  local spreadsheet_id
-  local spreadsheet_title
-  local notification_recipient
-  local gemini_backend
-  local gemini_model
-  local auto_vertex_fallback
-  local time_zone
-  local vertex_ai_location
+build_bootstrap_payload() {
+  local gemini_api_key="$1"
+  local result_variable="$2"
+  local serialized_payload
 
-  project_id="$(state_get '.projectId')"
-  root_folder_id="$(state_get '.rootFolderId')"
-  spreadsheet_id="$(state_get '.spreadsheetId')"
-  spreadsheet_title="$(state_get '.spreadsheetTitle')"
-  notification_recipient="$(state_get '.notificationRecipient')"
-  gemini_backend="$(state_get '.geminiBackend')"
-  gemini_model="$(state_get '.geminiModel')"
-  auto_vertex_fallback="$(state_get '.geminiAutoVertexFallback')"
-  time_zone="$(state_get '.timeZone')"
-  vertex_ai_location="$(state_get '.vertexAiLocation')"
+  serialized_payload="$(
+    printf '%s' "${gemini_api_key}" |
+      jq -Rsc \
+        --slurpfile installerState "${STATE_FILE}" \
+        --slurpfile automationConfig "${PROJECT_ROOT}/config.local.json" \
+        --rawfile agentsPolicy "${PROJECT_ROOT}/AGENTS.example.md" \
+        '{
+          projectId: $installerState[0].projectId,
+          rootFolderId: $installerState[0].rootFolderId,
+          spreadsheetId: ($installerState[0].spreadsheetId // ""),
+          spreadsheetTitle: $installerState[0].spreadsheetTitle,
+          notificationRecipient: $installerState[0].notificationRecipient,
+          geminiBackend: $installerState[0].geminiBackend,
+          geminiApiKey: .,
+          geminiModel: $installerState[0].geminiModel,
+          autoVertexFallback: $installerState[0].geminiAutoVertexFallback,
+          vertexLocation: $installerState[0].vertexAiLocation,
+          automationConfig: $automationConfig[0],
+          agentsPolicy: $agentsPolicy,
+          timeZone: $installerState[0].timeZone
+        }'
+  )"
+  printf -v "${result_variable}" '%s' "${serialized_payload}"
+  unset serialized_payload
+}
+
+build_bootstrap_parameters() {
+  local bootstrap_secret_version="$1"
 
   jq -c -n \
-    --arg projectId "${project_id}" \
-    --arg rootFolderId "${root_folder_id}" \
-    --arg spreadsheetId "${spreadsheet_id}" \
-    --arg spreadsheetTitle "${spreadsheet_title}" \
-    --arg notificationRecipient "${notification_recipient}" \
-    --arg geminiBackend "${gemini_backend}" \
-    --arg geminiSecretVersion "${gemini_secret_version}" \
-    --arg geminiModel "${gemini_model}" \
-    --arg vertexLocation "${vertex_ai_location}" \
-    --arg timeZone "${time_zone}" \
-    --argjson autoVertexFallback "${auto_vertex_fallback}" \
-    --slurpfile automationConfig "${PROJECT_ROOT}/config.local.json" \
-    --rawfile agentsPolicy "${PROJECT_ROOT}/AGENTS.example.md" \
-    '[{
-      projectId: $projectId,
-      rootFolderId: $rootFolderId,
-      spreadsheetId: $spreadsheetId,
-      spreadsheetTitle: $spreadsheetTitle,
-      notificationRecipient: $notificationRecipient,
-      geminiBackend: $geminiBackend,
-      geminiSecretVersion: $geminiSecretVersion,
-      geminiModel: $geminiModel,
-      autoVertexFallback: $autoVertexFallback,
-      vertexLocation: $vertexLocation,
-      automationConfig: $automationConfig[0],
-      agentsPolicy: $agentsPolicy,
-      timeZone: $timeZone
-    }]'
+    --arg bootstrapSecretVersion "${bootstrap_secret_version}" \
+    '[{bootstrapSecretVersion: $bootstrapSecretVersion}]'
 }
 
 run_apps_script_bootstrap() {
-  local gemini_secret_version
+  local bootstrap_secret_version
   local parameters
   local output
   local run_status
@@ -1638,8 +1747,8 @@ run_apps_script_bootstrap() {
   local spreadsheet_id
   local spreadsheet_url
 
-  prepare_gemini_transfer_secret gemini_secret_version
-  parameters="$(build_bootstrap_parameters "${gemini_secret_version}")"
+  prepare_bootstrap_transfer_secret bootstrap_secret_version
+  parameters="$(build_bootstrap_parameters "${bootstrap_secret_version}")"
 
   print_heading "Google resource bootstrap"
   debug "Calling owner-only bootstrapCatalogerInstallation"
@@ -1649,9 +1758,9 @@ run_apps_script_bootstrap() {
     --params "${parameters}" 2>&1)"
   run_status=$?
   set -e
-  discard_rejected_gemini_credential_if_needed \
+  discard_rejected_bootstrap_if_needed \
     "${output}" \
-    "${gemini_secret_version}"
+    "${bootstrap_secret_version}"
   if [[ "${run_status}" -ne 0 ]]; then
     printf '%s\n' "${output}" >&2
     die "Apps Script bootstrap failed." \
@@ -1707,7 +1816,7 @@ verify_installed_resources() {
     jq -e --arg topic \
       "projects/${project_id}/topics/${topic_id}" '
         .topic == $topic and
-        .ackDeadlineSeconds == 60
+        .ackDeadlineSeconds == 300
       ' >/dev/null; then
     die "The Pub/Sub pull subscription topology is incomplete." \
       "${INSTALL_DOC}#apps-script-execution-errors"
@@ -1719,6 +1828,7 @@ verify_installed_resources() {
     jq -e '
       .bindings[] |
       select(.role == "roles/pubsub.publisher") |
+      select((.condition // null) == null) |
       select(
         .members[] ==
         "serviceAccount:drive-api-event-push@system.gserviceaccount.com"
@@ -1780,7 +1890,7 @@ complete_installation() {
   local project_id
   local root_folder_id
   local spreadsheet_url
-  local gemini_secret_version
+  local bootstrap_secret_version
 
   if [[ -z "${client_file}" ]]; then
     prompt_value client_file \
@@ -1796,15 +1906,15 @@ complete_installation() {
   ensure_api_executable_deployment
   run_apps_script_bootstrap
   verify_installed_resources
-  gemini_secret_version="$(state_get '.geminiSecretVersion')"
-  remove_gemini_transfer_secret "${gemini_secret_version}"
+  bootstrap_secret_version="$(state_get '.bootstrapSecretVersion')"
+  remove_bootstrap_transfer_secret "${bootstrap_secret_version}"
 
   state_set "phase" "complete"
   script_id="$(state_get '.scriptId')"
   project_id="$(state_get '.projectId')"
   root_folder_id="$(state_get '.rootFolderId')"
   spreadsheet_url="$(state_get '.spreadsheetUrl')"
-  rm -rf "${AUTH_DIR}"
+  rm -rf "${AUTH_DIR}" "${MANAGEMENT_AUTH_DIR}"
 
   print_heading "Installation complete"
   success "Drive Utilities Cataloger is installed and scheduled."
@@ -1821,6 +1931,7 @@ complete_installation() {
 }
 
 resume_installation() {
+  local bootstrap_secret_version
   local phase
 
   if [[ ! -f "${STATE_FILE}" ]]; then
@@ -1838,6 +1949,9 @@ resume_installation() {
       complete_installation
       ;;
     complete)
+      bootstrap_secret_version="$(state_get '.bootstrapSecretVersion')"
+      remove_bootstrap_transfer_secret "${bootstrap_secret_version}"
+      rm -rf "${AUTH_DIR}" "${MANAGEMENT_AUTH_DIR}"
       success "Installation is already complete."
       ;;
     *)
@@ -1859,8 +1973,9 @@ reset_installer_state() {
     info "Installer state preserved."
     return 0
   fi
-  rm -rf "${AUTH_DIR}"
+  rm -rf "${AUTH_DIR}" "${MANAGEMENT_AUTH_DIR}"
   rm -f "${STATE_FILE}" "${STATE_MARKER}"
+  release_installer_lock
   if [[ -d "${STATE_DIR}" ]] && ! rmdir "${STATE_DIR}" 2>/dev/null; then
     warning "Preserved unrecognized files in ${STATE_DIR}."
   fi
@@ -1881,6 +1996,9 @@ main() {
       exit 0
       ;;
     reset)
+      if [[ -d "${STATE_DIR}" || -f "${PROJECT_ROOT}/.clasp.json" ]]; then
+        acquire_installer_lock
+      fi
       reset_installer_state
       exit 0
       ;;
@@ -1891,6 +2009,7 @@ main() {
       ;;
   esac
 
+  acquire_installer_lock
   run_preflight
   if [[ "${MODE}" == "resume" ]]; then
     resume_installation

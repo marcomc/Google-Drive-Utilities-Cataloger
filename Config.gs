@@ -3,9 +3,18 @@ const CONFIG = Object.freeze({
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
-  MAX_PDF_BYTES: 50 * 1024 * 1024,
-  MAX_AGENTS_FILE_BYTES: 100 * 1024,
-  MAX_INTAKE_STATE_ENTRIES: 50,
+  // Base64 expands the PDF by roughly one third. Keep enough room below the
+  // Apps Script 50 MB URL Fetch POST limit for the prompt and JSON envelope.
+  MAX_PDF_BYTES: 35 * 1024 * 1024,
+  // The policy is staged with the complete private bootstrap payload in a
+  // Secret Manager version, whose payload must remain below 64 KiB.
+  MAX_AGENTS_FILE_BYTES: 40 * 1024,
+  // Apps Script limits one PropertiesService value to 9 KB. Keep margin for
+  // platform accounting and reject oversized configuration before bootstrap.
+  MAX_AUTOMATION_CONFIG_BYTES: 8 * 1024,
+  // Script Properties have a 500 KB total limit. Reserve most of that space
+  // for configuration, per-file state, mutation journals, and transport data.
+  MAX_PENDING_REPORT_BYTES: 256 * 1024,
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,
@@ -29,6 +38,10 @@ const CONFIG = Object.freeze({
     SPREADSHEET_ID: 'SPREADSHEET_ID',
     AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
     INTAKE_FILE_STATE: 'INTAKE_FILE_STATE',
+    INTAKE_FILE_STATE_PREFIX: 'INTAKE_FILE_STATE_',
+    PENDING_REPORT_PREFIX: 'PENDING_REPORT_',
+    MUTATION_JOURNAL_PREFIX: 'MUTATION_JOURNAL_',
+    MUTATION_RECOVERY_ALERT_PREFIX: 'MUTATION_RECOVERY_ALERT_',
     GOOGLE_CLOUD_PROJECT_ID: 'GOOGLE_CLOUD_PROJECT_ID',
     PUBSUB_TOPIC: 'PUBSUB_TOPIC',
     PUBSUB_SUBSCRIPTION: 'PUBSUB_SUBSCRIPTION',
@@ -187,10 +200,43 @@ function getAutomationConfig_() {
     throw new Error('AUTOMATION_CONFIG_JSON does not contain valid JSON: ' + error.message);
   }
 
+  validateAutomationConfig_(automationConfig);
+  return automationConfig;
+}
+
+function validateAutomationConfig_(automationConfig) {
+  if (!automationConfig || typeof automationConfig !== 'object' ||
+    Array.isArray(automationConfig)) {
+    throw new Error('AUTOMATION_CONFIG_JSON must contain an object.');
+  }
+  if (Utilities.newBlob(JSON.stringify(automationConfig)).getBytes().length >
+    CONFIG.MAX_AUTOMATION_CONFIG_BYTES) {
+    throw new Error(
+      'AUTOMATION_CONFIG_JSON exceeds the safe 8 KiB Script Property limit.'
+    );
+  }
   const requiredArrayKeys = ['canonical_supplies', 'canonical_suppliers', 'address_rules'];
   requiredArrayKeys.forEach(function (propertyKey) {
     if (!Array.isArray(automationConfig[propertyKey])) {
       throw new Error('AUTOMATION_CONFIG_JSON requires the ' + propertyKey + ' array.');
+    }
+  });
+  ['canonical_supplies', 'canonical_suppliers'].forEach(function (propertyKey) {
+    const values = automationConfig[propertyKey];
+    if (values.length === 0 || values.some(function (value) {
+      return typeof value !== 'string' || !value.trim() ||
+        /[\/\\\u0000-\u001f]/.test(value);
+    }) || new Set(values).size !== values.length) {
+      throw new Error('AUTOMATION_CONFIG_JSON ' + propertyKey +
+        ' must contain unique, non-empty strings.');
+    }
+    const normalizedValues = values.map(function (value) {
+      return normalizeConfigIdentity_(value);
+    });
+    if (normalizedValues.some(function (value) { return !value; }) ||
+      new Set(normalizedValues).size !== normalizedValues.length) {
+      throw new Error('AUTOMATION_CONFIG_JSON ' + propertyKey +
+        ' contains normalized duplicates or empty identities.');
     }
   });
 
@@ -198,20 +244,148 @@ function getAutomationConfig_() {
     ['import', 'archive_only'].indexOf(automationConfig.address_missing_type) === -1) {
     throw new Error('AUTOMATION_CONFIG_JSON address_missing_type must be import or archive_only.');
   }
-  const requiredObjectKeys = ['supply_aliases', 'supplier_aliases', 'destination_templates', 'sheet_by_supply'];
+  const addressRuleIdentities = Object.create(null);
+  automationConfig.address_rules.forEach(function (rule) {
+    if (!rule || typeof rule.match !== 'string' || !rule.match.trim() ||
+      ['import', 'archive_only'].indexOf(rule.type) === -1) {
+      throw new Error('AUTOMATION_CONFIG_JSON address_rules entries require match and a valid type.');
+    }
+    const normalizedMatch = normalizeConfigIdentity_(rule.match);
+    if (!normalizedMatch || addressRuleIdentities[normalizedMatch]) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON address_rules contains an empty or duplicate match.'
+      );
+    }
+    addressRuleIdentities[normalizedMatch] = true;
+  });
+
+  const requiredObjectKeys = [
+    'supply_aliases',
+    'supplier_aliases',
+    'destination_templates',
+    'sheet_by_supply'
+  ];
   requiredObjectKeys.forEach(function (propertyKey) {
-    if (!automationConfig[propertyKey] || typeof automationConfig[propertyKey] !== 'object' ||
+    if (!automationConfig[propertyKey] ||
+      typeof automationConfig[propertyKey] !== 'object' ||
       Array.isArray(automationConfig[propertyKey])) {
       throw new Error('AUTOMATION_CONFIG_JSON requires the ' + propertyKey + ' object.');
     }
   });
-  if (!automationConfig.archive_only_folder_path) {
-    throw new Error('AUTOMATION_CONFIG_JSON requires archive_only_folder_path.');
+  automationConfig.canonical_supplies.forEach(function (supply) {
+    if (typeof automationConfig.sheet_by_supply[supply] !== 'string' ||
+      !automationConfig.sheet_by_supply[supply].trim() ||
+      /[\[\]*?:\/\\]/.test(automationConfig.sheet_by_supply[supply])) {
+      throw new Error('AUTOMATION_CONFIG_JSON requires a sheet mapping for: ' + supply);
+    }
+  });
+  validateConfigAliasMap_(
+    automationConfig.supply_aliases,
+    automationConfig.canonical_supplies,
+    'supply'
+  );
+  validateConfigAliasMap_(
+    automationConfig.supplier_aliases,
+    automationConfig.canonical_suppliers,
+    'supplier'
+  );
+
+  validateConfiguredFolderPath_(automationConfig.archive_only_folder_path, false);
+  Object.keys(automationConfig.destination_templates).forEach(function (key) {
+    const parts = key.split('|');
+    if (parts.length !== 2 ||
+      automationConfig.canonical_supplies.indexOf(parts[0]) < 0 ||
+      automationConfig.canonical_suppliers.indexOf(parts[1]) < 0) {
+      throw new Error('AUTOMATION_CONFIG_JSON destination template key is invalid: ' + key);
+    }
+    validateConfiguredFolderPath_(automationConfig.destination_templates[key], true);
+  });
+
+  if (!Array.isArray(automationConfig.frequency_overrides || [])) {
+    throw new Error('AUTOMATION_CONFIG_JSON frequency_overrides must be an array.');
   }
-  if (automationConfig.locale && getSupportedLocales_().indexOf(automationConfig.locale) < 0) {
+  const frequencyOverrideKeys = Object.create(null);
+  (automationConfig.frequency_overrides || []).forEach(function (override) {
+    if (!override ||
+      automationConfig.canonical_suppliers.indexOf(override.supplier) < 0 ||
+      automationConfig.canonical_supplies.indexOf(override.supply_type) < 0 ||
+      typeof override.frequency !== 'string' || !override.frequency.trim()) {
+      throw new Error('AUTOMATION_CONFIG_JSON frequency_overrides entry is invalid.');
+    }
+    const key = override.supplier + '\u0000' + override.supply_type;
+    if (frequencyOverrideKeys[key]) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON frequency_overrides contains a duplicate tuple.'
+      );
+    }
+    frequencyOverrideKeys[key] = true;
+  });
+
+  if (automationConfig.locale &&
+    getSupportedLocales_().indexOf(automationConfig.locale) < 0) {
     throw new Error('AUTOMATION_CONFIG_JSON locale must be one of: ' +
       getSupportedLocales_().join(', ') + '.');
   }
+}
 
-  return automationConfig;
+function validateConfigAliasMap_(aliases, canonicalValues, label) {
+  const canonicalIdentities = Object.create(null);
+  canonicalValues.forEach(function (value) {
+    canonicalIdentities[normalizeConfigIdentity_(value)] = value;
+  });
+  const aliasIdentities = Object.create(null);
+  Object.keys(aliases).forEach(function (alias) {
+    const target = aliases[alias];
+    if (canonicalValues.indexOf(target) < 0) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON ' + label + ' alias targets an unknown value.'
+      );
+    }
+    const normalizedAlias = normalizeConfigIdentity_(alias);
+    if (!normalizedAlias) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON ' + label + ' alias has an empty identity.'
+      );
+    }
+    if (canonicalIdentities[normalizedAlias]) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON ' + label + ' alias shadows a canonical value.'
+      );
+    }
+    if (aliasIdentities[normalizedAlias]) {
+      throw new Error(
+        'AUTOMATION_CONFIG_JSON ' + label + ' aliases contain a normalized collision.'
+      );
+    }
+    aliasIdentities[normalizedAlias] = target;
+  });
+}
+
+function validateConfiguredFolderPath_(path, allowYearPlaceholder) {
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new Error('AUTOMATION_CONFIG_JSON requires a non-empty folder path.');
+  }
+  const yearPlaceholders = (path.match(/\{year\}/g) || []).length;
+  if ((!allowYearPlaceholder && yearPlaceholders > 0) ||
+    yearPlaceholders > 1) {
+    throw new Error('AUTOMATION_CONFIG_JSON contains an invalid year placeholder.');
+  }
+  path.split('/').forEach(function (segment) {
+    const candidate = allowYearPlaceholder ?
+      segment.replace('{year}', '2000') : segment;
+    if (!candidate || candidate === '.' || candidate === '..' ||
+      /[\\\u0000-\u001f]/.test(candidate) ||
+      /\{(?!year\})/.test(segment)) {
+      throw new Error('AUTOMATION_CONFIG_JSON contains an unsafe folder path.');
+    }
+  });
+}
+
+function normalizeConfigIdentity_(value) {
+  return String(value || '').trim().toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }

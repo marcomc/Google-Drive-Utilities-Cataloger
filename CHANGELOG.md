@@ -13,12 +13,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Direct-root PDF intake with strict exclusion of folders, nested files,
   non-PDF files, hidden files, and the Drive policy file.
-- Daily intake scanning plus an event-driven path using Google Workspace
-  Events, Pub/Sub, and a 15-minute Apps Script poller.
+- Daily intake scanning plus create, move, and content-change events using
+  Google Workspace Events, Pub/Sub, and a 15-minute Apps Script poller.
 - Installation-specific Pub/Sub topics and subscriptions, event-subscription
-  renewal, topology validation, and controlled transport repair.
-- Processing locks and durable per-file outcome fingerprints to prevent
-  concurrent work and redundant AI requests.
+  maximum-TTL patch renewal, long-running operation polling, live topology
+  validation, missing-subscription self-healing, and controlled transport
+  repair.
+- One-message pulls with a five-minute acknowledgement lease and acknowledgement
+  only after durable processing state.
+- Shared processing and lifecycle locks plus durable per-file processing
+  leases and outcome fingerprints to prevent concurrent work and redundant AI
+  requests.
 - Manual single-file processing for controlled validation and recovery.
 
 #### Gemini extraction
@@ -27,10 +32,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   Vertex location.
 - Optional automatic Vertex AI fallback for one hour after verified Gemini
   Developer API daily-quota exhaustion.
-- One normal generation request per eligible PDF, bounded transient retries,
-  and no retry for generic quota errors.
+- One normal generation request per eligible PDF, one bounded retry for
+  transient network, `408`, `429`, and selected `5xx` failures, and no backend
+  switch for generic quota errors.
 - PDF extraction into a strict JSON contract constrained by the configured
-  spreadsheet headers and Drive policy.
+  per-supply spreadsheet headers and Drive policy.
 - Provider usage logging for prompt, response, thinking, and total tokens,
   including an operational Vertex AI cost estimate.
 - Non-generative installer validation of Gemini API keys, models, projects,
@@ -51,8 +57,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   invoice total reconciliation before any mutation.
 - SHA-256 duplicate detection combined with supplier, identifier, and issue
   date checks across Drive and the spreadsheet.
-- Collision-safe canonical filenames and destination-folder verification
-  without destructive rollback.
+- Collision-safe canonical filenames, normalized configuration-identity
+  validation, and destination-folder verification.
+- Per-file mutation journals and provenance-checked compensation for
+  interrupted Sheet, rename, and move operations.
 
 #### Drive, Sheets, and email
 
@@ -62,11 +70,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Chronological invoice-row insertion into localized Google Sheets tabs.
 - Preservation of existing formulas, styles, column structure, and date and
   currency formats when inserting rows.
+- Literal writes for all untrusted text, with duplicate normalized headers and
+  formula-backed columns rejected.
 - Source-file hyperlinks plus post-write verification of invoice data,
   formulas, and Drive links.
 - Localized per-file email reports for imported, archived, duplicate,
   needs-review, and error outcomes.
-- Suppression of empty reports when no intake PDF was found.
+- Single-line normalization of untrusted report fields to prevent filenames or
+  extracted narrative text from spoofing additional email labels.
+- Durable email outbox with per-item, per-email, and total Script Properties
+  storage bounds, retry on a later run, and suppression when there are no new
+  or pending outcomes.
 
 #### Configuration and localization
 
@@ -74,8 +88,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   runtime selection, automation rules, and event-transport state.
 - Public `config.example.json` and private ignored `config.local.json`
   workflow.
+- Preflight and runtime enforcement of a safe 8 KiB automation-configuration
+  ceiling below the Apps Script per-property quota.
 - Separate English and Italian localization files for report labels, document
-  labels, spreadsheet headers, and header aliases.
+  labels, spreadsheet locale metadata, headers, and header aliases.
 - Generic public `AGENTS.example.md` template, installed as Drive
   `AGENTS.md` while preserving an existing valid policy.
 
@@ -93,15 +109,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Spreadsheet creation or adoption, localized tab initialization, Drive
   policy creation, destination-folder creation, Script Properties, Pub/Sub,
   Workspace Events, and trigger provisioning.
-- Private Gemini key transfer through an installation-specific, labeled,
-  temporary Secret Manager resource without exposing the key in process
-  arguments or installer state.
+- Idempotent placement repair for installer-created spreadsheets and
+  fail-closed locale/time-zone checks for populated user-supplied workbooks.
+- Complete private bootstrap transfer through an installation-specific,
+  labeled, temporary Secret Manager resource without exposing private values
+  in process arguments or installer state.
 - Temporary least-privilege Secret Manager access, credential replacement on
   retry, rejected-credential cleanup, and cleanup after successful
   installation.
 - Canonical and ownership-checked installer state paths with symlink
-  protection, resumable phases, state-version validation, and safe local
-  reset.
+  protection, a restrictive process creation mask, a portable cross-process
+  lock, atomic state writes, resumable phases, state-version validation, and
+  safe local reset.
+- Separate owner-only `clasp` authorization profiles for management and
+  runtime bootstrap, with permission repair and cleanup on success or reset.
+- Separate consent before changing billing on a reused Cloud project.
 - Durable OAuth audience guidance for Workspace and personal Google accounts.
 - Final validation of Pub/Sub topology, publisher IAM, Workspace event state,
   Script Properties, spreadsheet structure, and Apps Script triggers.
@@ -115,6 +137,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   and controlled-validation documentation.
 - Horizontal Mermaid flowcharts and operational use-case tables.
 - ShellCheck, Markdownlint, Bash syntax, Apps Script syntax, installer helper,
-  credential handoff, and Drive event topology tests.
+  private bootstrap, Drive event topology, runtime safety, configuration
+  collision, JSON, and localization contract tests.
 - MIT license and repository publication guidance that keeps private mappings,
   configuration, installer state, and credentials out of Git.

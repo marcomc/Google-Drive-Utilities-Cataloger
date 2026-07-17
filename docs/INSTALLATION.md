@@ -16,6 +16,7 @@ account controls that have no supported CLI.
 - [Drive and spreadsheet](#drive-and-spreadsheet)
 - [Gemini runtime](#gemini-runtime)
 - [Gemini API key](#gemini-api-key)
+- [Google resource bootstrap](#google-resource-bootstrap)
 - [Environment variable reference](#environment-variable-reference)
 - [Browser handoff](#browser-handoff)
 - [Apps Script API](#apps-script-api)
@@ -73,11 +74,13 @@ flowchart LR
   bootstrap --> verify["CLI validation"]
 ```
 
-The installer stores non-secret progress in `.installer/state.json`. During
-resume, owner-only `clasp` OAuth tokens may remain temporarily in
-`.installer/clasp-auth/` so a failed run can continue without another login.
-Both paths are private and ignored by Git; successful installation and reset
-remove the temporary authorization. The Gemini API key is never stored there.
+The installer stores non-secret progress in `.installer/state.json` and holds a
+portable lock while changing it or Google resources. Temporary owner-only
+`clasp` profiles live in `.installer/clasp-management-auth/` during project
+creation and `.installer/clasp-auth/` during bootstrap. They are isolated from
+the user's global `clasp` profile, ignored by Git, permission-repaired on
+resume, and removed after success or reset. Private bootstrap data is never
+stored there.
 
 ## Local tools
 
@@ -119,6 +122,11 @@ Recheck without changing Google resources:
 make install-check
 ```
 
+This checks local tools, the active Google Cloud CLI account, billing access,
+and any existing isolated Apps Script authorization. If none exists, it reports
+that the authorization will be created during `make install`; it never reads or
+creates a global `clasp` login.
+
 Contributors also need `shellcheck` and `markdownlint-cli`; runtime users do
 not.
 
@@ -153,17 +161,11 @@ applies; the installer does not grant itself organization or billing roles.
 
 ## clasp
 
-No global `clasp` installation is required. Every command uses the pinned
-version:
+No global `clasp` installation or login is required. Every command uses the
+pinned version and an installer-owned authorization profile:
 
 ```bash
 npx --yes @google/clasp@3.3.0 --version
-```
-
-The first run may open Google authorization:
-
-```bash
-npx --yes @google/clasp@3.3.0 login
 ```
 
 The account-level Apps Script API must also be enabled as described in
@@ -183,16 +185,16 @@ The installer asks for:
 | Report recipient | Active `gcloud` account |
 | Gemini runtime | Gemini Developer API |
 
-Use an IANA time zone such as `Europe/Rome`. Supported locales are `en` and
-`it`. Locale controls reports, generated spreadsheet headers, and document
-labels; extraction rules remain in `config.local.json`.
+Use an IANA time zone such as `Europe/Rome`. Bundled locales are `en` and `it`.
+Locale controls reports, generated spreadsheet headers, and document labels;
+extraction rules remain in `config.local.json`.
 
 The installer creates `config.local.json` from `config.example.json`. Before
 resume, replace the example suppliers, addresses, destinations, and tab names:
 
 ```bash
-jq empty config.local.json
 ${EDITOR:-vi} config.local.json
+node scripts/validate-config.js config.local.json
 ```
 
 An unchanged example configuration is rejected. See the
@@ -210,12 +212,14 @@ For the spreadsheet:
 - Missing configured tabs receive localized minimal headers.
 - Existing non-empty tabs must contain issue date, supplier, invoice number,
   and source-file headers.
+- A populated existing spreadsheet must already use the selected locale and
+  time zone; the installer refuses to change workbook-wide settings silently.
 - Unrelated existing tabs are not deleted.
 
 If no intake `AGENTS.md` exists, the installer creates one from the public
 `AGENTS.example.md` template. It preserves one existing non-empty policy and
-fails if the folder contains duplicates. Customize the Drive copy, not the
-repository template.
+fails if the folder contains duplicates or a policy larger than 40 KiB.
+Customize the Drive copy, not the repository template.
 
 Required ownership and access:
 
@@ -249,8 +253,8 @@ not upgrade that key's project to a paid Gemini plan.
 Gemini API keys inherit billing and quota from their project; a key has no
 independent tier. Vertex AI never uses `GEMINI_API_KEY`.
 
-Developer API modes enable Secret Manager in the cataloger Cloud project only
-for the credential handoff described below. The Gemini API itself remains in
+Every mode enables Secret Manager in the cataloger Cloud project for the
+private bootstrap handoff described below. The Gemini API itself remains in
 the Google AI Studio key's project.
 
 ## Gemini API key
@@ -278,26 +282,30 @@ gcloud services api-keys create \
 ```
 
 Save the printed key in a password manager immediately. The installer reads it
-from a hidden prompt or `GDUC_GEMINI_API_KEY` and pipes it through standard
-input to a temporary Secret Manager version in the cataloger Cloud project.
-Only the non-secret version resource name reaches the owner-only Apps Script
-bootstrap. Bootstrap validates the key and model, stores the key in Script
-Properties, and the installer deletes the transfer secret.
-
-The installer grants the same owner temporary Secret Accessor permission on
-only this installation's transfer secret. The secret name includes the Apps
-Script ID, and an ownership label prevents reuse or deletion of an unrelated
-secret.
-
-The key is never placed in process arguments or written to `.installer/`,
-`config.local.json`, logs, or Git. A failed resume retains the encrypted
-transfer secret so the next resume does not request the key again. Successful
-installation deletes it; if cleanup fails, the installer prints the exact
-secret name to remove.
+from a hidden prompt or `GDUC_GEMINI_API_KEY`. Bootstrap validates the key and
+model and stores the key in Script Properties.
 
 Free or paid Gemini status is changed on the key's project in Google AI Studio;
 creating a new key is not inherently required when that same project changes
 tier.
+
+## Google resource bootstrap
+
+The installer builds the complete private bootstrap payload from the
+installation state, `config.local.json`, `AGENTS.example.md`, and the optional
+Gemini key. It pipes that payload to an installation-specific temporary Secret
+Manager version. Only the non-secret version resource name is passed through
+`clasp run`; private values do not appear in command arguments.
+
+The installer grants the same owner temporary Secret Accessor permission on
+only this installation's bootstrap secret. The secret name includes the Apps
+Script ID, and an ownership label prevents reuse or deletion of an unrelated
+secret.
+
+The payload is never written to `.installer/`, command arguments, logs, or Git.
+A failed resume retains the encrypted bootstrap secret so the next resume can
+continue. Successful installation deletes it; if cleanup fails, the installer
+prints the exact secret name to remove.
 
 ## Environment variable reference
 
@@ -310,7 +318,8 @@ non-interactive installation:
 | `GDUC_PROJECT_ID` | Globally unique Cloud project ID |
 | `GDUC_REUSE_PROJECT=true` | Permit reuse of an existing project |
 | `GDUC_BILLING_ACCOUNT_ID` | Billing account ID, without or with prefix |
-| `GDUC_LOCALE` | `en` or `it` |
+| `GDUC_ALLOW_BILLING_RELINK=true` | Separately permit changing billing on a reused project |
+| `GDUC_LOCALE` | Bundled locale code: `en` or `it` |
 | `GDUC_TIME_ZONE` | IANA time zone |
 | `GDUC_NOTIFICATION_RECIPIENT` | Report email address |
 | `GDUC_ROOT_FOLDER` | Drive intake-folder URL or ID |
@@ -319,7 +328,7 @@ non-interactive installation:
 | `GDUC_GEMINI_MODE` | `gemini_api`, `vertex_ai`, or `gemini_api_with_vertex_fallback` |
 | `GDUC_GEMINI_MODEL` | Optional model; default `gemini-2.5-flash`; may override the pending value on resume |
 | `GDUC_VERTEX_AI_LOCATION` | Optional Vertex location; default `global`; may override the pending value on resume |
-| `GDUC_OAUTH_CLIENT_JSON` | Desktop OAuth client JSON used on resume |
+| `GDUC_OAUTH_CLIENT_JSON` | Desktop OAuth client JSON outside the checkout, used on resume |
 | `GDUC_GEMINI_API_KEY` | Secret; required on resume for Gemini API |
 | `GDUC_STATE_DIR` | Optional absolute state path outside the checkout; it must be absent, empty, or already installer-owned |
 | `NO_COLOR` | Disable terminal colors when non-empty |
@@ -345,16 +354,23 @@ GDUC_GEMINI_MODE="gemini_api" \
 ./scripts/install.sh --non-interactive --no-open
 ```
 
-Edit `config.local.json`, complete the browser handoff, then resume with secrets
-provided by the process environment or secret manager:
+Edit `config.local.json`, complete the browser handoff, then inject the secret
+without placing it in shell history:
 
 ```bash
+printf 'GEMINI_API_KEY: '
+IFS= read -r -s GDUC_GEMINI_API_KEY
+printf '\n'
+export GDUC_GEMINI_API_KEY
+
 GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
-GDUC_GEMINI_API_KEY="secret-from-password-manager" \
 ./scripts/install.sh --resume --non-interactive
+
+unset GDUC_GEMINI_API_KEY
 ```
 
-Avoid saving secret-bearing commands in shell history.
+For unattended use, inject `GDUC_GEMINI_API_KEY` from the process secret
+manager instead.
 
 ## Browser handoff
 
@@ -417,7 +433,8 @@ In the project-specific Google Auth client page opened by the installer:
 
 The installer rejects a client whose ID does not start with the selected Cloud
 project number. Keep the JSON private, save it with the other project secrets
-if it must be retained, and remove stray copies from Downloads.
+if it must be retained, and remove stray copies from Downloads. Its resolved
+path must be outside the repository checkout.
 
 ## Apps Script project
 
@@ -439,6 +456,8 @@ only so the installer can invoke `bootstrapCatalogerInstallation` and
 
 The owner-only bootstrap:
 
+- reads the complete private payload from the installation-owned Secret
+  Manager version;
 - validates Gemini credentials, model, and Vertex location without generating
   content;
 - validates Drive access and private configuration;
@@ -448,7 +467,11 @@ The owner-only bootstrap:
 - installs the daily, 15-minute poll, and six-hour renewal triggers.
 
 After success, the installer removes its local custom `clasp` authorization
-file.
+profiles and the temporary bootstrap secret.
+
+The manifest retains the broad `cloud-platform` scope because Apps Script
+directly calls Secret Manager, Pub/Sub, Workspace Events, and optionally Vertex
+AI. Removing that scope requires splitting the runtime architecture.
 
 ## Controlled validation
 
@@ -473,7 +496,7 @@ Only after this test passes should the previous automation be paused.
 | `NOT_AUTHORIZED` | Correct the durable OAuth audience, then rerun resume. If authorization remains stale, run `rm -rf "${GDUC_STATE_DIR:-.installer}/clasp-auth"` first. |
 | Configuration rejected | Fix `config.local.json`; example values and unsupported locales fail closed. |
 | Gemini credential validation fails | Correct the model or location with the matching environment variable. The installer discards a key rejected by Gemini; enter it again, or pass a corrected `GDUC_GEMINI_API_KEY`, on the next resume. |
-| Temporary credential handoff fails | Confirm Secret Manager API access in the cataloger project, then rerun resume. |
+| Temporary bootstrap handoff fails | Confirm Secret Manager API access in the cataloger project, then rerun resume. |
 | Drive or Sheet access denied | Grant Editor access to the installer account. |
 | Workspace Events error | Confirm Developer Preview enrollment and required APIs. |
 | Pub/Sub validation fails | Rerun resume with `--debug`, then use the operations guide transport checks. |
@@ -484,8 +507,9 @@ Use:
 make install-resume-debug
 ```
 
-The installer is idempotent where Google APIs allow it. It reuses its stored
-project, deployment, and resource identifiers.
+During an incomplete installation, the installer is idempotent where Google
+APIs allow it. It reuses its stored project, deployment, and resource
+identifiers. Updating a completed installation is tracked in `TODO.md`.
 
 ## Resetting private installer state
 
@@ -493,13 +517,14 @@ project, deployment, and resource identifiers.
 make install-reset
 ```
 
-This deletes `.installer/` and the local `.clasp.json` mapping. It does not
+This deletes `.installer/`, both isolated `clasp` profiles, the installer lock,
+and the local `.clasp.json` mapping. It does not
 delete the Cloud project, Apps Script project, spreadsheet, Drive files,
-Pub/Sub resources, triggers, or a transfer secret retained by a failed resume.
+Pub/Sub resources, triggers, or a bootstrap secret retained by a failed resume.
 Delete Google resources separately only after inspecting them.
 
-When abandoning a failed Gemini Developer API installation, remove its
-temporary transfer secret before reset:
+When abandoning a failed installation, remove its temporary bootstrap secret
+before reset:
 
 ```bash
 STATE_DIR="${GDUC_STATE_DIR:-.installer}"
@@ -522,7 +547,8 @@ mapping without changing Google resources:
 
 ```bash
 jq -r '.scriptId, .projectId' .clasp.json
-npx --yes @google/clasp@3.3.0 status
+printf 'https://script.google.com/home/projects/%s\n' \
+  "$(jq -r '.scriptId' .clasp.json)"
 gcloud projects describe "$(jq -r '.projectId' .clasp.json)"
 ```
 

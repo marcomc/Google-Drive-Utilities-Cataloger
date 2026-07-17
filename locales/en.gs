@@ -4,6 +4,7 @@
 function getEnglishLocalization_() {
   return Object.freeze({
     promptLanguage: 'English',
+    spreadsheetLocale: 'en_US',
     installerSheetHeaders: Object.freeze([
       'Issue date',
       'Supplier',

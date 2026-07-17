@@ -3,6 +3,12 @@
  * renewal trigger. This does not create Cloud resources by itself.
  */
 function installAutomationTriggers() {
+  return withCatalogLifecycleLock_('install-triggers', function () {
+    return installAutomationTriggersUnlocked_();
+  });
+}
+
+function installAutomationTriggersUnlocked_() {
   assertCatalogConfiguration_();
   removeTriggersFor_('runDailyUtilitiesCataloging');
   removeTriggersFor_('processDriveEventQueue');
@@ -26,7 +32,13 @@ function installAutomationTriggers() {
 }
 
 function removeAutomationTriggers() {
-  ['runDailyUtilitiesCataloging', 'processDriveEventQueue', 'renewDriveEventSubscription'].forEach(removeTriggersFor_);
+  return withCatalogLifecycleLock_('remove-triggers', function () {
+    [
+      'runDailyUtilitiesCataloging',
+      'processDriveEventQueue',
+      'renewDriveEventSubscription'
+    ].forEach(removeTriggersFor_);
+  });
 }
 
 function removeTriggersFor_(handlerFunction) {
@@ -42,38 +54,69 @@ function removeTriggersFor_(handlerFunction) {
  * intake PDFs identified by the event payload.
  */
 function processDriveEventQueue() {
+  assertCatalogConfiguration_();
+  return withCatalogProcessingLock_('drive-event', function () {
+    return processDriveEventQueueUnlocked_();
+  });
+}
+
+function processDriveEventQueueUnlocked_() {
   const subscription = getScriptProperty_(CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION);
   if (!subscription) {
     console.log('Pub/Sub is not configured; no Drive events can be processed.');
+    logCatalogEvent_('catalog-run-completed', {
+      resultCount: 0,
+      triggerSource: 'drive-event'
+    });
     return { processed: false, reason: 'not-configured' };
   }
+  const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+  const recoveredResults = recoverPendingMutations_(rootFolder);
+  flushPendingReports_();
 
   const response = cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':pull', {
     method: 'post',
-    payload: JSON.stringify({ maxMessages: 10 })
+    payload: JSON.stringify({ maxMessages: 1 })
   });
   const messages = response.receivedMessages || [];
   if (messages.length === 0) {
-    return { processed: false, reason: 'empty' };
+    logCatalogEvent_('catalog-run-completed', {
+      resultCount: recoveredResults.length,
+      triggerSource: 'drive-event'
+    });
+    return {
+      processed: recoveredResults.length > 0,
+      reason: 'empty',
+      results: recoveredResults
+    };
   }
+  const ackIds = messages.map(function (message) { return message.ackId; });
+  cloudFetch_('https://pubsub.googleapis.com/v1/' +
+    subscription + ':modifyAckDeadline', {
+    method: 'post',
+    payload: JSON.stringify({ ackIds: ackIds, ackDeadlineSeconds: 300 })
+  });
 
-  const rootFolder = DriveApp.getFolderById(getRootFolderId_());
   const files = getEventIntakeFiles_(messages, rootFolder);
   logCatalogEvent_('drive-event-received', {
     messageCount: messages.length,
     eligibleIntakePdfCount: files.length
   });
-  const results = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
-  if (results.length > 0) {
-    sendReportEmail_(results);
-  }
-  const ackIds = messages.map(function (message) { return message.ackId; });
+  const batch = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
+  finalizeCatalogResults_(batch.state, batch.results);
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
     method: 'post',
     payload: JSON.stringify({ ackIds: ackIds })
   });
   logCatalogEvent_('drive-event-acknowledged', { messageCount: ackIds.length });
-  return { processed: files.length > 0, results: results };
+  logCatalogEvent_('catalog-run-completed', {
+    resultCount: recoveredResults.length + batch.results.length,
+    triggerSource: 'drive-event'
+  });
+  return {
+    processed: files.length > 0 || recoveredResults.length > 0,
+    results: recoveredResults.concat(batch.results)
+  };
 }
 
 function getEventIntakeFiles_(messages, rootFolder) {
@@ -107,7 +150,7 @@ function decodeWorkspaceEventData_(encodedData) {
     const bytes = Utilities.base64Decode(encodedData);
     return JSON.parse(Utilities.newBlob(bytes).getDataAsString());
   } catch (error) {
-    console.warn('Could not decode a Workspace Drive event payload: ' + error.message);
+    console.warn('Could not decode a Workspace Drive event payload.');
     return null;
   }
 }
@@ -118,6 +161,12 @@ function decodeWorkspaceEventData_(encodedData) {
  * project and enable Workspace Events API, Drive API and Pub/Sub API there.
  */
 function provisionDriveEventTransport() {
+  return withCatalogLifecycleLock_('provision-event-transport', function () {
+    return provisionDriveEventTransportUnlocked_();
+  });
+}
+
+function provisionDriveEventTransportUnlocked_() {
   const projectId = getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
@@ -145,6 +194,12 @@ function provisionDriveEventTransport() {
  * path that is configured but not receiving new-file notifications.
  */
 function recreateDriveEventSubscription() {
+  return withCatalogLifecycleLock_('recreate-event-subscription', function () {
+    return recreateDriveEventSubscriptionUnlocked_();
+  });
+}
+
+function recreateDriveEventSubscriptionUnlocked_() {
   const projectId = getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
@@ -160,7 +215,12 @@ function recreateDriveEventSubscription() {
   const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
   if (current) {
     try {
-      cloudFetch_('https://workspaceevents.googleapis.com/v1/' + current, { method: 'delete' });
+      const live = getWorkspaceEventSubscription_(current);
+      assertWorkspaceEventOwnership_(live, topic);
+      waitForWorkspaceOperation_(cloudFetch_(
+        'https://workspaceevents.googleapis.com/v1/' + current,
+        { method: 'delete' }
+      ), false);
     } catch (error) {
       if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
         throw error;
@@ -189,6 +249,12 @@ function getDriveEventPullSubscriptionName_(projectId) {
 }
 
 function renewDriveEventSubscription() {
+  return withCatalogLifecycleLock_('renew-event-subscription', function () {
+    return renewDriveEventSubscriptionUnlocked_();
+  });
+}
+
+function renewDriveEventSubscriptionUnlocked_() {
   const properties = PropertiesService.getScriptProperties();
   const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
   if (!topic) {
@@ -196,22 +262,56 @@ function renewDriveEventSubscription() {
     return { renewed: false, reason: 'not-configured' };
   }
 
-  const expiresAt = new Date(properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_EXPIRES_AT) || 0);
+  const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
+  if (!current) {
+    const created = createDriveEventSubscription_(topic);
+    storeWorkspaceEventSubscription_(created);
+    return { renewed: true, subscription: created.name };
+  }
+  let live;
+  try {
+    live = getWorkspaceEventSubscription_(current);
+  } catch (error) {
+    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+      throw error;
+    }
+    const replacement = createDriveEventSubscription_(topic);
+    storeWorkspaceEventSubscription_(replacement);
+    return {
+      renewed: true,
+      reason: 'missing-subscription-recreated',
+      subscription: replacement.name
+    };
+  }
+  assertWorkspaceEventTopology_(live, topic);
+  const expiresAt = new Date(live.expireTime || 0);
   if (expiresAt.getTime() - Date.now() > 12 * 60 * 60 * 1000) {
+    storeWorkspaceEventSubscription_(live);
     return { renewed: false, reason: 'not-due' };
   }
-
-  const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
-  if (current) {
-    try {
-      cloudFetch_('https://workspaceevents.googleapis.com/v1/' + current, { method: 'delete' });
-    } catch (error) {
-      console.warn('Could not delete the previous event subscription: ' + error.message);
+  const operation = cloudFetch_(
+    'https://workspaceevents.googleapis.com/v1/' + current +
+      '?updateMask=ttl',
+    {
+      method: 'patch',
+      payload: JSON.stringify({ ttl: '0s' })
     }
-  }
-  const subscription = createDriveEventSubscription_(topic);
+  );
+  const subscription = waitForWorkspaceOperation_(operation);
   storeWorkspaceEventSubscription_(subscription);
   return { renewed: true, subscription: subscription.name };
+}
+
+function withCatalogLifecycleLock_(operation, callback) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('Another catalog operation is already running: ' + operation);
+  }
+  try {
+    return callback();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function ensurePubSubTopic_(topic) {
@@ -236,7 +336,9 @@ function grantDrivePublisher_(topic) {
   policy.bindings = policy.bindings || [];
   const role = 'roles/pubsub.publisher';
   const member = 'serviceAccount:drive-api-event-push@system.gserviceaccount.com';
-  let binding = policy.bindings.filter(function (item) { return item.role === role; })[0];
+  let binding = policy.bindings.filter(function (item) {
+    return item.role === role && !item.condition;
+  })[0];
   if (!binding) {
     binding = { role: role, members: [] };
     policy.bindings.push(binding);
@@ -263,7 +365,7 @@ function ensurePubSubPullSubscription_(subscription, topic) {
     }
     cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, {
       method: 'put',
-      payload: JSON.stringify({ topic: topic, ackDeadlineSeconds: 60 })
+      payload: JSON.stringify({ topic: topic, ackDeadlineSeconds: 300 })
     });
     return;
   }
@@ -273,7 +375,7 @@ function ensurePubSubPullSubscription_(subscription, topic) {
       'Existing Pub/Sub pull subscription targets an unexpected topic.'
     );
   }
-  if (Number(current.ackDeadlineSeconds) !== 60) {
+  if (Number(current.ackDeadlineSeconds) !== 300) {
     cloudFetch_(
       'https://pubsub.googleapis.com/v1/' + subscription,
       {
@@ -282,7 +384,7 @@ function ensurePubSubPullSubscription_(subscription, topic) {
           subscription: {
             name: subscription,
             topic: topic,
-            ackDeadlineSeconds: 60
+            ackDeadlineSeconds: 300
           },
           updateMask: 'ackDeadlineSeconds'
         })
@@ -292,24 +394,77 @@ function ensurePubSubPullSubscription_(subscription, topic) {
 }
 
 function createDriveEventSubscription_(topic) {
-  const operation = cloudFetch_('https://workspaceevents.googleapis.com/v1/subscriptions', {
-    method: 'post',
-    payload: JSON.stringify({
-      targetResource: '//drive.googleapis.com/files/' + getRootFolderId_(),
-      eventTypes: [
-        'google.workspace.drive.file.v3.created'
-      ],
-      payloadOptions: { includeResource: false },
-      // A folder target receives child-file changes only when this is true.
-      driveOptions: { includeDescendants: true },
-      notificationEndpoint: { pubsubTopic: topic },
-      ttl: '86400s'
-    })
-  });
-  if (!operation.response || !operation.response.name) {
-    throw new Error('Workspace Events did not return a Subscription in the create operation.');
+  let lastError;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      const operation = cloudFetch_(
+        'https://workspaceevents.googleapis.com/v1/subscriptions',
+        {
+          method: 'post',
+          payload: JSON.stringify({
+            targetResource: '//drive.googleapis.com/files/' + getRootFolderId_(),
+            eventTypes: getDriveWorkspaceEventTypes_(),
+            payloadOptions: { includeResource: false },
+            // A folder target receives child-file changes only when this is true.
+            driveOptions: { includeDescendants: true },
+            notificationEndpoint: { pubsubTopic: topic },
+            ttl: '0s'
+          })
+        }
+      );
+      return waitForWorkspaceOperation_(operation);
+    } catch (error) {
+      lastError = error;
+      if (!/permission|publisher|403/i.test(error.message) || attempt === 6) {
+        throw error;
+      }
+      Utilities.sleep(Math.min(60000, 5000 * Math.pow(2, attempt - 1)));
+    }
   }
-  return operation.response;
+  throw lastError;
+}
+
+function getDriveWorkspaceEventTypes_() {
+  return [
+    'google.workspace.drive.file.v3.created',
+    'google.workspace.drive.file.v3.moved',
+    'google.workspace.drive.file.v3.contentChanged'
+  ];
+}
+
+function waitForWorkspaceOperation_(operation, expectSubscription) {
+  const requireSubscription = expectSubscription !== false;
+  let current = operation || {};
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (current.error) {
+      throw new Error('Workspace Events operation failed: ' +
+        String(current.error.message || JSON.stringify(current.error)));
+    }
+    if (current.response) {
+      if (requireSubscription && !current.response.name) {
+        throw new Error('Workspace Events returned an invalid Subscription.');
+      }
+      return current.response;
+    }
+    if (requireSubscription && current.name && current.expireTime) {
+      return current;
+    }
+    if (!current.name) {
+      throw new Error('Workspace Events did not return an operation name.');
+    }
+    if (current.done === true) {
+      if (!requireSubscription) {
+        return {};
+      }
+      throw new Error('Workspace Events operation completed without a Subscription.');
+    }
+    Utilities.sleep(2000);
+    current = cloudFetch_(
+      'https://workspaceevents.googleapis.com/v1/' + current.name,
+      { method: 'get' }
+    );
+  }
+  throw new Error('Workspace Events operation did not complete in time.');
 }
 
 function findDriveEventSubscription_(topic) {
@@ -320,11 +475,12 @@ function findDriveEventSubscription_(topic) {
     encodeURIComponent(filter), { method: 'get' });
   const subscriptions = response.subscriptions || [];
   const matching = subscriptions.filter(function (subscription) {
-    return subscription.state === 'ACTIVE' &&
-      subscription.notificationEndpoint &&
-      subscription.notificationEndpoint.pubsubTopic === topic &&
-      subscription.driveOptions &&
-      subscription.driveOptions.includeDescendants === true;
+    try {
+      assertWorkspaceEventTopology_(subscription, topic);
+      return true;
+    } catch (error) {
+      return false;
+    }
   });
   if (matching.length > 1) {
     throw new Error(
@@ -340,6 +496,68 @@ function findDriveEventSubscription_(topic) {
     );
   }
   return null;
+}
+
+function getWorkspaceEventSubscription_(name) {
+  return cloudFetch_(
+    'https://workspaceevents.googleapis.com/v1/' + name,
+    { method: 'get' }
+  );
+}
+
+function assertWorkspaceEventOwnership_(subscription, topic) {
+  const targetResource = '//drive.googleapis.com/files/' + getRootFolderId_();
+  if (!subscription || subscription.targetResource !== targetResource ||
+    !subscription.notificationEndpoint ||
+    subscription.notificationEndpoint.pubsubTopic !== topic) {
+    throw new Error(
+      'Stored Workspace event subscription is not owned by this installation.'
+    );
+  }
+}
+
+function assertWorkspaceEventTopology_(subscription, topic) {
+  assertWorkspaceEventOwnership_(subscription, topic);
+  const eventTypes = subscription.eventTypes || [];
+  if (subscription.state !== 'ACTIVE' ||
+    !subscription.driveOptions ||
+    subscription.driveOptions.includeDescendants !== true ||
+    !getDriveWorkspaceEventTypes_().every(function (eventType) {
+      return eventTypes.indexOf(eventType) >= 0;
+    })) {
+    throw new Error('Workspace event subscription topology is invalid.');
+  }
+}
+
+function validateDriveEventTopology_() {
+  const projectId = getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
+  const expectedTopic = getDriveEventTopicName_(projectId);
+  const expectedPull = getDriveEventPullSubscriptionName_(projectId);
+  const properties = PropertiesService.getScriptProperties();
+  if (properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC) !== expectedTopic ||
+    properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION) !== expectedPull) {
+    throw new Error('Stored Pub/Sub resource names do not match this installation.');
+  }
+  cloudFetch_('https://pubsub.googleapis.com/v1/' + expectedTopic, { method: 'get' });
+  const pull = cloudFetch_(
+    'https://pubsub.googleapis.com/v1/' + expectedPull,
+    { method: 'get' }
+  );
+  if (pull.topic !== expectedTopic || Number(pull.ackDeadlineSeconds) !== 300) {
+    throw new Error('Live Pub/Sub subscription topology is invalid.');
+  }
+  const workspaceName = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION
+  );
+  if (!workspaceName) {
+    throw new Error('Workspace event subscription is not configured.');
+  }
+  const workspace = getWorkspaceEventSubscription_(workspaceName);
+  assertWorkspaceEventTopology_(workspace, expectedTopic);
+  if (new Date(workspace.expireTime).getTime() <= Date.now()) {
+    throw new Error('Workspace event subscription is expired.');
+  }
+  return workspace;
 }
 
 function storeWorkspaceEventSubscription_(subscription) {

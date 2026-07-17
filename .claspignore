@@ -1,5 +1,8 @@
 # Runtime secrets are configured only in Apps Script Script Properties.
 .clasp.json
+.clasp.json.tmp*
+client_secret_*.json
+oauth-client*.json
 node_modules/**
 README.md
 CHANGELOG.md
@@ -10,6 +13,7 @@ Makefile
 LICENSE
 config.example.json
 config.local.json
+config.local.json.tmp*
 .gitignore
 .markdownlint.json
 .installer/**
