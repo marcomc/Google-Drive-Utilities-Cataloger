@@ -9,6 +9,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Deployment automation
+
+- Pull-request validation with `make check` before merging into `main`.
+- Automatic Apps Script source deployment after a pull request is merged into
+  `main`.
+- Numbered Apps Script versions labelled with the merged commit SHA and updates
+  to a stable deployment ID without recreating the Apps Script project,
+  triggers, Script Properties, or Google resources.
+- Production GitHub Actions concurrency control and isolated deployment secrets
+  documented in the deployment guide.
+
 #### Utility document automation
 
 - Direct-root PDF intake with strict exclusion of folders, nested files,

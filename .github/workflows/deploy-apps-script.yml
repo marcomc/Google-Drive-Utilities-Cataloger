@@ -1,0 +1,66 @@
+name: Deploy Apps Script
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apps-script-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04
+    environment: production
+
+    steps:
+      - name: Check out merged revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run validation
+        run: make check
+
+      - name: Install clasp
+        run: npm install --global @google/clasp@3.3.0
+
+      - name: Prepare private clasp configuration
+        env:
+          CLASP_AUTH_JSON: ${{ secrets.CLASP_AUTH_JSON }}
+          CLASP_PROJECT_JSON: ${{ secrets.CLASP_PROJECT_JSON }}
+        run: |
+          set -euo pipefail
+          auth_dir="$RUNNER_TEMP/clasp-auth"
+          mkdir -m 700 "$auth_dir"
+          printf '%s' "$CLASP_AUTH_JSON" > "$auth_dir/.clasprc.json"
+          chmod 600 "$auth_dir/.clasprc.json"
+          printf '%s' "$CLASP_PROJECT_JSON" > .clasp.json
+          chmod 600 .clasp.json
+
+      - name: Push source and update deployment
+        env:
+          APPS_SCRIPT_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
+        run: |
+          set -euo pipefail
+          auth_dir="$RUNNER_TEMP/clasp-auth"
+          version_label="main-${GITHUB_SHA::12}"
+          clasp -A "$auth_dir" push --force
+          version_id="$(clasp -A "$auth_dir" version "$version_label" | awk 'NF { value=$NF } END { print value }')"
+          test -n "$version_id"
+          clasp -A "$auth_dir" deploy \
+            --deploymentId "$APPS_SCRIPT_DEPLOYMENT_ID" \
+            --versionNumber "$version_id" \
+            --description "$version_label"
+

@@ -1,5 +1,19 @@
 # Google Drive Utilities Cataloger Instructions
 
+## Runtime policy synchronization
+
+- Treat the repository `AGENTS.md` as development guidance for the coding
+  agent, and treat the separate `AGENTS.md` in the configured Google Drive
+  intake folder as the runtime policy read by the Apps Script and Vertex AI.
+- Never assume that updating this repository file updates the live Drive policy.
+  When testing the application or implementing a change reveals a rule that
+  should improve runtime classification, extraction, safety, or import
+  behavior, apply the corresponding reviewed change to the live Drive
+  `AGENTS.md` as a separate operational update.
+- Verify the live Drive copy after updating it and record the policy change in
+  the relevant test evidence or operational documentation. Do not overwrite
+  the live policy automatically during source deployment.
+
 ## Apps Script Event Processing
 
 - Keep polling cadence, Pub/Sub message data volume, and Apps Script trigger
