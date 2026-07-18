@@ -57,6 +57,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Project guidance that distinguishes coding-agent instructions from the live
   Drive runtime policy and requires reviewed runtime-policy improvements to be
   applied and verified separately.
+- CI and deployment validation pinned to checksum-verified ShellCheck 0.11.0,
+  matching the local all-severity shell gate and avoiding runner package drift.
 
 #### Utility document automation
 
