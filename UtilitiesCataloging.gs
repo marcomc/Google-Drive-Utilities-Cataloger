@@ -617,7 +617,7 @@ function buildExtractionResponseSchema_() {
           additionalProperties: false,
           properties: {
             header: { type: 'string' },
-            value: { type: ['string', 'number', 'null'] }
+            value: { type: ['string', 'number', 'boolean', 'null'] }
           },
           required: ['header', 'value']
         }
@@ -798,7 +798,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "cost_non_consumption": 0.00,',
     '  "vat": 0.00,',
     '  "total": 0.00,',
-    '  "sheet_values": [{"header":"exact allowed header","value": "number, text, or date"}],',
+    '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date"}],',
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',

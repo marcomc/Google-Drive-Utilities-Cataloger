@@ -301,6 +301,11 @@ function testDeveloperApiKeyUsesHeader() {
     payload.generationConfig.responseJsonSchema.properties.document_type.enum,
     ['Invoice', 'Contract', 'Report', 'unknown']
   );
+  assert.deepEqual(
+    payload.generationConfig.responseJsonSchema.properties.sheet_values
+      .items.properties.value.type,
+    ['string', 'number', 'boolean', 'null']
+  );
 }
 
 function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {

@@ -106,6 +106,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Provider-enforced JSON Schema output for both Gemini Developer API and
   Vertex AI, preventing trailing model text from invalidating an otherwise
   successful extraction response.
+- Boolean custom-sheet values preserved consistently across structured-output
+  schema, extraction validation, spreadsheet writes, and result verification.
 - Gemini 3.5 Flash extraction with medium thinking, an 8,192-token response
   budget, and explicit incomplete-response detection.
 - Provider usage logging for prompt, response, thinking, and total tokens,
