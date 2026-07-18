@@ -51,6 +51,9 @@
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
 - Keep installer-owned `clasp` authorization isolated from the global profile.
+  Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
+  and cover the real CLI argument shape in tests rather than only mocking the
+  command name.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured

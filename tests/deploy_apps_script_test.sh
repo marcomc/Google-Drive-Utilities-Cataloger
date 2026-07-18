@@ -28,14 +28,28 @@ cat >"${FAKE_BIN}/clasp" <<'FAKE_CLASP'
 #!/usr/bin/env bash
 set -euo pipefail
 command_name=""
+auth_file=""
+expect_auth_file=0
 for argument in "$@"; do
+  if [[ "${expect_auth_file}" -eq 1 ]]; then
+    auth_file="${argument}"
+    expect_auth_file=0
+    continue
+  fi
   case "${argument}" in
+    -A)
+      expect_auth_file=1
+      ;;
     deployments | pull | push | version | deploy)
       command_name="${argument}"
       break
       ;;
   esac
 done
+if [[ "${auth_file}" != */.clasprc.json || ! -f "${auth_file}" ]]; then
+  printf '%s\n' "clasp -A must reference an existing .clasprc.json file" >&2
+  exit 3
+fi
 case "${command_name}" in
   deployments)
     printf '[{"deploymentId":"%s","versionNumber":4}]\n' \

@@ -87,6 +87,16 @@ function testCommittedJsonAndRuntimeConfig() {
   assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
   assert.match(installerShell, /\.ackDeadlineSeconds == 300/);
   assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);
+  assert.doesNotMatch(
+    installerShell,
+    /-A "\$\{(?:AUTH_DIR|MANAGEMENT_AUTH_DIR|auth_dir)\}"/
+  );
+  assert.match(installerShell, /-A "\$\{AUTH_DIR\}\/\.clasprc\.json"/);
+  assert.match(
+    installerShell,
+    /-A "\$\{MANAGEMENT_AUTH_DIR\}\/\.clasprc\.json"/
+  );
+  assert.match(installerShell, /-A "\$\{auth_dir\}\/\.clasprc\.json"/);
 
   const context = loadConfigContext();
   const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);

@@ -458,7 +458,7 @@ authorized_clasp_account() {
   local auth_dir="$1"
   local clasp_output
 
-  if ! clasp_output="$("${CLASP[@]}" -A "${auth_dir}" --json \
+  if ! clasp_output="$("${CLASP[@]}" -A "${auth_dir}/.clasprc.json" --json \
     show-authorized-user 2>/dev/null)"; then
     return 1
   fi
@@ -1120,7 +1120,7 @@ ensure_clasp_management_access() {
 
   print_heading "Apps Script CLI authorization"
   if [[ -f "${MANAGEMENT_AUTH_DIR}/.clasprc.json" ]] &&
-    auth_output="$("${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json \
+    auth_output="$("${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}/.clasprc.json" --json \
       show-authorized-user 2>/dev/null)" &&
     printf '%s' "${auth_output}" |
       jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
@@ -1134,13 +1134,14 @@ ensure_clasp_management_access() {
     fi
     mkdir -p "${MANAGEMENT_AUTH_DIR}"
     chmod 700 "${MANAGEMENT_AUTH_DIR}"
-    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" login
+    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}/.clasprc.json" login
     chmod 600 "${MANAGEMENT_AUTH_DIR}/.clasprc.json"
   fi
   success "clasp account authorization"
   verify_clasp_owner_account "${MANAGEMENT_AUTH_DIR}"
 
-  if ! "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json list >/dev/null 2>&1; then
+  if ! "${CLASP[@]}" -A \
+    "${MANAGEMENT_AUTH_DIR}/.clasprc.json" --json list >/dev/null 2>&1; then
     warning "The account-level Google Apps Script API is not enabled."
     if [[ "${NO_OPEN}" -eq 0 ]]; then
       set +e
@@ -1162,7 +1163,8 @@ check_clasp_readiness() {
     info "Isolated clasp authorization will be created by make install."
     return 0
   fi
-  if ! clasp_output="$("${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json \
+  if ! clasp_output="$("${CLASP[@]}" -A \
+    "${MANAGEMENT_AUTH_DIR}/.clasprc.json" --json \
     show-authorized-user 2>/dev/null)" ||
     ! printf '%s' "${clasp_output}" |
       jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
@@ -1170,7 +1172,8 @@ check_clasp_readiness() {
       "${INSTALL_DOC}#clasp"
   fi
   verify_clasp_owner_account "${MANAGEMENT_AUTH_DIR}"
-  "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" --json list >/dev/null 2>&1 ||
+  "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}/.clasprc.json" \
+    --json list >/dev/null 2>&1 ||
     die "Enable the account-level Google Apps Script API." \
       "${INSTALL_DOC}#apps-script-api"
   success "Isolated clasp authorization is ready"
@@ -1223,7 +1226,7 @@ create_apps_script_project() {
   debug "Creating Apps Script project outside the source checkout"
   (
     cd "${bootstrap_dir}"
-    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}" create \
+    "${CLASP[@]}" -A "${MANAGEMENT_AUTH_DIR}/.clasprc.json" create \
       --type standalone \
       --title "${project_name}"
   )
@@ -1263,7 +1266,8 @@ push_apps_script_source() {
   cp "${PROJECT_ROOT}"/locales/*.gs "${staging_dir}/locales/"
 
   debug "Uploading Apps Script source with time zone ${time_zone}"
-  "${CLASP[@]}" -A "${auth_dir}" -P "${staging_dir}" push --force
+  "${CLASP[@]}" -A "${auth_dir}/.clasprc.json" \
+    -P "${staging_dir}" push --force
   success "Apps Script source uploaded"
 }
 
@@ -1398,7 +1402,7 @@ authorize_installer_execution() {
   local auth_output
 
   if [[ -f "${AUTH_DIR}/.clasprc.json" ]]; then
-    if auth_output="$("${CLASP[@]}" -A "${AUTH_DIR}" --json \
+    if auth_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
       show-authorized-user 2>/dev/null)" &&
       printf '%s' "${auth_output}" |
         jq -e '.loggedIn == true and (.email | length > 0)' >/dev/null; then
@@ -1413,7 +1417,7 @@ authorize_installer_execution() {
   mkdir -p "${AUTH_DIR}"
   chmod 700 "${AUTH_DIR}"
   print_heading "Owner-only Apps Script authorization"
-  "${CLASP[@]}" -A "${AUTH_DIR}" login \
+  "${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" login \
     --creds "${client_file}" \
     --use-project-scopes \
     --include-clasp-scopes
@@ -1429,7 +1433,8 @@ ensure_api_executable_deployment() {
 
   deployment_id="$(state_get '.deploymentId')"
   if [[ -n "${deployment_id}" ]]; then
-    if ! existing_deployments="$("${CLASP[@]}" -A "${AUTH_DIR}" --json \
+    if ! existing_deployments="$("${CLASP[@]}" \
+      -A "${AUTH_DIR}/.clasprc.json" --json \
       deployments 2>/dev/null)"; then
       die "Could not verify the stored Apps Script API deployment." \
         "${INSTALL_DOC}#api-executable"
@@ -1445,7 +1450,8 @@ ensure_api_executable_deployment() {
   fi
 
   debug "Creating owner-only Apps Script API deployment"
-  deployment_output="$("${CLASP[@]}" -A "${AUTH_DIR}" --json deploy \
+  deployment_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
+    --json deploy \
     --description "Owner-only installer bootstrap")"
   deployment_id="$(printf '%s' "${deployment_output}" |
     jq -r '.deploymentId // empty' 2>/dev/null || true)"
@@ -1753,7 +1759,7 @@ run_apps_script_bootstrap() {
   print_heading "Google resource bootstrap"
   debug "Calling owner-only bootstrapCatalogerInstallation"
   set +e
-  output="$("${CLASP[@]}" -A "${AUTH_DIR}" --json \
+  output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
     run bootstrapCatalogerInstallation \
     --params "${parameters}" 2>&1)"
   run_status=$?
@@ -1839,7 +1845,7 @@ verify_installed_resources() {
   fi
   success "Drive event publisher permission"
 
-  if ! setup_output="$("${CLASP[@]}" -A "${AUTH_DIR}" --json \
+  if ! setup_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
     run validateCatalogerInstallation 2>&1)"; then
     printf '%s\n' "${setup_output}" >&2
     die "Apps Script final validation could not run." \

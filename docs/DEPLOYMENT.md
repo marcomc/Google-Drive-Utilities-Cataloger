@@ -66,12 +66,13 @@ environment and all three secrets exist.
 
    ```bash
    DEPLOY_AUTH_DIR="$(mktemp -d)"
+   DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
    chmod 700 "$DEPLOY_AUTH_DIR"
-   clasp -A "$DEPLOY_AUTH_DIR" login \
+   clasp -A "$DEPLOY_AUTH_FILE" login \
      --creds "/secure/path/oauth-client.json" \
      --use-project-scopes \
      --include-clasp-scopes
-   chmod 600 "$DEPLOY_AUTH_DIR/.clasprc.json"
+   chmod 600 "$DEPLOY_AUTH_FILE"
    ```
 
 4. Verify that the stored deployment belongs to the same script before
@@ -81,7 +82,7 @@ environment and all three secrets exist.
    DEPLOYMENT_ID="$(jq -er '.deploymentId' .installer/state.json)"
    SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
    test "$(jq -er '.rootDir' .clasp.json)" = "."
-   clasp -A "$DEPLOY_AUTH_DIR" --json deployments "$SCRIPT_ID" |
+   clasp -A "$DEPLOY_AUTH_FILE" --json deployments "$SCRIPT_ID" |
      jq -e --arg id "$DEPLOYMENT_ID" '
        any(.[];
          .deploymentId == $id and
@@ -109,7 +110,7 @@ environment and all three secrets exist.
      repos/marcomc/Google-Drive-Utilities-Cataloger/environments/production/deployment-branch-policies \
      -f name=main -f type=branch
    gh secret set CLASP_AUTH_JSON --env production \
-     <"$DEPLOY_AUTH_DIR/.clasprc.json"
+     <"$DEPLOY_AUTH_FILE"
    gh secret set CLASP_PROJECT_JSON --env production <.clasp.json
    printf '%s' "$DEPLOYMENT_ID" |
      gh secret set APPS_SCRIPT_DEPLOYMENT_ID --env production
@@ -231,13 +232,14 @@ script ID again, and verify the deployment list:
 
 ```bash
 DEPLOY_AUTH_DIR="$(mktemp -d)"
+DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
 chmod 700 "$DEPLOY_AUTH_DIR"
-clasp -A "$DEPLOY_AUTH_DIR" login \
+clasp -A "$DEPLOY_AUTH_FILE" login \
   --creds "/secure/path/oauth-client.json" \
   --use-project-scopes \
   --include-clasp-scopes
 SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
-clasp -A "$DEPLOY_AUTH_DIR" --json deployments "$SCRIPT_ID"
+clasp -A "$DEPLOY_AUTH_FILE" --json deployments "$SCRIPT_ID"
 printf 'https://script.google.com/home/projects/%s/executions\n' "$SCRIPT_ID"
 rm -rf "$DEPLOY_AUTH_DIR"
 ```

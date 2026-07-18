@@ -8,7 +8,8 @@ set -euo pipefail
 
 [[ "${DEPLOY_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]
 auth_dir="${RUNNER_TEMP}/clasp-auth"
-test -f "${auth_dir}/.clasprc.json"
+auth_file="${auth_dir}/.clasprc.json"
+test -f "${auth_file}"
 jq -e '
   type == "object" and
   (.scriptId | type == "string" and length > 0) and
@@ -22,7 +23,7 @@ if [[ "${DEPLOY_COMMIT_SHA}" != "${current_main_sha}" ]]; then
   exit 0
 fi
 
-deployments_json="$(clasp -A "${auth_dir}" --json deployments)"
+deployments_json="$(clasp -A "${auth_file}" --json deployments)"
 jq -e --arg id "${APPS_SCRIPT_DEPLOYMENT_ID}" '
   any(.[];
     .deploymentId == $id and
@@ -35,7 +36,7 @@ mkdir -m 700 "${snapshot_dir}"
 cp .clasp.json "${snapshot_dir}/.clasp.json"
 (
   cd "${snapshot_dir}"
-  clasp -A "${auth_dir}" pull
+  clasp -A "${auth_file}" pull
 )
 remote_time_zone="$(jq -er '
   .timeZone | select(type == "string" and length > 0)
@@ -46,12 +47,12 @@ jq --arg time_zone "${remote_time_zone}" \
 mv "${manifest_tmp}" appsscript.json
 
 version_label="main-${DEPLOY_COMMIT_SHA::12}"
-clasp -A "${auth_dir}" push --force
-version_json="$(clasp -A "${auth_dir}" --json version "${version_label}")"
+clasp -A "${auth_file}" push --force
+version_json="$(clasp -A "${auth_file}" --json version "${version_label}")"
 version_id="$(jq -er '
   .versionNumber | select(type == "number")
 ' <<<"${version_json}")"
-deployment_json="$(clasp -A "${auth_dir}" --json deploy \
+deployment_json="$(clasp -A "${auth_file}" --json deploy \
   --deploymentId "${APPS_SCRIPT_DEPLOYMENT_ID}" \
   --versionNumber "${version_id}" \
   --description "${version_label}")"
