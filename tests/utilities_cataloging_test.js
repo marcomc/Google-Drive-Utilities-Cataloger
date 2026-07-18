@@ -227,7 +227,10 @@ function testDeveloperApiKeyUsesHeader() {
         return {
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({
-            candidates: [{ content: { parts: [{ text: '{}' }] } }]
+            candidates: [{
+              finishReason: 'STOP',
+              content: { parts: [{ text: '{}' }] }
+            }]
           })
         };
       }
@@ -327,6 +330,36 @@ function testIncompleteGeminiResponseReportsFinishReason() {
   );
 }
 
+function testGeminiResponseWithoutFinishReasonFailsClosed() {
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        })
+      })
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-3.5-flash';
+  context.getScriptProperty_ = () => 'developer-secret';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logGeminiUsage_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  assert.throws(
+    () => context.callGeminiForPdfWithBackend_(
+      { getBytes: () => [1, 2, 3] },
+      [],
+      'policy',
+      { getId: () => 'file-id' },
+      'gemini_api',
+      ''
+    ),
+    /finish reason: UNSPECIFIED/
+  );
+}
+
 function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   const requests = [];
   const events = [];
@@ -352,19 +385,28 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
     {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
-        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }]
       })
     },
     {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
-        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }]
       })
     },
     {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
-        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }]
       })
     }
   ];
@@ -479,7 +521,10 @@ function testGenericRateLimitStaysOnDeveloperApi() {
     {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
-        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }]
       })
     }
   ];
@@ -530,7 +575,10 @@ function testVertexRateLimitRetriesWithoutReclassifyingProviderQuota() {
     {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
-        candidates: [{ content: { parts: [{ text: '{}' }] } }]
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }]
       })
     }
   ];
@@ -1131,6 +1179,7 @@ testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testIncompleteGeminiResponseReportsFinishReason();
+testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
 testGenericRateLimitStaysOnDeveloperApi();

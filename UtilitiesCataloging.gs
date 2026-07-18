@@ -514,8 +514,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   }
 
   logGeminiUsage_(body.usageMetadata, file, backend, fallbackReason);
-  const finishReason = String(candidate && candidate.finishReason || '');
-  if (finishReason && finishReason !== 'STOP') {
+  const finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
+  if (finishReason !== 'STOP') {
     throw new Error('Gemini extraction was incomplete (finish reason: ' +
       finishReason + ').');
   }

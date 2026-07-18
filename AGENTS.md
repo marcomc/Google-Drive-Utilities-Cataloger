@@ -16,7 +16,9 @@
   trigger executions. Record provider token usage separately from versioned
   cost estimates, and keep Cloud Billing as the accounting source of truth.
 - For structured output from thinking models, set and test explicit thinking
-  and response budgets; log the finish reason without logging document data.
+  and response budgets; log the finish reason without logging document data,
+  and fail closed unless the provider explicitly reports a successful terminal
+  reason such as `STOP`.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
