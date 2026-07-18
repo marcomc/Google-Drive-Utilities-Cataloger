@@ -114,6 +114,7 @@ each event.
 | Function | When to use it | Effect |
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
+| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
 | `processDriveEventQueue` | 15-minute trigger only. | Pulls events and processes only direct-root PDFs named by those events. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active Drive event subscription when due. |
@@ -215,15 +216,20 @@ unprovenanced row.
 
 `gemini-generation-request` is emitted once for each outbound model request.
 Count this event by file ID to detect retries or redundant processing; a normal
-file has one request and one `gemini-generation-response` event.
+file has one request and one `gemini-generation-response` event. A successful
+response also records the provider `finishReason`; values other than `STOP`
+fail before parsing or mutating Drive and Sheets.
 
 Each successful response also emits `gemini-generation-usage`. It records the
 provider-reported `promptTokenCount`, `candidatesTokenCount`,
-`thoughtsTokenCount`, and `totalTokenCount` for that file. With the current
-Vertex AI `gemini-2.5-flash` runtime it also includes `estimatedCostUsd` and
-its input and output components, calculated from the list prices
-encoded in `Config.gs`. This is an operational estimate, not an invoice:
-Cloud Billing remains authoritative and can lag behind the execution logs.
+`thoughtsTokenCount`, and `totalTokenCount` for that file. When the selected
+Vertex model has a price table encoded in `Config.gs`, the event also includes
+`estimatedCostUsd` and its input and output components. This is an operational
+estimate, not an invoice: Cloud Billing remains authoritative and can lag
+behind the execution logs.
+The default `gemini-3.5-flash` runtime uses explicit `medium` thinking and an
+8,192-token JSON response budget. The same model and generation settings are
+sent to the Gemini Developer API and the temporary Vertex AI fallback.
 
 ```bash
 gcloud logging read \

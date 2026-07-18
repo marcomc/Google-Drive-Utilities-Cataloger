@@ -161,6 +161,12 @@ function testLocaleParity() {
   const english = loadFunction('locales/en.gs', 'getEnglishLocalization_');
   const italian = loadFunction('locales/it.gs', 'getItalianLocalization_');
   assert.deepEqual(shape(italian), shape(english));
+  assert.equal(
+    italian.headerAliases.month.includes('numero mese di riferimento'),
+    true
+  );
+  assert.equal(italian.headerAliases.contractNumber.includes('codice contratto'), true);
+  assert.equal(italian.headerAliases.customerCode.includes('codice cliente'), true);
 }
 
 testCommittedJsonAndRuntimeConfig();

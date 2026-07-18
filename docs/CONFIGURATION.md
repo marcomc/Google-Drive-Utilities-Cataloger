@@ -51,8 +51,13 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | `SPREADSHEET_ID` | Destination spreadsheet ID. |
 | `AUTOMATION_CONFIG_JSON` | Complete contents of `config.local.json`. |
 | `GOOGLE_CLOUD_PROJECT_ID` | Linked standard Cloud project ID, required for Drive events. |
-| `GEMINI_MODEL` | Optional; defaults to `gemini-2.5-flash`. |
+| `GEMINI_MODEL` | Optional; defaults to `gemini-3.5-flash` for both Gemini Developer API and Vertex AI fallback. |
 | `VERTEX_AI_LOCATION` | Optional for `vertex_ai`; defaults to `global`. |
+
+The default `gemini-3.5-flash` request uses `medium` thinking and an
+8,192-token JSON response budget for both backends. For owner-controlled CLI
+maintenance, run `configureGeminiModel` with the desired model identifier;
+the value is shared by the Developer API primary and Vertex fallback.
 
 Do not set `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`,
 `WORKSPACE_EVENT_SUBSCRIPTION`, or `WORKSPACE_EVENT_EXPIRES_AT`. The automation
@@ -119,6 +124,11 @@ Customize only the Drive copy with installation-specific classification and
 extraction rules. Do not commit it, publish it, or upload it with clasp. The
 script requires exactly one readable, non-empty policy file, up to 40 KiB,
 before it processes an eligible PDF.
+
+For invoice fields that have separate spreadsheet columns, direct the model to
+extract each printed value independently. For example, keep a contract number
+and customer/client code distinct rather than using one as a fallback for the
+other.
 
 The policy can guide classification and extraction. It cannot extend the
 configured resource scope, change the required JSON result, or make PDF content

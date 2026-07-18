@@ -38,8 +38,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   switch for generic quota errors.
 - PDF extraction into a strict JSON contract constrained by the configured
   per-supply spreadsheet headers and Drive policy.
+- Gemini 3.5 Flash extraction with medium thinking, an 8,192-token response
+  budget, and explicit incomplete-response detection.
 - Provider usage logging for prompt, response, thinking, and total tokens,
-  including an operational Vertex AI cost estimate.
+  finish reason, and an operational Vertex AI cost estimate.
 - Non-generative installer validation of Gemini API keys, models, projects,
   and Vertex locations.
 
@@ -69,12 +71,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   fallback paths for previously unknown but certain suppliers.
 - Archive-only document handling without spreadsheet mutation.
 - Chronological invoice-row insertion into localized Google Sheets tabs.
+- Separate contract-number and customer-code extraction and spreadsheet fields;
+  the two values are never substituted for one another.
 - Preservation of existing formulas, styles, column structure, and date and
   currency formats when inserting rows.
 - Literal writes for all untrusted text, with duplicate normalized headers and
   formula-backed columns rejected.
-- Source-file hyperlinks plus post-write verification of invoice data,
-  formulas, and Drive links.
+- Root-relative source-file hyperlinks plus post-write verification of invoice
+  data, formulas, and Drive links.
 - Localized per-file email reports for imported, archived, duplicate,
   needs-review, and error outcomes.
 - Application version in every per-file email report, structured log event,

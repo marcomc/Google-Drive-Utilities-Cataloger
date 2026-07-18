@@ -15,6 +15,8 @@
 - Count quota-limited model calls at the outbound request boundary, not from
   trigger executions. Record provider token usage separately from versioned
   cost estimates, and keep Cloud Billing as the accounting source of truth.
+- For structured output from thinking models, set and test explicit thinking
+  and response budgets; log the finish reason without logging document data.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
@@ -37,6 +39,10 @@
   explicit terminal quota or credit signals. Never infer it from an HTTP status
   or documentation URL alone; retain negative tests for transient rate limits
   and responses from the paid backend.
+- Classify mixed PDFs from the whole document. An unambiguous fiscal invoice
+  takes precedence over cover notices, regulations, annexes, and embedded
+  reports; reserve blocking problem output for uncertainties that prevent safe
+  import.
 - Do not allocate credential files inside command substitutions: subshell
   cleanup registrations do not reach the parent process. Stream secrets over
   stdin when possible; otherwise create and track temporary files in the

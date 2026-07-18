@@ -71,6 +71,8 @@ function validInvoice() {
     address_type: 'import',
     issue_date: '2026-07-16',
     identifier: 'INV-1',
+    contract_number: 'CONTRACT-1',
+    customer_code: 'CUSTOMER-1',
     contract_object: '',
     reference_year: 2026,
     reference_month: '06',
@@ -109,9 +111,27 @@ function testFormulaLikeTextIsWrittenLiterally() {
 
 function testExtractionSchemaAndCalendarValidation() {
   const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
   const raw = validInvoice();
   context.validateRawExtractionShape_(raw);
   assert.equal(context.validateExtraction_(raw).valid, true);
+  const normalized = context.normalizeExtraction_({
+    ...raw,
+    contract_number: '  CONTRACT-2 ',
+    customer_code: ' CUSTOMER-2  ',
+    reference_month: '7'
+  });
+  assert.equal(normalized.contract_number, 'CONTRACT-2');
+  assert.equal(normalized.customer_code, 'CUSTOMER-2');
+  assert.equal(normalized.reference_month, '07');
 
   assert.throws(
     () => context.validateRawExtractionShape_({
@@ -213,7 +233,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getGeminiModel_ = () => 'gemini-3.5-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -233,6 +253,78 @@ function testDeveloperApiKeyUsesHeader() {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url.includes('?key='), false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
+  const payload = JSON.parse(requests[0].options.payload);
+  assert.equal(
+    payload.generationConfig.maxOutputTokens,
+    vm.runInContext('CONFIG.GEMINI_MAX_OUTPUT_TOKENS', context)
+  );
+  assert.equal(
+    payload.generationConfig.thinkingConfig.thinkingLevel,
+    vm.runInContext('CONFIG.GEMINI_35_FLASH_THINKING_LEVEL', context)
+  );
+}
+
+function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
+  const properties = {};
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (key) => properties[key] || '',
+        setProperty: (key, value) => {
+          properties[key] = value;
+        }
+      })
+    }
+  });
+  context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
+
+  const result = context.configureGeminiModel('gemini-3.5-flash');
+
+  assert.equal(properties.GEMINI_MODEL, 'gemini-3.5-flash');
+  assert.equal(result.geminiModel, 'gemini-3.5-flash');
+  assert.throws(
+    () => context.configureGeminiModel('models/gemini-3.5-flash'),
+    /must be a Gemini model identifier/
+  );
+}
+
+function testIncompleteGeminiResponseReportsFinishReason() {
+  const events = [];
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          candidates: [{
+            finishReason: 'MAX_TOKENS',
+            content: { parts: [{ text: '{"partial":' }] }
+          }]
+        })
+      })
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getScriptProperty_ = () => 'developer-secret';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logGeminiUsage_ = () => {};
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.throws(
+    () => context.callGeminiForPdfWithBackend_(
+      { getBytes: () => [1, 2, 3] },
+      [],
+      'policy',
+      { getId: () => 'file-id' },
+      'gemini_api',
+      ''
+    ),
+    /finish reason: MAX_TOKENS/
+  );
+  assert.equal(
+    events.find((entry) => entry.event === 'gemini-generation-response')
+      .details.finishReason,
+    'MAX_TOKENS'
+  );
 }
 
 function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
@@ -531,6 +623,9 @@ function testPromptKeepsHeadersScopedBySupply() {
   }, 'trusted policy');
 
   assert.match(prompt, /matching canonical supply entry/);
+  assert.match(prompt, /"contract_number": "printed contract number or null"/);
+  assert.match(prompt, /"customer_code": "printed customer\/client\/account code or null"/);
+  assert.match(prompt, /Never substitute one for the other/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
 }
@@ -766,6 +861,117 @@ function testFormulaAndStyleCopySources() {
   ]);
 }
 
+function testSourceHyperlinkFormulaIsPreserved() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => key === 'sourceFile' ? ['Source file'] : [];
+  const sheet = {
+    getRange: (row) => ({
+      getFormulas: () => [['=HYPERLINK("url";"text")']],
+      getFormula: () => '=HYPERLINK("https://drive.test/file-id";"text")',
+      getDisplayValue: () => 'text',
+      getRichTextValue: () => null
+    })
+  };
+
+  const extracted = validInvoice();
+  extracted.sheet_values = [];
+
+  context.verifyImportedRow_(
+    sheet,
+    3,
+    { headerRow: 1, headers: ['Source file'], lookup: { 'source file': 1 } },
+    { getUrl: () => 'https://drive.test/file-id' },
+    extracted
+  );
+}
+
+function testBuildSpreadsheetHyperlinkFormulaEscapesValues() {
+  const context = loadCataloger();
+  assert.equal(
+    context.buildSpreadsheetHyperlinkFormula_(
+      { getUrl: () => 'https://drive.test/file?id="one"' },
+      'Folder / Bill "one".pdf'
+    ),
+    '=HYPERLINK("https://drive.test/file?id=""one""","Folder / Bill ""one"".pdf")'
+  );
+}
+
+function testDrivePathLabelIsRelativeToConfiguredRoot() {
+  const context = loadCataloger();
+  context.getRootFolderId_ = () => 'root-folder';
+  const iterator = (item) => {
+    let consumed = false;
+    return {
+      hasNext: () => !consumed,
+      next: () => {
+        consumed = true;
+        return item;
+      }
+    };
+  };
+  const root = { getId: () => 'root-folder' };
+  const water = {
+    getId: () => 'water-folder',
+    getName: () => 'Acqua',
+    getParents: () => iterator(root)
+  };
+  const year = {
+    getId: () => 'year-folder',
+    getName: () => '2026',
+    getParents: () => iterator(water)
+  };
+  const file = {
+    getName: () => 'invoice.pdf',
+    getParents: () => iterator(year)
+  };
+
+  assert.equal(context.buildDrivePathLabel_(file), 'Acqua/2026/invoice.pdf');
+}
+
+function testSpreadsheetFormulaArgumentSeparatorFollowsLocale() {
+  const context = loadCataloger();
+  const separatorFor = (locale) => context.getSpreadsheetFormulaArgumentSeparator_({
+    getParent: () => ({ getSpreadsheetLocale: () => locale })
+  });
+  assert.equal(separatorFor('it_IT'), ';');
+  assert.equal(separatorFor('en_GB'), ',');
+}
+
+function testFormulaTotalMustReconcileWithExtraction() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    total: ['Cost total'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  const sheet = {
+    getRange: (_row, column) => ({
+      getFormulas: () => [['=SUM(A1:A1)', '=HYPERLINK("url";"text")']],
+      getFormula: () => column === 2 ?
+        '=HYPERLINK("https://drive.test/file-id";"text")' : '=SUM(A1:A1)',
+      getDisplayValue: () => column === 2 ? 'text' : '42.55',
+      getValue: () => column === 1 ? 42.55 : 'text',
+      getRichTextValue: () => null
+    })
+  };
+  const extracted = validInvoice();
+  extracted.sheet_values = [];
+
+  assert.throws(
+    () => context.verifyImportedRow_(
+      sheet,
+      3,
+      {
+        headerRow: 1,
+        headers: ['Cost total', 'Source file'],
+        lookup: { 'cost total': 1, 'source file': 2 }
+      },
+      { getUrl: () => 'https://drive.test/file-id' },
+      extracted
+    ),
+    /formula total verification failed/
+  );
+}
+
 function testPendingReportOutboxRetriesAndRepairsMalformedEntries() {
   const context = loadCataloger();
   const prefix = vm.runInContext(
@@ -895,11 +1101,36 @@ function testProcessingLeaseAndDocumentStatus() {
   assert.equal(result.status, 'ARCHIVED WITHOUT IMPORT');
 }
 
+function testManualRetryProcessesSameDayErrorsOnly() {
+  const context = loadCataloger();
+  const file = {
+    getId: () => 'file-id',
+    getLastUpdated: () => new Date(0),
+    getSize: () => 10
+  };
+  context.hasMutationJournal_ = () => false;
+  context.intakeStateDate_ = () => '2026-07-17';
+  const state = {
+    'file-id': {
+      fingerprint: '0:10',
+      status: 'ERROR',
+      attemptDate: '2026-07-17'
+    }
+  };
+
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'daily'), false);
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'manual_retry'), true);
+  state['file-id'].status = 'NEEDS REVIEW';
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'manual_retry'), false);
+}
+
 testFormulaLikeTextIsWrittenLiterally();
 testExtractionSchemaAndCalendarValidation();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
+testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
+testIncompleteGeminiResponseReportsFinishReason();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
 testGenericRateLimitStaysOnDeveloperApi();
@@ -912,9 +1143,15 @@ testDuplicateNormalizedSheetHeadersAreRejected();
 testMutationRecoveryStages();
 testMutationRecoveryReportsUnavailableFileOnce();
 testFormulaAndStyleCopySources();
+testSourceHyperlinkFormulaIsPreserved();
+testBuildSpreadsheetHyperlinkFormulaEscapesValues();
+testDrivePathLabelIsRelativeToConfiguredRoot();
+testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
+testFormulaTotalMustReconcileWithExtraction();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();
 testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
+testManualRetryProcessesSameDayErrorsOnly();
 
 console.log('Utilities cataloging tests passed.');

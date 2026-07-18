@@ -44,6 +44,10 @@ Do not commit or publish the customized Drive copy.
 - Archive `archive_only` documents in the configured folder without editing the
   spreadsheet.
 - Archive `import` utility invoices using the configured destination templates.
+- Classify a document as an `Invoice` when it has an invoice number, issue
+  date, or invoice total, even if it also contains consumption reports or
+  detailed calculation tables. Use `Report` only when those invoice indicators
+  are absent.
 - For a certain supplier missing from the map, create
   `<supply>/<supplier>/<year>` and mention it in the report.
 - If a configured path for a known supplier is absent, do not create an
@@ -72,8 +76,13 @@ manual review.
 - Add a working Drive link in the `Source file` column.
 - Import only data present in the document and existing sheet headers; never
   invent columns, consumption values, costs, or tax rates.
+- Keep a printed contract number and customer/client code in separate destination
+  columns. Never substitute one for the other.
 - Verify that consumption cost + non-consumption cost + VAT equals the total.
   A difference beyond a few cents blocks the import.
+- When a sheet has detailed cost columns and calculated totals, assign each
+  charge to one cost category only. Do not include a detailed charge in a
+  summary cost field when the sheet formula already includes that detail.
 
 ## Final verification and reporting
 

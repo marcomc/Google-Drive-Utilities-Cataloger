@@ -328,7 +328,7 @@ non-interactive installation:
 | `GDUC_SPREADSHEET` | Optional spreadsheet URL or ID |
 | `GDUC_SPREADSHEET_TITLE` | Title used when creating a spreadsheet |
 | `GDUC_GEMINI_MODE` | `gemini_api`, `vertex_ai`, or `gemini_api_with_vertex_fallback` |
-| `GDUC_GEMINI_MODEL` | Optional model; default `gemini-2.5-flash`; may override the pending value on resume |
+| `GDUC_GEMINI_MODEL` | Optional model; default `gemini-3.5-flash`; may override the pending value on resume |
 | `GDUC_VERTEX_AI_LOCATION` | Optional Vertex location; default `global`; may override the pending value on resume |
 | `GDUC_OAUTH_CLIENT_JSON` | Desktop OAuth client JSON outside the checkout, used on resume |
 | `GDUC_GEMINI_API_KEY` | Secret; required on resume for Gemini API |

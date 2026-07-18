@@ -6,6 +6,14 @@ function runDailyUtilitiesCataloging() {
 }
 
 /**
+ * Owner-controlled recovery for direct-intake PDFs whose latest outcome was
+ * ERROR. It deliberately bypasses the once-per-day error retry throttle.
+ */
+function retryFailedUtilitiesCataloging() {
+  return runUtilitiesCataloging_('manual_retry');
+}
+
+/**
  * Manually process one file already in the direct intake folder.
  */
 function processSingleIntakeFile(fileId) {
@@ -379,6 +387,7 @@ function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file) 
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   driveAgentsPolicy, file, backend, fallbackReason) {
   const isVertexAi = backend === 'vertex_ai';
+  const model = getGeminiModel_();
   const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
   const pdfPart = isVertexAi ? {
     inlineData: {
@@ -391,6 +400,15 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       data: Utilities.base64Encode(blob.getBytes())
     }
   };
+  const generationConfig = {
+    maxOutputTokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS,
+    responseMimeType: 'application/json'
+  };
+  if (model === 'gemini-3.5-flash') {
+    generationConfig.thinkingConfig = {
+      thinkingLevel: CONFIG.GEMINI_35_FLASH_THINKING_LEVEL
+    };
+  }
   const payload = {
     contents: [{
       role: 'user',
@@ -404,17 +422,15 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         pdfPart
       ]
     }],
-    generationConfig: {
-      maxOutputTokens: 4096,
-      responseMimeType: 'application/json',
-      temperature: 0
-    }
+    generationConfig: generationConfig
   };
   let response;
+  let body;
+  let candidate;
   for (let attempt = 1; attempt <= CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS; attempt += 1) {
     const requestLog = Object.assign(describeFileForLog_(file), {
       backend: backend,
-      model: getGeminiModel_(),
+      model: model,
       attempt: attempt
     });
     if (fallbackReason) {
@@ -454,10 +470,20 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     if (fallbackReason) {
       responseLog.fallbackReason = fallbackReason;
     }
-    logCatalogEvent_('gemini-generation-response', responseLog);
     if (code === 200) {
+      try {
+        body = JSON.parse(response.getContentText());
+      } catch (error) {
+        responseLog.responseJsonValid = false;
+        logCatalogEvent_('gemini-generation-response', responseLog);
+        throw new Error('Gemini returned invalid response JSON.');
+      }
+      candidate = body.candidates && body.candidates[0];
+      responseLog.finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
+      logCatalogEvent_('gemini-generation-response', responseLog);
       break;
     }
+    logCatalogEvent_('gemini-generation-response', responseLog);
     const vertexFallbackReason = backend === 'gemini_api' ?
       getGeminiVertexFallbackReason_(response) : '';
     if (backend === 'gemini_api' && isAutomaticVertexFallbackEnabled_() &&
@@ -487,9 +513,12 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return a usable response.');
   }
 
-  const body = JSON.parse(response.getContentText());
   logGeminiUsage_(body.usageMetadata, file, backend, fallbackReason);
-  const candidate = body.candidates && body.candidates[0];
+  const finishReason = String(candidate && candidate.finishReason || '');
+  if (finishReason && finishReason !== 'STOP') {
+    throw new Error('Gemini extraction was incomplete (finish reason: ' +
+      finishReason + ').');
+  }
   const parts = candidate && candidate.content && candidate.content.parts;
   if (!parts || !parts[0] || !parts[0].text) {
     throw new Error('Gemini did not return valid extraction JSON.');
@@ -651,6 +680,8 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "address_evidence": "printed service address or null",',
     '  "issue_date": "YYYY-MM-DD or null",',
     '  "identifier": "invoice number, optional contract/report identifier, or null",',
+    '  "contract_number": "printed contract number or null",',
+    '  "customer_code": "printed customer/client/account code or null",',
     '  "contract_object": "at most four words or null",',
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
@@ -666,6 +697,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. For HERA, "Codice contratto" is contract_number and "Codice cliente" is customer_code.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
       String(automationConfig.address_missing_type || 'unknown') + '.',
@@ -706,6 +738,8 @@ function validateRawExtractionShape_(extracted) {
     'address_evidence',
     'issue_date',
     'identifier',
+    'contract_number',
+    'customer_code',
     'contract_object',
     'reference_month',
     'frequency',
@@ -758,6 +792,8 @@ function normalizeExtraction_(extracted) {
   normalized.address_type = classifyAddress_(normalized.address_evidence);
   normalized.issue_date = normalizeIsoDate_(normalized.issue_date);
   normalized.identifier = String(normalized.identifier || '').trim();
+  normalized.contract_number = String(normalized.contract_number || '').trim();
+  normalized.customer_code = String(normalized.customer_code || '').trim();
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
   normalized.reference_month = normalized.reference_month ? String(normalized.reference_month).padStart(2, '0') : null;
   normalized.period_start = normalizeIsoDate_(normalized.period_start);
@@ -1195,11 +1231,12 @@ function refreshImportedSourceLink_(sheet, row, file) {
   if (!sourceColumn) {
     throw new Error('Source file column was not found.');
   }
-  sheet.getRange(row, sourceColumn).setRichTextValue(
-    SpreadsheetApp.newRichTextValue()
-      .setText(buildDrivePathLabel_(file))
-      .setLinkUrl(file.getUrl())
-      .build()
+  sheet.getRange(row, sourceColumn).setFormula(
+    buildSpreadsheetHyperlinkFormula_(
+      file,
+      undefined,
+      getSpreadsheetFormulaArgumentSeparator_(sheet)
+    )
   );
 }
 
@@ -1331,8 +1368,10 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('issueDate'), isoDateToDate_(extracted.issue_date));
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('supplier'), extracted.supplier);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'), extracted.identifier);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('contractNumber'), extracted.contract_number);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'), extracted.customer_code);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('year'), extracted.reference_year);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), Number(extracted.reference_month));
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), extracted.reference_month);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('frequency'), extracted.frequency || '');
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('consumptionCost'), extracted.cost_consumption);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('nonConsumptionCosts'), extracted.cost_non_consumption);
@@ -1373,9 +1412,30 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
     throw new Error('Source file column was not found.');
   }
   const visibleText = buildDrivePathLabel_(file);
-  sheet.getRange(row, sourceColumn).setRichTextValue(
-    SpreadsheetApp.newRichTextValue().setText(visibleText).setLinkUrl(file.getUrl()).build()
+  sheet.getRange(row, sourceColumn).setFormula(
+    buildSpreadsheetHyperlinkFormula_(
+      file,
+      visibleText,
+      getSpreadsheetFormulaArgumentSeparator_(sheet)
+    )
   );
+}
+
+function buildSpreadsheetHyperlinkFormula_(file, visibleText, argumentSeparator) {
+  const label = visibleText === undefined ? buildDrivePathLabel_(file) : visibleText;
+  const separator = argumentSeparator || ',';
+  return '=HYPERLINK("' + escapeSpreadsheetFormulaString_(file.getUrl()) + '"' + separator + '"' +
+    escapeSpreadsheetFormulaString_(label) + '")';
+}
+
+function escapeSpreadsheetFormulaString_(value) {
+  return String(value).replace(/"/g, '""');
+}
+
+function getSpreadsheetFormulaArgumentSeparator_(sheet) {
+  const spreadsheet = sheet.getParent();
+  const locale = String(spreadsheet.getSpreadsheetLocale() || '').toLowerCase();
+  return /^en(?:_|-)/.test(locale) ? ',' : ';';
 }
 
 function setLiteralSheetValue_(range, value) {
@@ -1406,10 +1466,14 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     extracted.supplier);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('identifier'),
     extracted.identifier);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('contractNumber'),
+    extracted.contract_number);
+  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('customerCode'),
+    extracted.customer_code);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('year'),
     extracted.reference_year);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('month'),
-    Number(extracted.reference_month));
+    extracted.reference_month);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('frequency'),
     extracted.frequency || '');
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('consumptionCost'),
@@ -1427,6 +1491,8 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
 
   const rowFormulas = sheet.getRange(row, 1, 1, layout.headers.length)
     .getFormulas()[0];
+  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+  const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
     if (column && !rowFormulas[column - 1] &&
@@ -1439,6 +1505,16 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
         layout.headers[column - 1]);
     }
   });
+
+  if (totalColumn && rowFormulas[totalColumn - 1] &&
+    !sheetValuesMatch_(
+      sheet.getRange(row, totalColumn).getValue(),
+      extracted.total,
+      extracted.issue_date
+    )) {
+    throw new Error('Spreadsheet formula total verification failed for: ' +
+      layout.headers[totalColumn - 1]);
+  }
 
   const firstDataRow = layout.headerRow + 1;
   const referenceRow = row > firstDataRow ? row - 1 :
@@ -1454,9 +1530,15 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     });
   }
 
-  const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
-  const source = sheet.getRange(row, sourceColumn).getRichTextValue();
-  if (!source || source.getLinkUrl() !== file.getUrl()) {
+  const sourceCell = sheet.getRange(row, sourceColumn);
+  const source = sourceCell.getRichTextValue();
+  const sourceFormula = sourceCell.getFormula();
+  const sourceDisplayValue = sourceCell.getDisplayValue();
+  const hasNativeLink = source && source.getLinkUrl() === file.getUrl();
+  const hasHyperlinkFormula = sourceFormula.indexOf(file.getUrl()) >= 0;
+  const hasFormulaError = /^#(?:ERROR|REF|NAME|VALUE|N\/A|DIV\/0)!?$/
+    .test(sourceDisplayValue);
+  if ((!hasNativeLink && !hasHyperlinkFormula) || hasFormulaError) {
     throw new Error('Source file link verification failed.');
   }
 }
@@ -1670,8 +1752,13 @@ function shouldProcessIntakeFile_(file, state, triggerSource) {
   if (previous.status === 'PROCESSING') {
     return Date.now() - Number(previous.updatedAt || 0) > 10 * 60 * 1000;
   }
-  return triggerSource === 'daily' && previous.status === 'ERROR' &&
-    previous.attemptDate !== intakeStateDate_();
+  if (previous.status !== 'ERROR') {
+    return false;
+  }
+  if (triggerSource === 'manual_retry') {
+    return true;
+  }
+  return triggerSource === 'daily' && previous.attemptDate !== intakeStateDate_();
 }
 
 function markIntakeFileProcessing_(state, file) {
@@ -1983,9 +2070,26 @@ function sanitizeContractObject_(value) {
 }
 
 function buildDrivePathLabel_(file) {
-  const parents = file.getParents();
-  const parentName = parents.hasNext() ? parents.next().getName() : 'Intake';
-  return parentName + ' / ' + file.getName();
+  const rootFolderId = getRootFolderId_();
+  const segments = [file.getName()];
+  const visited = Object.create(null);
+  let parents = file.getParents();
+
+  while (parents.hasNext()) {
+    const parent = parents.next();
+    const parentId = parent.getId();
+    if (visited[parentId]) {
+      break;
+    }
+    visited[parentId] = true;
+    if (parentId === rootFolderId) {
+      return segments.length > 1 ? segments.join('/') : 'Intake / ' + file.getName();
+    }
+    segments.unshift(parent.getName());
+    parents = parent.getParents();
+  }
+
+  return 'Intake / ' + file.getName();
 }
 
 function buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink) {
