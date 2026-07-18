@@ -17,8 +17,8 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
     - Add adoption and conflict regression tests.
 
 - [ ] **Add an explicit installed-project update and reconcile mode**
-  - Assessment: resuming a completed installation retries local secret cleanup
-    but does not deploy newer source or repair remote drift automatically.
+  - Assessment: the production workflow deploys source after merges to `main`,
+    but it does not compare or reconcile installation-owned Google resources.
   - Actions:
     - Compare the checkout, Apps Script deployment, triggers, Script
       Properties, Pub/Sub, and Workspace Events topology without changing them.
@@ -50,15 +50,14 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
       resubmitted.
     - Remove every generated test resource after the suite.
 
-- [ ] **Add continuous integration**
-  - Assessment: `make check` is local only, so publication currently depends on
-    contributors running the complete gate themselves.
+- [ ] **Harden continuous integration**
+  - Assessment: pull requests now run the local `make check` gate, but
+    publication-specific security checks and dependency hardening remain.
   - Actions:
-    - Run ShellCheck, Markdownlint, Bash syntax, JavaScript syntax, and all test
-      suites on pull requests.
     - Add repository secret and personal-data scanning.
-    - Pin CI tool versions and cache only non-sensitive dependencies.
-    - Document required branch-protection checks.
+    - Pin GitHub Actions to immutable revisions and keep tool versions explicit.
+    - Cache only non-sensitive dependencies after the dependency graph is
+      locked.
 
 - [ ] **Lock the installer CLI dependency graph**
   - Assessment: the installer pins `clasp` to version `3.3.0`, but `npx`
@@ -78,6 +77,18 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
     - Validate destination-template and sheet-mapping coverage before saving.
     - Provide a non-interactive structured-input equivalent.
     - Preserve direct expert editing of `config.local.json`.
+
+- [ ] **Make generated PDF filename templates configurable**
+  - Assessment: the current deterministic filename format is safe and localized,
+    but installations cannot choose a different field order or naming convention.
+  - Actions:
+    - Add an optional filename template to private automation configuration while
+      preserving the current format as the backward-compatible default.
+    - Define and validate supported placeholders for date, supplier, document
+      type, supply, identifier, and archive-only metadata.
+    - Apply existing filename sanitization and collision checks after rendering.
+    - Update the public example, configuration reference, installer validation,
+      runtime tests, and upgrade compatibility coverage.
 
 - [ ] **Provision optional billing budgets and alerts**
   - Assessment: the installer links billing but does not create a budget or

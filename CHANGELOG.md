@@ -5,9 +5,29 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - 2026-07-16
+## [0.1.0] - 2026-07-18
 
 ### Added
+
+#### Deployment automation
+
+- Pull-request validation with `make check` before merging into `main`.
+- Automatic Apps Script source deployment when an approved pull request updates
+  protected `main`, with serialized execution, stale-run detection, and target
+  verification before mutation.
+- Project HEAD updates for installable triggers plus numbered Apps Script
+  versions labelled with the merged commit SHA and updates to the stable,
+  owner-only API executable deployment.
+- Preservation of the installation-specific Apps Script time zone during source
+  upload without recreating triggers, Script Properties, or Google resources.
+- Production GitHub Actions concurrency control and isolated deployment secrets
+  documented in the deployment guide.
+
+#### Development workflow
+
+- Project guidance that distinguishes coding-agent instructions from the live
+  Drive runtime policy and requires reviewed runtime-policy improvements to be
+  applied and verified separately.
 
 #### Utility document automation
 

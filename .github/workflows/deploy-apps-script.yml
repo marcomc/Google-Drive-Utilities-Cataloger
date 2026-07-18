@@ -1,0 +1,68 @@
+name: Deploy Apps Script
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apps-script-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+
+    steps:
+      - name: Check out main revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq shellcheck
+          npm install --global markdownlint-cli@0.47.0
+
+      - name: Run validation
+        run: make check
+
+      - name: Install clasp
+        run: npm install --global @google/clasp@3.3.0
+
+      - name: Prepare private clasp configuration
+        env:
+          CLASP_AUTH_JSON: ${{ secrets.CLASP_AUTH_JSON }}
+          CLASP_PROJECT_JSON: ${{ secrets.CLASP_PROJECT_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$CLASP_AUTH_JSON"
+          test -n "$CLASP_PROJECT_JSON"
+          jq -e 'type == "object"' <<<"$CLASP_AUTH_JSON" >/dev/null
+          jq -e '
+            type == "object" and
+            (.scriptId | type == "string" and length > 0) and
+            .rootDir == "."
+          ' <<<"$CLASP_PROJECT_JSON" >/dev/null
+          auth_dir="$RUNNER_TEMP/clasp-auth"
+          mkdir -m 700 "$auth_dir"
+          printf '%s' "$CLASP_AUTH_JSON" > "$auth_dir/.clasprc.json"
+          chmod 600 "$auth_dir/.clasprc.json"
+          printf '%s' "$CLASP_PROJECT_JSON" > .clasp.json
+          chmod 600 .clasp.json
+
+      - name: Verify target, preserve manifest, and deploy
+        env:
+          APPS_SCRIPT_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
+          DEPLOY_COMMIT_SHA: ${{ github.sha }}
+        run: ./scripts/deploy-apps-script.sh

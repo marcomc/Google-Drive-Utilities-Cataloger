@@ -1,5 +1,19 @@
 # Google Drive Utilities Cataloger Instructions
 
+## Runtime policy synchronization
+
+- Treat the repository `AGENTS.md` as development guidance for the coding
+  agent, and treat the separate `AGENTS.md` in the configured Google Drive
+  intake folder as the runtime policy read by the Apps Script and Vertex AI.
+- Never assume that updating this repository file updates the live Drive policy.
+  When testing the application or implementing a change reveals a rule that
+  should improve runtime classification, extraction, safety, or import
+  behavior, apply the corresponding reviewed change to the live Drive
+  `AGENTS.md` as a separate operational update.
+- Verify the live Drive copy after updating it and record the policy change in
+  the relevant test evidence or operational documentation. Do not overwrite
+  the live policy automatically during source deployment.
+
 ## Apps Script Event Processing
 
 - Keep polling cadence, Pub/Sub message data volume, and Apps Script trigger
@@ -9,6 +23,10 @@
 - Create `clasp` projects outside the source checkout. Move only the required
   local configuration into the repository, and do not publish generated
   `.clasp.json` files.
+- Before an automated `clasp push`, verify that the configured deployment ID
+  belongs to the target script, preserve installation-specific manifest values,
+  and distinguish project HEAD used by installable triggers from the versioned
+  API executable deployment.
 - Emit concise, structured progress logs for trigger receipt, lock outcome,
   scan scope, per-file result, notification result, and run completion. Do not
   log credentials, recipients, filenames, document text, or extracted values.
@@ -33,6 +51,9 @@
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
 - Keep installer-owned `clasp` authorization isolated from the global profile.
+  Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
+  and cover the real CLI argument shape in tests rather than only mocking the
+  command name.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured

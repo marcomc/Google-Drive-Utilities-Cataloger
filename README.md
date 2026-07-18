@@ -95,6 +95,7 @@ diagnostics.
 | --- | --- |
 | [Installation guide](docs/INSTALLATION.md) | Automated setup, local prerequisites, browser handoff, and first validation. |
 | [Operations and troubleshooting guide](docs/OPERATIONS.md) | Runtime behavior, logging, cost controls, and incident recovery. |
+| [Deployment guide](docs/DEPLOYMENT.md) | Pull-request merge policy and automatic Apps Script deployment. |
 | [Configuration reference](docs/CONFIGURATION.md) | Script Properties, `config.local.json`, Drive `AGENTS.md`, Gemini runtime selection, and localization. |
 | [AGENTS.example.md](AGENTS.example.md) | Sanitized policy template to copy into the Drive intake folder as `AGENTS.md`. |
 | [Changelog](CHANGELOG.md) | Released features and version history. |

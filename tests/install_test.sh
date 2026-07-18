@@ -115,7 +115,7 @@ test_input_validation() {
 }
 
 # Invoked indirectly through the assertion helpers.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 validate_test_state_directory() {
   local test_state_dir="$1"
 
@@ -130,7 +130,7 @@ validate_test_state_directory() {
 }
 
 # Invoked indirectly through the assertion helpers.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 validate_test_default_state_directory() {
   local test_state_dir="$1"
 
@@ -392,19 +392,19 @@ test_exit_zero_gemini_error_cleanup() {
 }
 
 # Invoked indirectly by the secret-collision test helper.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 describe_unowned_secret() {
   printf '%s\n' "unrelated_owner"
 }
 
 # Invoked indirectly by the secret-collision test helper.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 describe_owned_secret() {
   printf '%s\n' "gduc_installer"
 }
 
 # Invoked indirectly through the assertion helpers.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 validate_secret_collision() {
   local describe_function="$1"
 

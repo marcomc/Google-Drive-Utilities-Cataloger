@@ -40,6 +40,7 @@ install-reset: ## Remove local installer state, preserving Google resources
 
 test: ## Run installer helper and Apps Script tests
 	@./tests/install_test.sh
+	@./tests/deploy_apps_script_test.sh
 	@node --check scripts/list-locales.js
 	@node --check scripts/validate-config.js
 	@node --check scripts/validate-apps-script.js
