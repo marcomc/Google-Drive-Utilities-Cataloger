@@ -61,8 +61,12 @@ function processDriveEventQueue() {
 }
 
 function processDriveEventQueueUnlocked_() {
-  const subscription = getScriptProperty_(CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION);
-  if (!subscription) {
+  const properties = PropertiesService.getScriptProperties();
+  const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
+  const subscription = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION
+  );
+  if (!topic && !subscription) {
     console.log('Pub/Sub is not configured; no Drive events can be processed.');
     logCatalogEvent_('catalog-run-completed', {
       resultCount: 0,
@@ -70,6 +74,13 @@ function processDriveEventQueueUnlocked_() {
     });
     return { processed: false, reason: 'not-configured' };
   }
+  const projectId = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID
+  );
+  if (!projectId) {
+    throw new Error('Google Cloud project is not configured.');
+  }
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
   const recoveredResults = recoverPendingMutations_(rootFolder);
   flushPendingReports_();
@@ -91,6 +102,7 @@ function processDriveEventQueueUnlocked_() {
     };
   }
   const ackIds = messages.map(function (message) { return message.ackId; });
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   cloudFetch_('https://pubsub.googleapis.com/v1/' +
     subscription + ':modifyAckDeadline', {
     method: 'post',
@@ -104,6 +116,7 @@ function processDriveEventQueueUnlocked_() {
   });
   const batch = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
   finalizeCatalogResults_(batch.state, batch.results);
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
     method: 'post',
     payload: JSON.stringify({ ackIds: ackIds })
@@ -258,6 +271,14 @@ function renewDriveEventSubscription() {
 
 function renewDriveEventSubscriptionUnlocked_() {
   const properties = PropertiesService.getScriptProperties();
+  const storedTopic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
+  const storedPull = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION
+  );
+  if (!storedTopic && !storedPull) {
+    console.log('Drive event transport is not configured; renewal skipped.');
+    return { renewed: false, reason: 'not-configured' };
+  }
   const projectId = properties.getProperty(
     CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID
   );

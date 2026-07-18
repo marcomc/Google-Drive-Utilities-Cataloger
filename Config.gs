@@ -52,7 +52,8 @@ const CONFIG = Object.freeze({
     PUBSUB_TOPIC: 'PUBSUB_TOPIC',
     PUBSUB_SUBSCRIPTION: 'PUBSUB_SUBSCRIPTION',
     WORKSPACE_EVENT_SUBSCRIPTION: 'WORKSPACE_EVENT_SUBSCRIPTION',
-    WORKSPACE_EVENT_EXPIRES_AT: 'WORKSPACE_EVENT_EXPIRES_AT'
+    WORKSPACE_EVENT_EXPIRES_AT: 'WORKSPACE_EVENT_EXPIRES_AT',
+    TIME_ZONE_RECONFIGURATION: 'TIME_ZONE_RECONFIGURATION'
   })
 });
 
@@ -243,6 +244,11 @@ function validateAutomationConfig_(automationConfig) {
       'AUTOMATION_CONFIG_JSON exceeds the safe 8 KiB Script Property limit.'
     );
   }
+  if (!isValidIanaTimeZone_(automationConfig.time_zone)) {
+    throw new Error(
+      'AUTOMATION_CONFIG_JSON time_zone must be a valid IANA time zone.'
+    );
+  }
   const requiredArrayKeys = ['canonical_supplies', 'canonical_suppliers', 'address_rules'];
   requiredArrayKeys.forEach(function (propertyKey) {
     if (!Array.isArray(automationConfig[propertyKey])) {
@@ -353,6 +359,23 @@ function validateAutomationConfig_(automationConfig) {
     getSupportedLocales_().indexOf(automationConfig.locale) < 0) {
     throw new Error('AUTOMATION_CONFIG_JSON locale must be one of: ' +
       getSupportedLocales_().join(', ') + '.');
+  }
+}
+
+function isValidIanaTimeZone_(timeZone) {
+  if (
+    typeof timeZone !== 'string' ||
+    !timeZone ||
+    timeZone !== timeZone.trim() ||
+    /^[+-]/.test(timeZone)
+  ) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timeZone }).format();
+    return true;
+  } catch (error) {
+    return false;
   }
 }
 

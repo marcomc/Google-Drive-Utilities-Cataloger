@@ -1,5 +1,6 @@
 {
   "locale": "en",
+  "time_zone": "Europe/Rome",
   "canonical_supplies": [
     "Water",
     "Gas",

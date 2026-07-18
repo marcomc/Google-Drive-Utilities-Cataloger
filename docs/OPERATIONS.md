@@ -7,6 +7,7 @@ This guide covers one deployed cataloger instance. Use the separate
 
 - [Architecture](#architecture)
 - [Installation and first validation](#installation-and-first-validation)
+- [Reconfigure time zone](#reconfigure-time-zone)
 - [Event transport identity](#event-transport-identity)
 - [Release validation evidence](#release-validation-evidence)
 - [Configuration reference](CONFIGURATION.md)
@@ -75,6 +76,23 @@ renewal creates a replacement. Generic permission failures and ownership or
 topology conflicts still stop for manual review. Events may cover descendants,
 but the cataloger still processes only direct-root PDFs.
 
+## Reconfigure time zone
+
+Set `time_zone` in `config.local.json`, then run:
+
+```bash
+GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
+  make install-reconfigure-time-zone
+```
+
+This narrow operation updates the Apps Script and spreadsheet time zone plus
+the persisted installer and runtime configuration. It preserves Gemini
+credentials, triggers, event transport, and enabled processing state. Use
+`GDUC_TIME_ZONE` only for a temporary command-level override. Full behavior and
+rollback details are in the
+[installation guide](INSTALLATION.md#reconfigure-time-zone).
+Installations using `GDUC_STATE_DIR` must export the same path here.
+
 ## Event transport identity
 
 The supported topic and pull subscription names include the current Apps
@@ -93,8 +111,12 @@ gcloud pubsub subscriptions describe \
   "drive-utilities-events-pull-${SCRIPT_ID}" --project="${PROJECT_ID}"
 ```
 
-Repair unexpected names through a reviewed installation operation; do not
-change Script Properties alone.
+Release `0.1.0` does not support or automatically migrate legacy, generic, or
+mismatched names. An entirely absent pair can be provisioned with
+`provisionDriveEventTransport`; a partial or mismatched pair fails closed. No
+in-place migration procedure is provided in this release. Use a fresh
+installation, or design and review a one-off migration before changing remote
+resources. Do not change Script Properties alone.
 
 ## Release validation evidence
 
@@ -157,8 +179,8 @@ applied to invoice, contract, or customer identifiers.
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
-| `processDriveEventQueue` | 15-minute trigger only. | Pulls events and processes only direct-root PDFs named by those events. |
-| `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; mismatched Pub/Sub names fail closed. |
+| `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
+| `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |

@@ -9,6 +9,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Configurable installation time zone
+
+- IANA time-zone configuration in `config.local.json`, defaulting to
+  `Europe/Rome`, with runtime database validation and temporary
+  `GDUC_TIME_ZONE` overrides.
+- Explicit `--reconfigure-time-zone` installer mode that keeps installer state,
+  spreadsheet settings, and `AUTOMATION_CONFIG_JSON` synchronized without
+  reusing deleted bootstrap credentials or changing operational automation.
+- Guarded Apps Script pushes that restore the tracked manifest after success,
+  failure, or handled interruption, plus isolated integration coverage for
+  push and remote rollback failures.
+- Live-baseline maintenance transactions that pause catalog processing during
+  reconfiguration and preserve installed remote source files while changing
+  only the manifest timezone.
+
 #### Deployment automation
 
 - Pull-request validation with `make check` before merging into `main`.
@@ -27,6 +42,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
   post-update version and entry-point preservation checks.
 - Fail-closed installer handling for missing or incompatible API deployments,
   without automatic deletion, state clearing, or replacement.
+- Pre-upload installer verification of existing deployment identity, exact
+  manifest, and owner-only entry point, with creation-marker reconciliation and
+  immediate persistence of a newly created deployment ID so retries do not
+  duplicate it or split project HEAD from the numbered executable.
+- OAuth-safe deployment inspection with explicit diagnostics for missing
+  authorization and Apps Script API status failures, without credential data in
+  command arguments or logs.
 
 #### Development workflow
 
@@ -47,6 +69,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Strict script-scoped Pub/Sub resource identity across provision, repair, and
   renewal, with mismatched stored names rejected instead of overwritten or
   accepted as a compatibility transport.
+- Script-scoped Pub/Sub identity validation before every event pull,
+  acknowledgement lease change, or acknowledgement, with safe no-op behavior
+  when the transport is entirely absent.
 - Recovery from the explicit Workspace Events
   `SUBSCRIPTION_ACCESS_DENIED` terminal signal while unrelated `403` failures
   continue to fail closed for operator review.
@@ -59,6 +84,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   leases and outcome fingerprints to prevent concurrent work and redundant AI
   requests.
 - Manual single-file processing for controlled validation and recovery.
+- Early target validation and target-scoped journal recovery for manual
+  single-file processing, without recovering unrelated files.
 
 #### Gemini extraction
 

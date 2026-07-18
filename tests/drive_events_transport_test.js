@@ -53,6 +53,194 @@ function testTransportNamesAreInstallationSpecific() {
   );
 }
 
+function transportProperties(stored) {
+  return {
+    getProperty: (key) => stored[key] || '',
+    setProperties: (values) => Object.assign(stored, values)
+  };
+}
+
+function testEventPollerSkipsAbsentTransport() {
+  const context = loadDriveEvents(() => {
+    throw new Error('network must not run without transport');
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties({})
+  };
+  context.getScriptProperty_ = () => '';
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processDriveEventQueueUnlocked_();
+
+  assert.equal(result.processed, false);
+  assert.equal(result.reason, 'not-configured');
+}
+
+function testEventPollerRejectsMismatchedTransportBeforeNetwork() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC: 'projects/example/topics/drive-utilities-events',
+    PUBSUB_SUBSCRIPTION:
+      'projects/example/subscriptions/drive-utilities-events-pull'
+  };
+  let requests = 0;
+  const context = loadDriveEvents(() => {
+    requests += 1;
+    return {};
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties(stored)
+  };
+  context.getScriptProperty_ = (key) => stored[key] || '';
+
+  assert.throws(
+    () => context.processDriveEventQueueUnlocked_(),
+    /do not match this Apps Script project/
+  );
+  assert.equal(requests, 0);
+}
+
+function testEventPollerPullsFromMatchingTransport() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id'
+  };
+  const requests = [];
+  const context = loadDriveEvents((url, options) => {
+    requests.push({ url, options });
+    return { receivedMessages: [] };
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties(stored)
+  };
+  context.getScriptProperty_ = (key) => stored[key] || '';
+  context.DriveApp = {
+    getFolderById: () => ({})
+  };
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.recoverPendingMutations_ = () => [];
+  context.flushPendingReports_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processDriveEventQueueUnlocked_();
+
+  assert.equal(result.reason, 'empty');
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /drive-utilities-events-pull-test-script-id:pull$/);
+}
+
+function testEventPollerRejectsTransportDriftBeforeAckMutation() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id'
+  };
+  const requests = [];
+  const context = loadDriveEvents((url, options) => {
+    requests.push({ url, options });
+    stored.PUBSUB_SUBSCRIPTION =
+      'projects/example/subscriptions/drive-utilities-events-pull-foreign';
+    return { receivedMessages: [{ ackId: 'ack-1', message: {} }] };
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties(stored)
+  };
+  context.DriveApp = { getFolderById: () => ({}) };
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.recoverPendingMutations_ = () => [];
+  context.flushPendingReports_ = () => {};
+
+  assert.throws(
+    () => context.processDriveEventQueueUnlocked_(),
+    /do not match this Apps Script project/
+  );
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /:pull$/);
+}
+
+function eventMessagePollerContext(stored, requests, mutateDuringProcessing) {
+  const context = loadDriveEvents((url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith(':pull')) {
+      return { receivedMessages: [{ ackId: 'ack-1', message: {} }] };
+    }
+    return {};
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties(stored)
+  };
+  context.DriveApp = { getFolderById: () => ({}) };
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.recoverPendingMutations_ = () => [];
+  context.flushPendingReports_ = () => {};
+  context.logCatalogEvent_ = () => {};
+  context.processEligibleIntakeFiles_ = () => {
+    if (mutateDuringProcessing) {
+      mutateDuringProcessing();
+    }
+    return { state: {}, results: [] };
+  };
+  context.finalizeCatalogResults_ = () => {};
+  return context;
+}
+
+function testEventPollerRejectsTransportDriftBeforeFinalAck() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id'
+  };
+  const requests = [];
+  const context = eventMessagePollerContext(stored, requests, () => {
+    stored.PUBSUB_TOPIC =
+      'projects/example/topics/drive-utilities-events-foreign';
+  });
+
+  assert.throws(
+    () => context.processDriveEventQueueUnlocked_(),
+    /do not match this Apps Script project/
+  );
+  assert.deepEqual(
+    requests.map((request) => request.url.slice(request.url.lastIndexOf(':'))),
+    [':pull', ':modifyAckDeadline']
+  );
+}
+
+function testEventPollerAcknowledgesMessageOnStableTransport() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id'
+  };
+  const requests = [];
+  const context = eventMessagePollerContext(stored, requests);
+
+  context.processDriveEventQueueUnlocked_();
+
+  assert.deepEqual(
+    requests.map((request) => request.url.slice(request.url.lastIndexOf(':'))),
+    [':pull', ':modifyAckDeadline', ':acknowledge']
+  );
+  assert.equal(requests[1].options.method, 'post');
+  assert.deepEqual(JSON.parse(requests[1].options.payload), {
+    ackIds: ['ack-1'],
+    ackDeadlineSeconds: 300
+  });
+  assert.equal(requests[2].options.method, 'post');
+  assert.deepEqual(JSON.parse(requests[2].options.payload), {
+    ackIds: ['ack-1']
+  });
+}
+
 function testMatchingSubscriptionIsPreserved() {
   const requests = [];
   const topic = 'projects/example/topics/drive-utilities-events';
@@ -325,6 +513,23 @@ function testRenewalPatchesMaximumTtl() {
   assert.deepEqual(JSON.parse(requests[0].options.payload), { ttl: '0s' });
 }
 
+function testRenewalSkipsAbsentTransport() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example'
+  };
+  const context = loadDriveEvents(() => {
+    throw new Error('network must not run without transport');
+  });
+  context.PropertiesService = {
+    getScriptProperties: () => transportProperties(stored)
+  };
+
+  const result = context.renewDriveEventSubscriptionUnlocked_();
+
+  assert.equal(result.renewed, false);
+  assert.equal(result.reason, 'not-configured');
+}
+
 function testRenewalRecreatesMissingStoredSubscription() {
   const stored = {
     GOOGLE_CLOUD_PROJECT_ID: 'example',
@@ -556,6 +761,12 @@ function testRecreateDeletesOnlyOwnedSubscription() {
 }
 
 testTransportNamesAreInstallationSpecific();
+testEventPollerSkipsAbsentTransport();
+testEventPollerRejectsMismatchedTransportBeforeNetwork();
+testEventPollerPullsFromMatchingTransport();
+testEventPollerRejectsTransportDriftBeforeAckMutation();
+testEventPollerRejectsTransportDriftBeforeFinalAck();
+testEventPollerAcknowledgesMessageOnStableTransport();
 testMatchingSubscriptionIsPreserved();
 testAckDeadlineIsRepaired();
 testUnexpectedTopicIsRejected();
@@ -566,6 +777,7 @@ testWorkspaceSubscriptionRequestsAllIntakeEventsAtMaximumTtl();
 testWorkspaceOperationIsPolled();
 testPublisherPermissionPropagationIsRetried();
 testRenewalPatchesMaximumTtl();
+testRenewalSkipsAbsentTransport();
 testRenewalRecreatesMissingStoredSubscription();
 testRenewalRejectsNonScriptScopedTransport();
 testProvisionAcceptsOnlyAbsentOrScriptScopedTransport();

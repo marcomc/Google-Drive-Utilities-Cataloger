@@ -20,18 +20,21 @@ function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-    recoverPendingMutations_(rootFolder);
-    flushPendingReports_();
-    const file = DriveApp.getFileById(fileId);
 
+    if (hasMutationJournal_(fileId)) {
+      recoverMutationJournalForFile_(rootFolder, fileId);
+    }
     if (hasMutationJournal_(fileId)) {
       throw new Error(
         'The specified file has an unresolved mutation journal; review it first.'
       );
     }
+    const file = DriveApp.getFileById(fileId);
     if (!isDirectIntakePdf_(file, rootFolder)) {
       throw new Error('The specified file is not a PDF located directly in the intake folder.');
     }
+
+    flushPendingReports_();
 
     const driveAgentsPolicy = loadDriveAgentsPolicy_(rootFolder);
     logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
@@ -74,6 +77,14 @@ function withCatalogProcessingLock_(triggerSource, callback) {
   const lock = LockService.getScriptLock();
   logCatalogEvent_('catalog-run-start', { triggerSource: triggerSource });
 
+  if (isCatalogMaintenanceActive_()) {
+    logCatalogEvent_('catalog-run-skipped', {
+      triggerSource: triggerSource,
+      reason: 'maintenance'
+    });
+    return { triggerSource: triggerSource, skipped: 'maintenance', results: [] };
+  }
+
   if (!lock.tryLock(1000)) {
     console.log('Utilities cataloging is already running; trigger skipped: ' + triggerSource);
     logCatalogEvent_('catalog-run-skipped', {
@@ -83,11 +94,26 @@ function withCatalogProcessingLock_(triggerSource, callback) {
     return { triggerSource: triggerSource, skipped: 'already-running', results: [] };
   }
 
+  if (isCatalogMaintenanceActive_()) {
+    lock.releaseLock();
+    logCatalogEvent_('catalog-run-skipped', {
+      triggerSource: triggerSource,
+      reason: 'maintenance'
+    });
+    return { triggerSource: triggerSource, skipped: 'maintenance', results: [] };
+  }
+
   try {
     return callback();
   } finally {
     lock.releaseLock();
   }
+}
+
+function isCatalogMaintenanceActive_() {
+  return Boolean(PropertiesService.getScriptProperties().getProperty(
+    CONFIG.PROPERTY_KEYS.TIME_ZONE_RECONFIGURATION
+  ));
 }
 
 /**
@@ -1937,76 +1963,97 @@ function recoverPendingMutations_(rootFolder) {
     return key.indexOf(prefix) === 0;
   }).forEach(function (key) {
     const fileId = key.slice(prefix.length);
-    const recoveryAlertKey =
-      CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId;
-    let file = null;
-    let journal = null;
-    try {
-      journal = JSON.parse(allProperties[key]);
-      if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
-        throw new Error('The mutation journal is not a JSON object.');
-      }
-      file = DriveApp.getFileById(fileId);
-      if (!isFileInFolder_(file, rootFolder)) {
-        file.moveTo(rootFolder);
-      }
-      if (journal.originalName && file.getName() !== journal.originalName) {
-        file.setName(journal.originalName);
-      }
-      const sheetRecovery = rollbackJournalSheetRow_(journal, file);
-      const result = buildErrorResult_(
-        file,
-        'A previously interrupted mutation was recovered safely.',
-        'Review the PDF in intake; the daily run can retry it on the next day.',
-        journal.originalName || file.getName(),
-        { renamed: false, moved: false, imported: false }
-      );
-      if (journal.createdFolderPath) {
-        result.actions += ' Empty destination folders may remain at ' +
-          journal.createdFolderPath + '.';
-      }
-      if (sheetRecovery.unmarkedRowMayRemain) {
-        result.actions +=
-          ' An unmarked spreadsheet row may remain at the planned position.';
-      }
-      recordIntakeFileOutcome_(state, file, result);
-      queuePendingReports_([result]);
-      saveIntakeFileState_(state);
-      clearMutationJournal_(fileId);
-      logCatalogEvent_('catalog-mutation-recovered', { fileId: fileId });
+    const result = recoverMutationJournalForFile_(
+      rootFolder, fileId, allProperties[key], state, properties
+    );
+    if (result) {
       results.push(result);
-    } catch (error) {
-      const recoveryAlreadyReported =
-        Boolean(properties.getProperty(recoveryAlertKey)) ||
-        Boolean(journal && journal.recoveryReported);
-      if (!recoveryAlreadyReported) {
-        let result;
-        if (file) {
-          result = buildErrorResult_(
-            file,
-            'An interrupted mutation requires manual spreadsheet review: ' +
-              describeError_(error),
-            'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
-            (journal && journal.originalName) || file.getName(),
-            { renamed: false, moved: false, imported: true }
-          );
-          recordIntakeFileOutcome_(state, file, result);
-          saveIntakeFileState_(state);
-        } else {
-          result = buildUnavailableRecoveryResult_(fileId, journal, error);
-        }
-        queuePendingReports_([result]);
-        results.push(result);
-        properties.setProperty(recoveryAlertKey, String(Date.now()));
-        logCatalogEvent_('catalog-mutation-recovery-failed', {
-          fileId: fileId,
-          errorType: error.name || 'Error',
-          errorCategory: classifyCatalogErrorForLog_(error)
-        });
-      }
     }
   });
   return results;
+}
+
+function recoverMutationJournalForFile_(
+  rootFolder, fileId, rawJournal, intakeState, scriptProperties
+) {
+  const properties = scriptProperties ||
+    PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
+  const recoveryAlertKey =
+    CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId;
+  const raw = rawJournal === undefined ? properties.getProperty(key) : rawJournal;
+  const state = intakeState || loadIntakeFileState_();
+  let file = null;
+  let journal = null;
+
+  if (!raw) {
+    return null;
+  }
+  try {
+    journal = JSON.parse(raw);
+    if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
+      throw new Error('The mutation journal is not a JSON object.');
+    }
+    file = DriveApp.getFileById(fileId);
+    if (!isFileInFolder_(file, rootFolder)) {
+      file.moveTo(rootFolder);
+    }
+    if (journal.originalName && file.getName() !== journal.originalName) {
+      file.setName(journal.originalName);
+    }
+    const sheetRecovery = rollbackJournalSheetRow_(journal, file);
+    const result = buildErrorResult_(
+      file,
+      'A previously interrupted mutation was recovered safely.',
+      'Review the PDF in intake; the daily run can retry it on the next day.',
+      journal.originalName || file.getName(),
+      { renamed: false, moved: false, imported: false }
+    );
+    if (journal.createdFolderPath) {
+      result.actions += ' Empty destination folders may remain at ' +
+        journal.createdFolderPath + '.';
+    }
+    if (sheetRecovery.unmarkedRowMayRemain) {
+      result.actions +=
+        ' An unmarked spreadsheet row may remain at the planned position.';
+    }
+    recordIntakeFileOutcome_(state, file, result);
+    queuePendingReports_([result]);
+    saveIntakeFileState_(state);
+    clearMutationJournal_(fileId);
+    logCatalogEvent_('catalog-mutation-recovered', { fileId: fileId });
+    return result;
+  } catch (error) {
+    const recoveryAlreadyReported =
+      Boolean(properties.getProperty(recoveryAlertKey)) ||
+      Boolean(journal && journal.recoveryReported);
+    if (recoveryAlreadyReported) {
+      return null;
+    }
+    let result;
+    if (file) {
+      result = buildErrorResult_(
+        file,
+        'An interrupted mutation requires manual spreadsheet review: ' +
+          describeError_(error),
+        'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
+        (journal && journal.originalName) || file.getName(),
+        { renamed: false, moved: false, imported: true }
+      );
+      recordIntakeFileOutcome_(state, file, result);
+      saveIntakeFileState_(state);
+    } else {
+      result = buildUnavailableRecoveryResult_(fileId, journal, error);
+    }
+    queuePendingReports_([result]);
+    properties.setProperty(recoveryAlertKey, String(Date.now()));
+    logCatalogEvent_('catalog-mutation-recovery-failed', {
+      fileId: fileId,
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+    return result;
+  }
 }
 
 function buildUnavailableRecoveryResult_(fileId, journal, error) {

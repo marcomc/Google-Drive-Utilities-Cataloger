@@ -165,6 +165,20 @@ function testNormalizedConfigurationCollisions() {
     })),
     /safe 8 KiB/
   );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.time_zone = 'Europe/Not-A-Zone';
+    })),
+    /valid IANA time zone/
+  );
+  ['+02:00', '-05:30', ' Europe/Rome '].forEach((timeZone) => {
+    assert.throws(
+      () => context.validateAutomationConfig_(mutate((config) => {
+        config.time_zone = timeZone;
+      })),
+      /valid IANA time zone/
+    );
+  });
 }
 
 function testLocaleParity() {

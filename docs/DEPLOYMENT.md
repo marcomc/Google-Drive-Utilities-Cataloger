@@ -51,6 +51,11 @@ scope](https://developers.google.com/apps-script/api/reference/rest/v1/projects.
 workflow needs it both to update the deployment and to inspect it through the
 Apps Script Deployments API.
 
+Here, `MYSELF` means the Google account that created or updates the deployment.
+The deployment is operationally owner-only only when `CLASP_AUTH_JSON` belongs
+to the Apps Script project owner; using another deployer would restrict access
+to that deployer instead.
+
 ## Bootstrap production deployment
 
 Complete this once before merging the pull request that introduces the
@@ -66,46 +71,8 @@ environment and all three secrets exist.
    described in the [installation guide](INSTALLATION.md#desktop-oauth-client).
    Also confirm that the [Apps Script API account
    setting](https://script.google.com/home/usersettings) is enabled.
-3. Create a dedicated temporary `clasp` authorization. The installer deletes
-   its authorization directories after successful setup, so do not expect to
-   reuse them. The downloaded OAuth client JSON is passed to `clasp`; the
-   generated `.clasprc.json` is the file stored as `CLASP_AUTH_JSON`.
-
-   ```bash
-   DEPLOY_AUTH_DIR="$(mktemp -d)"
-   DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
-   chmod 700 "$DEPLOY_AUTH_DIR"
-   clasp -A "$DEPLOY_AUTH_FILE" login \
-     --creds "/secure/path/oauth-client.json" \
-     --use-project-scopes \
-     --include-clasp-scopes
-   chmod 600 "$DEPLOY_AUTH_FILE"
-   ```
-
-4. Verify the complete deployment configuration before uploading any secret.
-   This uses the same read-only Apps Script Deployments API check as CI.
-
-   ```bash
-   DEPLOYMENT_ID="$(jq -er '.deploymentId' .installer/state.json)"
-   SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
-   test "$(jq -er '.rootDir' .clasp.json)" = "."
-   CLASP=(clasp)
-   source scripts/lib/apps-script-deployment.sh
-   DEPLOYMENT_JSON=""
-   read_apps_script_deployment \
-     "$DEPLOY_AUTH_FILE" "$SCRIPT_ID" "$DEPLOYMENT_ID" DEPLOYMENT_JSON
-   validate_owner_only_api_deployment \
-     "$DEPLOYMENT_JSON" "$SCRIPT_ID" "$DEPLOYMENT_ID"
-   unset DEPLOYMENT_JSON
-   ```
-
-   Validation requires the configured deployment ID, matching `scriptId`, a
-   numbered version, a manifest file, and an `EXECUTION_API` entry point whose
-   access is `MYSELF`. A missing or incompatible deployment is not deleted or
-   replaced automatically.
-
-5. Create `production`, restrict it to `main`, and store the secrets. The
-   environment can also be configured on GitHub's [Environments settings
+3. Create `production` and restrict it to `main`. The environment can also be
+   configured on GitHub's [Environments settings
    page](https://github.com/marcomc/Google-Drive-Utilities-Cataloger/settings/environments).
 
    ```bash
@@ -122,15 +89,52 @@ environment and all three secrets exist.
    gh api --method POST \
      repos/marcomc/Google-Drive-Utilities-Cataloger/environments/production/deployment-branch-policies \
      -f name=main -f type=branch
-   gh secret set CLASP_AUTH_JSON --env production \
-     <"$DEPLOY_AUTH_FILE"
-   gh secret set CLASP_PROJECT_JSON --env production <.clasp.json
-   printf '%s' "$DEPLOYMENT_ID" |
-     gh secret set APPS_SCRIPT_DEPLOYMENT_ID --env production
-   rm -rf "$DEPLOY_AUTH_DIR"
    ```
 
-6. Confirm the names without printing secret values:
+4. In one fail-closed subshell, create the temporary authorization, verify the
+   deployment through the same read-only API check as CI, and upload all three
+   secrets. The installer deletes its own authorization, so do not expect to
+   reuse it. The generated `.clasprc.json` becomes `CLASP_AUTH_JSON`.
+
+   ```bash
+   (
+     set -euo pipefail
+     DEPLOY_AUTH_DIR="$(mktemp -d)"
+     trap 'rm -rf "$DEPLOY_AUTH_DIR"' EXIT
+     DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
+     chmod 700 "$DEPLOY_AUTH_DIR"
+     clasp -A "$DEPLOY_AUTH_FILE" login \
+       --creds "/secure/path/oauth-client.json" \
+       --use-project-scopes \
+       --include-clasp-scopes
+     chmod 600 "$DEPLOY_AUTH_FILE"
+
+     DEPLOYMENT_ID="$(jq -er '.deploymentId' .installer/state.json)"
+     SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
+     test "$(jq -er '.rootDir' .clasp.json)" = "."
+     CLASP=(clasp)
+     source scripts/lib/apps-script-deployment.sh
+     DEPLOYMENT_JSON=""
+     read_apps_script_deployment \
+       "$DEPLOY_AUTH_FILE" "$SCRIPT_ID" "$DEPLOYMENT_ID" DEPLOYMENT_JSON
+     validate_owner_only_api_deployment \
+       "$DEPLOYMENT_JSON" "$SCRIPT_ID" "$DEPLOYMENT_ID"
+     unset DEPLOYMENT_JSON
+
+     gh secret set CLASP_AUTH_JSON --env production \
+       <"$DEPLOY_AUTH_FILE"
+     gh secret set CLASP_PROJECT_JSON --env production <.clasp.json
+     printf '%s' "$DEPLOYMENT_ID" |
+       gh secret set APPS_SCRIPT_DEPLOYMENT_ID --env production
+   )
+   ```
+
+   Validation requires the configured deployment ID, matching `scriptId`, a
+   numbered version, the `appsscript` manifest, and an `EXECUTION_API` entry
+   point whose access is `MYSELF`. A missing or incompatible deployment is not
+   deleted or replaced automatically.
+
+5. Confirm the names without printing secret values:
 
    ```bash
    gh secret list --env production
@@ -163,7 +167,8 @@ merge commit to the configured Apps Script project:
 
 The stable API executable deployment ID is preserved. Before `clasp push`, the
 workflow reads it through the official Deployments API and validates its script
-ID, numbered version, manifest, and `EXECUTION_API`/`MYSELF` entry point. After
+ID, numbered version, `appsscript` manifest, and `EXECUTION_API`/`MYSELF` entry
+point. After
 `clasp deploy --deploymentId`, it reads the deployment again and requires the
 same deployment ID, the new version, and an unchanged entry-point structure.
 
@@ -191,6 +196,13 @@ modify:
 | Repository `AGENTS.md` | Not uploaded to Apps Script; it contains coding-agent guidance only. |
 | Drive `AGENTS.md` policy | Not copied or overwritten. The live Drive copy remains authoritative. |
 | Gemini credentials and runtime configuration | Not changed. |
+
+The workflow preserves the installed manifest time zone but does not read
+`config.local.json` or installer state. To change the installation time zone,
+use the explicit
+[`--reconfigure-time-zone`](INSTALLATION.md#reconfigure-time-zone) installer
+operation; a normal source deployment is intentionally not a configuration
+reconciliation.
 
 Use the [installation guide](INSTALLATION.md) for a new installation. The
 deployment workflow assumes that the target installation is already bootstrapped
@@ -251,21 +263,34 @@ must be rolled back, merge a revert pull request. The resulting `main` push
 uploads the reverted source to HEAD, creates a new immutable version, and moves
 the stable API executable to that matching version.
 
-After recovery, recreate the temporary authorization as in step 3, derive the
-script ID again, and run the complete API validation from bootstrap step 4.
-Then inspect recent executions:
+After recovery, use one temporary authorization to rerun the complete API
+validation and derive the Executions URL. The cleanup trap removes it on both
+success and failure:
 
 ```bash
-DEPLOY_AUTH_DIR="$(mktemp -d)"
-DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
-chmod 700 "$DEPLOY_AUTH_DIR"
-clasp -A "$DEPLOY_AUTH_FILE" login \
-  --creds "/secure/path/oauth-client.json" \
-  --use-project-scopes \
-  --include-clasp-scopes
-SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
-printf 'https://script.google.com/home/projects/%s/executions\n' "$SCRIPT_ID"
-rm -rf "$DEPLOY_AUTH_DIR"
+(
+  set -euo pipefail
+  DEPLOY_AUTH_DIR="$(mktemp -d)"
+  trap 'rm -rf "$DEPLOY_AUTH_DIR"' EXIT
+  DEPLOY_AUTH_FILE="$DEPLOY_AUTH_DIR/.clasprc.json"
+  chmod 700 "$DEPLOY_AUTH_DIR"
+  clasp -A "$DEPLOY_AUTH_FILE" login \
+    --creds "/secure/path/oauth-client.json" \
+    --use-project-scopes \
+    --include-clasp-scopes
+  chmod 600 "$DEPLOY_AUTH_FILE"
+  SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
+  DEPLOYMENT_ID="$(jq -er '.deploymentId' .installer/state.json)"
+  CLASP=(clasp)
+  source scripts/lib/apps-script-deployment.sh
+  DEPLOYMENT_JSON=""
+  read_apps_script_deployment \
+    "$DEPLOY_AUTH_FILE" "$SCRIPT_ID" "$DEPLOYMENT_ID" DEPLOYMENT_JSON
+  validate_owner_only_api_deployment \
+    "$DEPLOYMENT_JSON" "$SCRIPT_ID" "$DEPLOYMENT_ID"
+  unset DEPLOYMENT_JSON
+  printf 'https://script.google.com/home/projects/%s/executions\n' "$SCRIPT_ID"
+)
 ```
 
 Open the printed Executions URL and confirm successful recent runs for the

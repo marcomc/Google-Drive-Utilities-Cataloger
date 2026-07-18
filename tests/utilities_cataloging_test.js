@@ -29,6 +29,9 @@ function loadCataloger(overrides = {}) {
     ScriptApp: {
       getOAuthToken: () => 'oauth-token'
     },
+    PropertiesService: {
+      getScriptProperties: () => ({ getProperty: () => '' })
+    },
     SpreadsheetApp: {
       CopyPasteType: {
         PASTE_FORMAT: 'format',
@@ -920,6 +923,77 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
   assert.ok(store[`${journalPrefix}${fileId}`]);
 }
 
+function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
+  const context = loadCataloger();
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  );
+  const targetKey = `${journalPrefix}target-file`;
+  const unrelatedKey = `${journalPrefix}unrelated-file`;
+  const store = {
+    [targetKey]: JSON.stringify({
+      originalName: 'original.pdf',
+      stage: 'renamed'
+    }),
+    [unrelatedKey]: JSON.stringify({
+      originalName: 'unrelated.pdf',
+      stage: 'moved'
+    })
+  };
+  const calls = [];
+  let currentName = 'renamed.pdf';
+  const file = {
+    getName: () => currentName,
+    moveTo: () => calls.push('move'),
+    setName: (name) => {
+      currentName = name;
+      calls.push('rename:' + name);
+    }
+  };
+  const properties = {
+    getProperty: (key) => store[key] || '',
+    deleteProperty: (key) => {
+      delete store[key];
+      calls.push('delete:' + key);
+    },
+    setProperty: (key, value) => {
+      store[key] = value;
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => properties
+  };
+  context.DriveApp = {
+    getFileById: (fileId) => {
+      assert.equal(fileId, 'target-file');
+      return file;
+    }
+  };
+  context.isFileInFolder_ = () => false;
+  context.rollbackJournalSheetRow_ = () => ({ unmarkedRowMayRemain: false });
+  context.buildErrorResult_ = () => ({ status: 'ERROR', actions: '' });
+  context.loadIntakeFileState_ = () => ({});
+  context.recordIntakeFileOutcome_ = () => calls.push('record-outcome');
+  context.queuePendingReports_ = () => calls.push('queue-report');
+  context.saveIntakeFileState_ = () => calls.push('save-state');
+  context.logCatalogEvent_ = () => calls.push('log-recovered');
+
+  const result = context.recoverMutationJournalForFile_(
+    {}, 'target-file'
+  );
+
+  assert.equal(result.status, 'ERROR');
+  assert.equal(currentName, 'original.pdf');
+  assert.equal(store[targetKey], undefined);
+  assert.ok(store[unrelatedKey]);
+  assert.ok(calls.includes('move'));
+  assert.ok(calls.includes('record-outcome'));
+  assert.ok(calls.includes('queue-report'));
+  assert.ok(calls.includes('save-state'));
+  assert.ok(calls.includes('log-recovered'));
+}
+
 function testFormulaAndStyleCopySources() {
   const calls = [];
   const context = loadCataloger();
@@ -1146,6 +1220,9 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
 function testLockAndLogContracts() {
   let callbackRan = false;
   const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({ getProperty: () => '' })
+    },
     LockService: {
       getScriptLock: () => ({
         tryLock: () => false,
@@ -1162,6 +1239,43 @@ function testLockAndLogContracts() {
 
   assert.equal(callbackRan, false);
   assert.equal(result.skipped, 'already-running');
+
+  context.PropertiesService = {
+    getScriptProperties: () => ({ getProperty: () => 'transaction-1' })
+  };
+  const maintenanceResult = context.withCatalogProcessingLock_(
+    'test',
+    () => { callbackRan = true; }
+  );
+  assert.equal(maintenanceResult.skipped, 'maintenance');
+  assert.equal(callbackRan, false);
+
+  let maintenanceReads = 0;
+  let releasedAfterMaintenance = false;
+  const racedContext = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: () => {
+          maintenanceReads += 1;
+          return maintenanceReads > 1 ? 'transaction-1' : '';
+        }
+      })
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => { releasedAfterMaintenance = true; }
+      })
+    }
+  });
+  racedContext.logCatalogEvent_ = () => {};
+  const racedResult = racedContext.withCatalogProcessingLock_(
+    'test',
+    () => { callbackRan = true; }
+  );
+  assert.equal(racedResult.skipped, 'maintenance');
+  assert.equal(releasedAfterMaintenance, true);
+  assert.equal(callbackRan, false);
   assert.deepEqual(
     Object.keys(context.describeFileForLog_({ getId: () => 'file-id' })),
     ['fileId']
@@ -1215,6 +1329,148 @@ function testManualRetryProcessesSameDayErrorsOnly() {
   assert.equal(context.shouldProcessIntakeFile_(file, state, 'manual_retry'), false);
 }
 
+function testSingleFilePreflightsTargetBeforeGlobalSideEffects() {
+  const file = { getId: () => 'file-id' };
+  const rootFolder = {};
+  const calls = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder,
+      getFileById: (fileId) => {
+        calls.push('get-file:' + fileId);
+        return file;
+      }
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => calls.push('release-lock')
+      })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.logCatalogEvent_ = () => {};
+  context.hasMutationJournal_ = () => false;
+  context.isDirectIntakePdf_ = () => false;
+  context.flushPendingReports_ = () => calls.push('flush');
+
+  assert.throws(
+    () => context.processSingleIntakeFile('file-id'),
+    /not a PDF located directly in the intake folder/
+  );
+  assert.deepEqual(calls, ['get-file:file-id', 'release-lock']);
+}
+
+function testSingleFileProcessesOnlyTheValidatedTarget() {
+  const file = { getId: () => 'file-id' };
+  const rootFolder = {};
+  const result = { status: 'IMPORTED' };
+  const calls = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder,
+      getFileById: () => file
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => {}
+      })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.logCatalogEvent_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.hasMutationJournal_ = () => false;
+  context.isDirectIntakePdf_ = () => true;
+  context.flushPendingReports_ = () => calls.push('flush');
+  context.listDirectIntakePdfs_ = () => {
+    throw new Error('single-file processing must not scan intake');
+  };
+  context.loadDriveAgentsPolicy_ = () => 'policy';
+  context.loadIntakeFileState_ = () => ({});
+  context.markIntakeFileProcessing_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.processIntakeFile_ = (candidate) => {
+    assert.equal(candidate, file);
+    calls.push('process');
+    return result;
+  };
+  context.persistCatalogResult_ = () => {};
+  context.finalizeCatalogResults_ = () => {};
+
+  assert.equal(context.processSingleIntakeFile('file-id'), result);
+  assert.deepEqual(calls, ['flush', 'process']);
+}
+
+function testSingleFileRecoversOnlyTargetJournal() {
+  const file = { getId: () => 'file-id' };
+  const rootFolder = {};
+  const calls = [];
+  let hasJournal = true;
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder,
+      getFileById: () => file
+    },
+    LockService: {
+      getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.hasMutationJournal_ = () => hasJournal;
+  context.recoverMutationJournalForFile_ = (folder, fileId) => {
+    assert.equal(folder, rootFolder);
+    assert.equal(fileId, 'file-id');
+    calls.push('recover:file-id');
+    hasJournal = false;
+  };
+  context.isDirectIntakePdf_ = () => true;
+  context.flushPendingReports_ = () => {};
+  context.loadDriveAgentsPolicy_ = () => 'policy';
+  context.logCatalogEvent_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.loadIntakeFileState_ = () => ({});
+  context.markIntakeFileProcessing_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.processIntakeFile_ = () => ({ status: 'IMPORTED' });
+  context.persistCatalogResult_ = () => {};
+  context.finalizeCatalogResults_ = () => {};
+
+  context.processSingleIntakeFile('file-id');
+  assert.deepEqual(calls, ['recover:file-id']);
+}
+
+function testSingleFileStopsWhenTargetJournalRemains() {
+  const calls = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => ({}),
+      getFileById: () => {
+        calls.push('get-file');
+        throw new Error('unavailable');
+      }
+    },
+    LockService: {
+      getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.logCatalogEvent_ = () => {};
+  context.hasMutationJournal_ = () => true;
+  context.recoverMutationJournalForFile_ = () => calls.push('recover');
+
+  assert.throws(
+    () => context.processSingleIntakeFile('file-id'),
+    /unresolved mutation journal/
+  );
+  assert.deepEqual(calls, ['recover']);
+}
+
 testFormulaLikeTextIsWrittenLiterally();
 testExtractionSchemaAndCalendarValidation();
 testAmbiguousAddressRulesFailClosed();
@@ -1234,6 +1490,7 @@ testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testMutationRecoveryStages();
 testMutationRecoveryReportsUnavailableFileOnce();
+testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();
 testSourceHyperlinkFormulaIsPreserved();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
@@ -1246,5 +1503,9 @@ testPendingReportOutboxFlushesBeforeItsStorageBudget();
 testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
+testSingleFilePreflightsTargetBeforeGlobalSideEffects();
+testSingleFileProcessesOnlyTheValidatedTarget();
+testSingleFileRecoversOnlyTargetJournal();
+testSingleFileStopsWhenTargetJournalRemains();
 
 console.log('Utilities cataloging tests passed.');

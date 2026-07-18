@@ -100,8 +100,20 @@ set -euo pipefail
 
 authorization=""
 header_source=""
-url=""
 expect_header=0
+for argument in "$@"; do
+  if [[ "${argument}" == Authorization:* ]]; then
+    printf '%s\n' "Authorization header must not be passed through argv." >&2
+    exit 7
+  fi
+done
+if [[ "$#" -ne 7 || "$1" != "--silent" || "$2" != "--show-error" ||
+  "$3" != "--header" || "$4" != "@-" || "$5" != "--write-out" ||
+  "$6" != $'\n%{http_code}' ]]; then
+  printf '%s\n' "Unexpected curl argument shape." >&2
+  exit 8
+fi
+url="$7"
 for argument in "$@"; do
   if [[ "${expect_header}" -eq 1 ]]; then
     if [[ "${argument}" == "@-" ]]; then
@@ -116,9 +128,6 @@ for argument in "$@"; do
     -H | --header)
       expect_header=1
       ;;
-    https://*)
-      url="${argument}"
-      ;;
   esac
 done
 if [[ "${header_source}" == "stdin" ]]; then
@@ -131,7 +140,7 @@ fi
 if [[ "${authorization}" != "Authorization: Bearer ${TEST_ACCESS_TOKEN}" ]]; then
   exit 3
 fi
-expected_url="https://script.googleapis.com/v1/projects/test-script/deployments/${TEST_LISTED_DEPLOYMENT_ID}"
+expected_url="https://script.googleapis.com/v1/projects/test-script/deployments/${TEST_CONFIGURED_DEPLOYMENT_ID}"
 if [[ "${url}" != "${expected_url}" ]]; then
   exit 4
 fi
@@ -143,9 +152,12 @@ call_count=$((call_count + 1))
 printf '%s\n' "${call_count}" >"${TEST_API_CALL_COUNT_FILE}"
 printf 'api-get-%s\n' "${call_count}" >>"${TEST_COMMAND_LOG}"
 
-if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "missing" ]]; then
-  exit 22
-fi
+case "${TEST_DEPLOYMENT_SCENARIO}" in
+  transport-dns) exit 6 ;;
+  transport-connect) exit 7 ;;
+  transport-timeout) exit 28 ;;
+  transport-tls) exit 60 ;;
+esac
 
 script_id="test-script"
 version_number=4
@@ -154,11 +166,39 @@ entry_point_type="EXECUTION_API"
 extra_entry_point=false
 extra_entry_point_access="MYSELF"
 entry_point_marker=""
+http_status=200
 if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
   valid)
+    ;;
+  missing)
+    http_status=404
+    ;;
+  api-forbidden)
+    http_status=403
+    ;;
+  api-rate-limited)
+    http_status=429
+    ;;
+  api-unavailable)
+    http_status=503
+    ;;
+  post-api-forbidden)
+    if [[ "${call_count}" -gt 1 ]]; then
+      http_status=403
+    fi
+    ;;
+  post-api-rate-limited)
+    if [[ "${call_count}" -gt 1 ]]; then
+      http_status=429
+    fi
+    ;;
+  post-api-unavailable)
+    if [[ "${call_count}" -gt 1 ]]; then
+      http_status=503
+    fi
     ;;
   wrong-script)
     script_id="other-script"
@@ -183,8 +223,13 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
     ;;
 esac
 
+if [[ "${http_status}" -ne 200 ]]; then
+  printf '{"error":{"code":%s}}\n%s' "${http_status}" "${http_status}"
+  exit 0
+fi
+
 jq -n \
-  --arg deployment_id "${TEST_LISTED_DEPLOYMENT_ID}" \
+  --arg deployment_id "${TEST_RESPONSE_DEPLOYMENT_ID}" \
   --arg script_id "${script_id}" \
   --argjson version_number "${version_number}" \
   --arg entry_point_type "${entry_point_type}" \
@@ -216,6 +261,7 @@ jq -n \
       }] else [] end)
     }
   '
+printf '\n200'
 FAKE_CURL
 chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/curl"
 
@@ -226,11 +272,19 @@ run_fixture() {
   local configured_deployment_id="$4"
   local listed_deployment_id="$5"
   local scenario="$6"
+  local response_deployment_id="${7:-${listed_deployment_id}}"
 
   mkdir -p "${fixture_dir}/runner/clasp-auth"
-  jq -n --arg token "test-access-token-do-not-log" \
-    '{tokens: {default: {access_token: $token}}}' \
-    >"${fixture_dir}/runner/clasp-auth/.clasprc.json"
+  if [[ "${scenario}" != "missing-auth" ]]; then
+    jq -n \
+      --arg token "test-access-token-do-not-log" \
+      --arg nondefault_token "wrong-account-token-do-not-use" \
+      '{tokens: {
+        other: {access_token: $nondefault_token},
+        default: {access_token: $token}
+      }}' \
+      >"${fixture_dir}/runner/clasp-auth/.clasprc.json"
+  fi
   printf '%s\n' '{"scriptId":"test-script","rootDir":"."}' \
     >"${fixture_dir}/.clasp.json"
   printf '%s\n' '{"timeZone":"Etc/UTC"}' >"${fixture_dir}/appsscript.json"
@@ -244,6 +298,8 @@ run_fixture() {
       DEPLOY_COMMIT_SHA="${deploy_sha}" \
       TEST_CURRENT_MAIN_SHA="${current_sha}" \
       TEST_LISTED_DEPLOYMENT_ID="${listed_deployment_id}" \
+      TEST_CONFIGURED_DEPLOYMENT_ID="${configured_deployment_id}" \
+      TEST_RESPONSE_DEPLOYMENT_ID="${response_deployment_id}" \
       TEST_DEPLOYMENT_SCENARIO="${scenario}" \
       TEST_ACCESS_TOKEN="test-access-token-do-not-log" \
       TEST_API_CALL_COUNT_FILE="${fixture_dir}/api-call-count" \
@@ -260,8 +316,32 @@ assert_failure_before_push() {
   fi
 }
 
+require_fixture_failure() {
+  local failure_message="$1"
+  local fixture_status
+
+  shift
+  set +e
+  run_fixture "$@"
+  fixture_status=$?
+  set -e
+  if [[ "${fixture_status}" -eq 0 ]]; then
+    printf '%s\n' "${failure_message}" >&2
+    exit 1
+  fi
+}
+
 CURRENT_SHA="1111111111111111111111111111111111111111"
 STALE_SHA="2222222222222222222222222222222222222222"
+
+missing_auth_dir="${TEST_ROOT}/missing-auth"
+mkdir -p "${missing_auth_dir}"
+require_fixture_failure \
+  "Missing clasp authorization was accepted." \
+  "${missing_auth_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "missing-auth"
+test ! -s "${missing_auth_dir}/commands.log"
+grep -q 'CLASP_AUTH_JSON' "${missing_auth_dir}/output.log"
 
 success_dir="${TEST_ROOT}/success"
 mkdir -p "${success_dir}"
@@ -272,7 +352,7 @@ success_commands="$(tr '\n' ' ' <"${success_dir}/commands.log")"
 test "${success_time_zone}" = "Europe/Rome"
 test "${success_commands}" = \
   "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy clasp-deployments api-get-2 "
-if grep -q 'test-access-token-do-not-log' "${success_dir}/output.log"; then
+if grep -q 'token-do-not' "${success_dir}/output.log"; then
   printf '%s\n' "Deployment logs exposed the clasp access token." >&2
   exit 1
 fi
@@ -286,42 +366,83 @@ test ! -s "${stale_dir}/commands.log"
 for scenario in missing wrong-script missing-entry-point wrong-access mixed-public; do
   failure_dir="${TEST_ROOT}/${scenario}"
   mkdir -p "${failure_dir}"
-  # Fixture failure is the expected result for invalid deployments.
-  # shellcheck disable=SC2310
-  if run_fixture "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
-    "deployment-1" "deployment-1" "${scenario}"; then
-    printf 'Invalid deployment scenario was accepted: %s\n' "${scenario}" >&2
-    exit 1
-  fi
+  require_fixture_failure \
+    "Invalid deployment scenario was accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
   assert_failure_before_push "${failure_dir}"
+done
+
+for scenario_and_message in \
+  "api-forbidden:authorization was denied" \
+  "api-rate-limited:rate limited" \
+  "api-unavailable:temporarily unavailable"; do
+  scenario="${scenario_and_message%%:*}"
+  expected_message="${scenario_and_message#*:}"
+  failure_dir="${TEST_ROOT}/${scenario}"
+  mkdir -p "${failure_dir}"
+  require_fixture_failure \
+    "Deployment API failure was accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
+  assert_failure_before_push "${failure_dir}"
+  grep -q "${expected_message}" "${failure_dir}/output.log"
+done
+
+for scenario_and_message in \
+  "transport-dns:Could not resolve" \
+  "transport-connect:Could not connect" \
+  "transport-timeout:timed out" \
+  "transport-tls:TLS validation failed"; do
+  scenario="${scenario_and_message%%:*}"
+  expected_message="${scenario_and_message#*:}"
+  failure_dir="${TEST_ROOT}/${scenario}"
+  mkdir -p "${failure_dir}"
+  require_fixture_failure \
+    "Deployment transport failure was accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
+  assert_failure_before_push "${failure_dir}"
+  grep -q "${expected_message}" "${failure_dir}/output.log"
+done
+
+for scenario in \
+  post-api-forbidden \
+  post-api-rate-limited \
+  post-api-unavailable; do
+  failure_dir="${TEST_ROOT}/${scenario}"
+  mkdir -p "${failure_dir}"
+  require_fixture_failure \
+    "Post-update API failure was accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
+  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
+    "${failure_dir}/commands.log")"
+  test "${mutation_commands}" -eq 3
+  grep -q 'post-update API verification failed' \
+    "${failure_dir}/output.log"
 done
 
 changed_dir="${TEST_ROOT}/changed-after"
 mkdir -p "${changed_dir}"
-# Fixture failure is the expected result for entry-point drift.
-# shellcheck disable=SC2310
-if run_fixture "${changed_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
-  "deployment-1" "deployment-1" "changed-after"; then
-  printf '%s\n' "Post-update entry-point drift was accepted." >&2
-  exit 1
-fi
+require_fixture_failure \
+  "Post-update entry-point drift was accepted." \
+  "${changed_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "changed-after"
 changed_deploy_count="$(grep -c '^clasp-deploy$' \
   "${changed_dir}/commands.log")"
 test "${changed_deploy_count}" -eq 1
 
 mismatch_dir="${TEST_ROOT}/mismatch"
 mkdir -p "${mismatch_dir}"
-# Fixture failure is the expected result for an ID mismatch.
-# shellcheck disable=SC2310
-if run_fixture "${mismatch_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
-  "deployment-1" "deployment-other" "valid"; then
-  printf '%s\n' "Mismatched deployment ID was accepted." >&2
-  exit 1
-fi
+require_fixture_failure \
+  "Mismatched deployment ID was accepted." \
+  "${mismatch_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "valid" "deployment-other"
 assert_failure_before_push "${mismatch_dir}"
 
 if find "${TEST_ROOT}" -name output.log -exec \
-  grep -l 'test-access-token-do-not-log' {} + | grep -q .; then
+  grep -l 'token-do-not' {} + | grep -q .; then
   printf '%s\n' "Deployment logs exposed the clasp access token." >&2
   exit 1
 fi

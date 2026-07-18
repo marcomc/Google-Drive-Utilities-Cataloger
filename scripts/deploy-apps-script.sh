@@ -16,7 +16,11 @@ CLASP=(clasp)
 [[ "${DEPLOY_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]
 auth_dir="${RUNNER_TEMP}/clasp-auth"
 auth_file="${auth_dir}/.clasprc.json"
-test -f "${auth_file}"
+if [[ ! -f "${auth_file}" ]]; then
+  printf '%s\n' \
+    "Missing clasp authorization prepared from the CLASP_AUTH_JSON secret: ${auth_file}" >&2
+  exit 1
+fi
 jq -e '
   type == "object" and
   (.scriptId | type == "string" and length > 0) and

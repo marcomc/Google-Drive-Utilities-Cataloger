@@ -18,6 +18,7 @@ account controls that have no supported CLI.
 - [Gemini API key](#gemini-api-key)
 - [Google resource bootstrap](#google-resource-bootstrap)
 - [Environment variable reference](#environment-variable-reference)
+- [Reconfigure time zone](#reconfigure-time-zone)
 - [Browser handoff](#browser-handoff)
 - [Apps Script API](#apps-script-api)
 - [Desktop OAuth client](#desktop-oauth-client)
@@ -181,7 +182,7 @@ The installer asks for:
 | Globally unique Cloud project ID | Generated suggestion |
 | Billing account | First open account |
 | Output locale | `en` |
-| Apps Script time zone | `Etc/UTC` |
+| Apps Script time zone | `Europe/Rome` |
 | Report recipient | Active `gcloud` account |
 | Gemini runtime | Gemini Developer API |
 
@@ -337,8 +338,8 @@ non-interactive installation:
 | `GDUC_STATE_DIR` | Optional absolute state path outside the checkout; it must be absent, empty, or already installer-owned |
 | `NO_COLOR` | Disable terminal colors when non-empty |
 
-When using `GDUC_STATE_DIR`, export the same value for every `install`,
-`install-resume`, debug, and reset command. Its parent directory must already
+When using `GDUC_STATE_DIR`, export the same value for every install, resume,
+reconfiguration, debug, and reset command. Its parent directory must already
 exist. The target must resolve outside the checkout and must be absent, empty,
 or already marked as installer-owned.
 
@@ -375,6 +376,55 @@ unset GDUC_GEMINI_API_KEY
 
 For unattended use, inject `GDUC_GEMINI_API_KEY` from the process secret
 manager instead.
+
+## Reconfigure time zone
+
+Edit `time_zone` in `config.local.json`, then run:
+
+```bash
+GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
+./scripts/install.sh --reconfigure-time-zone --non-interactive
+```
+
+If the installation uses `GDUC_STATE_DIR`, export that same path for this
+command too.
+
+The equivalent Make target is `make install-reconfigure-time-zone`. Set
+`GDUC_TIME_ZONE` for a one-command override without changing
+`config.local.json`:
+
+```bash
+GDUC_TIME_ZONE="Pacific/Auckland" \
+GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
+./scripts/install.sh --reconfigure-time-zone --non-interactive
+```
+
+The command accepts only a real IANA time-zone identifier. It updates the
+installer state, the spreadsheet time zone, `AUTOMATION_CONFIG_JSON`, and the
+manifest used for the remote push as one operation. It does not recreate or
+read the deleted bootstrap secret, change Gemini credentials, or alter existing
+triggers, Pub/Sub resources, Workspace Events subscriptions, or processing
+state.
+
+Before mutation, the installed API executable starts a durable maintenance
+transaction and returns the live spreadsheet/configuration timezone as the
+rollback baseline. Catalog processing entry points skip work while that
+transaction is active. The installer pulls the current remote project and
+changes only its manifest timezone, so unrelated local working-tree source is
+never deployed and all other installed manifest fields are preserved by this
+command.
+
+The tracked `appsscript.json` is modified only inside a guarded subshell. Its
+original bytes are restored after a successful push, a failed push, or a
+handled interruption. If the Apps Script update fails after the push, the
+installer attempts to restore both the previous remote configuration and
+manifest, verifies the rollback response, retains `pendingTimeZone`, and exits
+non-zero. If convergence or maintenance cleanup cannot be proven, processing
+remains paused and the next invocation resumes the same transaction. A later
+invocation recovers the single retained manifest backup left by
+an uncatchable process termination and fails closed if multiple backups require
+manual review. A `GDUC_TIME_ZONE` override is intentionally temporary: update
+`config.local.json` too when it should become the local default.
 
 ## Browser handoff
 
@@ -467,8 +517,11 @@ The installer reads every stored or newly created deployment through the
 [Apps Script Deployments
 API](https://developers.google.com/apps-script/api/reference/rest/v1/projects.deployments/get)
 and accepts it only when the deployment ID and script ID match, it has a
-numbered version and manifest, and its entry point is `EXECUTION_API` with
-`MYSELF` access. The owner authorization therefore includes
+numbered version and the `appsscript` manifest, and its entry point is
+`EXECUTION_API` with `MYSELF` access. `MYSELF` identifies the Google account
+that deploys the executable, so the installer authorization must belong to the
+Apps Script project owner to preserve the owner-only boundary. The
+authorization therefore includes
 `https://www.googleapis.com/auth/script.deployments`, requested by the existing
 `clasp login --include-clasp-scopes` command.
 
@@ -476,6 +529,14 @@ If a stored deployment is missing or incompatible, the installer stops with a
 diagnostic. It does not clear installer state, delete the deployment, or create
 a replacement automatically. Repair or replacement is an explicit operator
 action so an unrelated deployment cannot be silently substituted.
+
+Before creating the first deployment, the installer stores a unique creation
+marker in private state. Resume reconciles a deployment carrying that marker,
+then stores its returned ID before API validation, so ambiguous command results
+or transient inspection failures do not create duplicates. When a valid
+deployment ID is already stored, resume verifies it and skips source upload;
+production source updates belong to the deployment workflow, which keeps HEAD
+and the numbered API executable synchronized.
 
 The owner-only bootstrap:
 
