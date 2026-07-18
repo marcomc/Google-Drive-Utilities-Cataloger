@@ -93,6 +93,12 @@ test_input_validation() {
     is_valid_time_zone "Europe/Rome"
   assert_failure "reject an invalid IANA time zone" \
     is_valid_time_zone "Europe/Not-A-Zone"
+  assert_failure "reject a fixed positive UTC offset" \
+    is_valid_time_zone "+02:00"
+  assert_failure "reject a fixed negative UTC offset" \
+    is_valid_time_zone "-05:30"
+  assert_failure "reject whitespace around an IANA time zone" \
+    is_valid_time_zone " Europe/Rome "
 
   assert_success "accept a Gemini model identifier" \
     is_valid_gemini_model "gemini-2.5-flash"
@@ -231,7 +237,7 @@ write_test_state() {
       projectId: "test-project-123",
       billingAccountId: "000000-000000-000000",
       locale: "en",
-      timeZone: "Etc/UTC",
+      timeZone: "Europe/Rome",
       notificationRecipient: "operator@example.com",
       rootFolderId: "1AbCdEfGhIjKlMnOpQrStUvWxYz_12345",
       spreadsheetId: "",
@@ -327,15 +333,17 @@ test_bootstrap_payload_keeps_key_off_disk() {
     TEMP_PATHS=()
     mkdir -p "${STATE_DIR}"
     printf "%s\n" \
-      "{\"projectId\":\"test-project-123\",\"rootFolderId\":\"folder-id\",\"spreadsheetId\":\"\",\"spreadsheetTitle\":\"Utilities\",\"notificationRecipient\":\"operator@example.com\",\"geminiBackend\":\"gemini_api\",\"geminiModel\":\"gemini-2.5-flash\",\"geminiAutoVertexFallback\":false,\"vertexAiLocation\":\"global\",\"timeZone\":\"Etc/UTC\"}" \
+      "{\"projectId\":\"test-project-123\",\"rootFolderId\":\"folder-id\",\"spreadsheetId\":\"\",\"spreadsheetTitle\":\"Utilities\",\"notificationRecipient\":\"operator@example.com\",\"geminiBackend\":\"gemini_api\",\"geminiModel\":\"gemini-2.5-flash\",\"geminiAutoVertexFallback\":false,\"vertexAiLocation\":\"global\",\"timeZone\":\"Europe/Rome\"}" \
       >"${STATE_FILE}"
-    printf "%s\n" "{\"locale\":\"en\"}" \
+    printf "%s\n" "{\"locale\":\"en\",\"time_zone\":\"Pacific/Auckland\"}" \
       >"${PROJECT_ROOT}/config.local.json"
     printf "%s\n" "Policy" >"${PROJECT_ROOT}/AGENTS.example.md"
 
     actual_payload=""
     build_bootstrap_payload "test-secret" actual_payload
-    jq -e ".geminiApiKey == \"test-secret\"" \
+    jq -e ".geminiApiKey == \"test-secret\" and
+      .timeZone == \"Europe/Rome\" and
+      .automationConfig.time_zone == \"Europe/Rome\"" \
       <<<"${actual_payload}" >/dev/null &&
       [[ "${#TEMP_PATHS[@]}" -eq 0 ]] &&
       ! grep -R -q "test-secret" "${PROJECT_ROOT}"
@@ -355,8 +363,9 @@ test_resume_runtime_overrides() {
   write_test_state "gemini_api_with_vertex_fallback"
   GDUC_GEMINI_MODEL="gemini-2.5-flash-lite"
   GDUC_VERTEX_AI_LOCATION="europe-west1"
+  GDUC_TIME_ZONE="Pacific/Auckland"
   apply_resume_overrides
-  unset GDUC_GEMINI_MODEL GDUC_VERTEX_AI_LOCATION
+  unset GDUC_GEMINI_MODEL GDUC_TIME_ZONE GDUC_VERTEX_AI_LOCATION
 
   actual="$(state_get '.geminiModel')"
   assert_equal "gemini-2.5-flash-lite" "${actual}" \
@@ -364,6 +373,45 @@ test_resume_runtime_overrides() {
   actual="$(state_get '.vertexAiLocation')"
   assert_equal "europe-west1" "${actual}" \
     "override the pending Vertex location on resume"
+  actual="$(state_get '.timeZone')"
+  assert_equal "Pacific/Auckland" "${actual}" \
+    "temporarily override the pending IANA time zone on resume"
+}
+
+test_resume_time_zone_cannot_diverge_from_deployed_source() {
+  local test_status
+
+  write_test_state "gemini_api"
+  state_set "deploymentId" "deployment-1"
+  state_set "sourceTimeZone" "Europe/Rome"
+  set +e
+  (
+    GDUC_TIME_ZONE="Pacific/Auckland"
+    apply_resume_overrides
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -eq 0 ]]; then
+    printf 'FAIL: resume accepted a timezone different from deployed source\n' >&2
+    failures=$((failures + 1))
+  fi
+  state_set "sourceTimeZone" ""
+  set +e
+  (
+    GDUC_TIME_ZONE="Europe/Rome"
+    apply_resume_overrides
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+  if [[ "${test_status}" -eq 0 ]]; then
+    printf 'FAIL: legacy deployment state bypassed source timezone guard\n' >&2
+    failures=$((failures + 1))
+  fi
+  state_set "sourceTimeZone" "Europe/Rome"
+  GDUC_TIME_ZONE="Europe/Rome"
+  assert_success "resume accepts the deployed source timezone" \
+    apply_resume_overrides
+  unset GDUC_TIME_ZONE
 }
 
 # Invoked indirectly by the rejected-credential cleanup test.
@@ -547,6 +595,363 @@ test_restrictive_installer_umask() {
   fi
 }
 
+deployment_fixture() {
+  local script_id="$1"
+  local entry_point_type="$2"
+  local access="$3"
+
+  jq -cn \
+    --arg script_id "${script_id}" \
+    --arg entry_point_type "${entry_point_type}" \
+    --arg access "${access}" '
+      {
+        deploymentId: "deployment-1",
+        deploymentConfig: {
+          scriptId: $script_id,
+          versionNumber: 4,
+          manifestFileName: "appsscript"
+        },
+        entryPoints: [{
+          entryPointType: $entry_point_type,
+          executionApi: {entryPointConfig: {access: $access}}
+        }]
+      }
+    '
+}
+
+test_owner_only_api_deployment_validation() {
+  local mixed_public
+  local missing_entry
+  local wrong_access
+  local wrong_manifest
+  local valid
+
+  valid="$(deployment_fixture "test-script" "EXECUTION_API" "MYSELF")"
+  missing_entry="$(deployment_fixture "test-script" "WEB_APP" "MYSELF")"
+  wrong_access="$(deployment_fixture "test-script" "EXECUTION_API" "ANYONE")"
+  wrong_manifest="$(jq -c \
+    '.deploymentConfig.manifestFileName = "other"' <<<"${valid}")"
+  mixed_public="$(jq -c '.entryPoints += [{
+    entryPointType: "WEB_APP",
+    webApp: {
+      entryPointConfig: {
+        access: "ANYONE",
+        executeAs: "USER_DEPLOYING"
+      }
+    }
+  }]' <<<"${valid}")"
+  assert_success "accept an owner-only API executable" \
+    validate_owner_only_api_deployment \
+    "${valid}" "test-script" "deployment-1" "4"
+  assert_failure "reject a deployment from another script" \
+    validate_owner_only_api_deployment \
+    "${valid}" "other-script" "deployment-1"
+  assert_failure "reject a deployment without EXECUTION_API" \
+    validate_owner_only_api_deployment \
+    "${missing_entry}" \
+    "test-script" "deployment-1"
+  assert_failure "reject an API executable not restricted to MYSELF" \
+    validate_owner_only_api_deployment \
+    "${wrong_access}" \
+    "test-script" "deployment-1"
+  assert_failure "reject an unexpected manifest file" \
+    validate_owner_only_api_deployment \
+    "${wrong_manifest}" "test-script" "deployment-1"
+  assert_failure "reject a mixed deployment with a public web app" \
+    validate_owner_only_api_deployment \
+    "${mixed_public}" "test-script" "deployment-1"
+}
+
+test_invalid_stored_deployment_is_not_recreated() {
+  local activity_log="${TEST_STATE_DIR}/stored-deployment-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    local invalid_deployment
+
+    invalid_deployment="$(deployment_fixture \
+      "test-script" "EXECUTION_API" "ANYONE")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '%s\n' "deployment-1" ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${invalid_deployment}"
+    }
+    state_set() {
+      printf 'state-set %s\n' "$1" >>"${activity_log}"
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_must_not_run() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      return 99
+    }
+    CLASP=(clasp_must_not_run)
+    ensure_api_executable_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 || -s "${activity_log}" ]]; then
+    printf 'FAIL: invalid stored deployment was accepted or replaced\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_invalid_new_deployment_is_stored_for_safe_resume() {
+  local activity_log="${TEST_STATE_DIR}/new-deployment-activity"
+  local deploy_count
+  local retained_id
+  local state_set_count
+  local state_file="${TEST_STATE_DIR}/new-deployment-state"
+  local test_status
+
+  : >"${activity_log}"
+  : >"${state_file}"
+  set +e
+  (
+    local invalid_deployment
+    local first_status
+    local second_status
+
+    invalid_deployment="$(deployment_fixture \
+      "test-script" "WEB_APP" "MYSELF")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) cat "${state_file}" ;;
+        .deploymentCreationDescription)
+          printf '%s\n' "Owner-only installer bootstrap test-marker"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${invalid_deployment}"
+    }
+    state_set() {
+      if [[ "$1" != "deploymentId" || "$2" != "deployment-1" ]]; then
+        printf 'invalid-state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+        return 98
+      fi
+      printf '%s\n' "$2" >"${state_file}"
+      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      case "$*" in
+        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments")
+          printf '%s\n' '[]'
+          ;;
+        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deploy --description Owner-only installer bootstrap test-marker")
+          printf '%s\n' '{"deploymentId":"deployment-1"}'
+          ;;
+        *) return 97 ;;
+      esac
+    }
+    CLASP=(clasp_fixture)
+    (ensure_api_executable_deployment)
+    first_status=$?
+    (ensure_api_executable_deployment)
+    second_status=$?
+    [[ "${first_status}" -ne 0 && "${second_status}" -ne 0 ]]
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+  retained_id="$(<"${state_file}")"
+  deploy_count="$(awk '/^clasp .* --json deploy / {count++} END {print count + 0}' \
+    "${activity_log}")"
+  state_set_count="$(awk \
+    '/^state-set deploymentId deployment-1$/ {count++} END {print count + 0}' \
+    "${activity_log}")"
+
+  if [[ "${test_status}" -ne 0 ]] ||
+    [[ "${retained_id}" != "deployment-1" ]] ||
+    [[ "${deploy_count}" -ne 1 ]] ||
+    [[ "${state_set_count}" -ne 1 ]] ||
+    grep -q '^invalid-state-set' "${activity_log}"; then
+    printf 'FAIL: invalid new deployment was not retained for safe resume\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_pending_deployment_creation_is_reconciled_without_duplicate() {
+  local activity_log="${TEST_STATE_DIR}/pending-deployment-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    local valid_deployment
+
+    valid_deployment="$(deployment_fixture \
+      "test-script" "EXECUTION_API" "MYSELF")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '\n' ;;
+        .deploymentCreationDescription)
+          printf '%s\n' "Owner-only installer bootstrap test-marker"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    state_set() {
+      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+    }
+    read_apps_script_deployment() {
+      [[ "$3" == "deployment-1" ]] || return 96
+      printf -v "$4" '%s' "${valid_deployment}"
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      if [[ "$*" != \
+        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments" ]]; then
+        return 97
+      fi
+      jq -cn '[{
+        deploymentId: "deployment-1",
+        description: "Owner-only installer bootstrap test-marker"
+      }]'
+    }
+    CLASP=(clasp_fixture)
+    ensure_api_executable_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -ne 0 ]] ||
+    grep -q -- '--json deploy --description' "${activity_log}" ||
+    ! grep -qx 'state-set deploymentId deployment-1' "${activity_log}"; then
+    printf 'FAIL: pending deployment creation was not reconciled safely\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_ambiguous_pending_deployment_creation_fails_closed() {
+  local activity_log="${TEST_STATE_DIR}/ambiguous-deployment-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '\n' ;;
+        .deploymentCreationDescription)
+          printf '%s\n' "Owner-only installer bootstrap test-marker"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    state_set() {
+      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+    }
+    read_apps_script_deployment() {
+      printf '%s\n' "unexpected-read" >>"${activity_log}"
+      return 96
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      jq -cn '["deployment-1", "deployment-2"] | map({
+        deploymentId: .,
+        description: "Owner-only installer bootstrap test-marker"
+      })'
+    }
+    CLASP=(clasp_fixture)
+    ensure_api_executable_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 ]] ||
+    grep -q -- '--json deploy --description' "${activity_log}" ||
+    grep -q '^state-set deploymentId' "${activity_log}" ||
+    grep -q '^unexpected-read$' "${activity_log}"; then
+    printf 'FAIL: ambiguous pending deployments did not fail closed\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_valid_stored_deployment_skips_source_push() {
+  local activity_log="${TEST_STATE_DIR}/valid-deployment-resume-activity"
+
+  : >"${activity_log}"
+  (
+    local valid_deployment
+
+    valid_deployment="$(deployment_fixture \
+      "test-script" "EXECUTION_API" "MYSELF")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '%s\n' "deployment-1" ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${valid_deployment}"
+    }
+    push_apps_script_source() {
+      printf '%s\n' "push" >>"${activity_log}"
+    }
+    prepare_apps_script_source_and_deployment
+  ) >/dev/null 2>&1
+
+  if [[ -s "${activity_log}" ]]; then
+    printf 'FAIL: valid stored deployment caused a source push on resume\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_invalid_stored_deployment_blocks_source_push() {
+  local activity_log="${TEST_STATE_DIR}/deployment-preflight-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    local invalid_deployment
+
+    invalid_deployment="$(deployment_fixture \
+      "test-script" "EXECUTION_API" "ANYONE")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '%s\n' "deployment-1" ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${invalid_deployment}"
+    }
+    push_apps_script_source() {
+      printf '%s\n' "push" >>"${activity_log}"
+    }
+    prepare_apps_script_source_and_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 || -s "${activity_log}" ]]; then
+    printf 'FAIL: invalid stored deployment did not block source push\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
 test_drive_id_extraction
 test_input_validation
 test_version_parsing
@@ -556,6 +961,7 @@ test_runtime_service_selection
 test_secret_input_assignment
 test_bootstrap_payload_keeps_key_off_disk
 test_resume_runtime_overrides
+test_resume_time_zone_cannot_diverge_from_deployed_source
 test_exit_zero_gemini_error_cleanup
 test_secret_resource_ownership
 test_installer_lock_exclusion
@@ -563,6 +969,13 @@ test_preflight_does_not_require_global_clasp_login
 test_reset_removes_private_state_after_releasing_lock
 test_private_artifacts_are_ignored
 test_restrictive_installer_umask
+test_owner_only_api_deployment_validation
+test_invalid_stored_deployment_is_not_recreated
+test_invalid_new_deployment_is_stored_for_safe_resume
+test_invalid_stored_deployment_blocks_source_push
+test_pending_deployment_creation_is_reconciled_without_duplicate
+test_ambiguous_pending_deployment_creation_fails_closed
+test_valid_stored_deployment_skips_source_push
 
 if ! bash "${PROJECT_ROOT}/scripts/install.sh" --help >/dev/null; then
   printf 'FAIL: installer help is unavailable\n' >&2
@@ -572,6 +985,12 @@ fi
 if ! make -C "${PROJECT_ROOT}" --no-print-directory |
   grep -q "install-resume"; then
   printf 'FAIL: default make target does not print installer help\n' >&2
+  failures=$((failures + 1))
+fi
+
+if ! make -C "${PROJECT_ROOT}" --no-print-directory |
+  grep -q "install-reconfigure-time-zone"; then
+  printf 'FAIL: make help omits time-zone reconfiguration\n' >&2
   failures=$((failures + 1))
 fi
 

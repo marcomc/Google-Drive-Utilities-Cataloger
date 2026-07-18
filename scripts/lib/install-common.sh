@@ -49,6 +49,11 @@ is_supported_locale() {
 is_valid_time_zone() {
   local time_zone="${1:-}"
 
+  if [[ -z "${time_zone}" || "${time_zone}" == [+-]* ||
+    "${time_zone}" != "${time_zone//[[:space:]]/}" ]]; then
+    return 1
+  fi
+
   node -e '
     try {
       new Intl.DateTimeFormat("en-US", { timeZone: process.argv[1] }).format();

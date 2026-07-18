@@ -165,6 +165,37 @@ function testNormalizedConfigurationCollisions() {
     })),
     /safe 8 KiB/
   );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      delete config.time_zone;
+    })),
+    /valid IANA time zone/
+  );
+  assert.doesNotThrow(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      delete config.time_zone;
+    }), { allowLegacyMissingTimeZone: true })
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.time_zone = 'Europe/Not-A-Zone';
+    }), { allowLegacyMissingTimeZone: true }),
+    /valid IANA time zone/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.time_zone = 'Europe/Not-A-Zone';
+    })),
+    /valid IANA time zone/
+  );
+  ['+02:00', '-05:30', ' Europe/Rome '].forEach((timeZone) => {
+    assert.throws(
+      () => context.validateAutomationConfig_(mutate((config) => {
+        config.time_zone = timeZone;
+      })),
+      /valid IANA time zone/
+    );
+  });
 }
 
 function testLocaleParity() {
@@ -195,15 +226,28 @@ function testDeploymentContract() {
     path.join(projectRoot, 'scripts/deploy-apps-script.sh'),
     'utf8'
   );
+  const deploymentHelper = fs.readFileSync(
+    path.join(projectRoot, 'scripts/lib/apps-script-deployment.sh'),
+    'utf8'
+  );
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /run: \.\/scripts\/deploy-apps-script\.sh/);
   assert.match(deployScript, /A newer main revision exists; skipping stale deployment/);
-  assert.match(deployScript, /--json deployments/);
+  assert.match(deployScript, /read_apps_script_deployment/);
+  assert.match(deployScript, /validate_owner_only_api_deployment/);
+  assert.match(deploymentHelper, /--json deployments/);
+  assert.match(
+    deploymentHelper,
+    /script\.googleapis\.com\/v1\/projects\/.+\/deployments\//
+  );
+  assert.match(deploymentHelper, /EXECUTION_API/);
+  assert.match(deploymentHelper, /MYSELF/);
   assert.match(deployScript, /remote_time_zone=/);
   assert.match(deployScript, /--json version/);
   assert.match(deployScript, /--json deploy/);
   assert.ok(
-    deployScript.indexOf('--json deployments') < deployScript.indexOf('push --force'),
+    deployScript.indexOf('read_apps_script_deployment') <
+      deployScript.indexOf('push --force'),
     'deployment ownership must be checked before pushing source'
   );
   assert.ok(

@@ -61,8 +61,12 @@ function processDriveEventQueue() {
 }
 
 function processDriveEventQueueUnlocked_() {
-  const subscription = getScriptProperty_(CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION);
-  if (!subscription) {
+  const properties = PropertiesService.getScriptProperties();
+  const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
+  const subscription = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION
+  );
+  if (!topic && !subscription) {
     console.log('Pub/Sub is not configured; no Drive events can be processed.');
     logCatalogEvent_('catalog-run-completed', {
       resultCount: 0,
@@ -70,6 +74,13 @@ function processDriveEventQueueUnlocked_() {
     });
     return { processed: false, reason: 'not-configured' };
   }
+  const projectId = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID
+  );
+  if (!projectId) {
+    throw new Error('Google Cloud project is not configured.');
+  }
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
   const recoveredResults = recoverPendingMutations_(rootFolder);
   flushPendingReports_();
@@ -91,6 +102,7 @@ function processDriveEventQueueUnlocked_() {
     };
   }
   const ackIds = messages.map(function (message) { return message.ackId; });
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   cloudFetch_('https://pubsub.googleapis.com/v1/' +
     subscription + ':modifyAckDeadline', {
     method: 'post',
@@ -104,6 +116,7 @@ function processDriveEventQueueUnlocked_() {
   });
   const batch = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
   finalizeCatalogResults_(batch.state, batch.results);
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
     method: 'post',
     payload: JSON.stringify({ ackIds: ackIds })
@@ -171,13 +184,14 @@ function provisionDriveEventTransportUnlocked_() {
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
   }
+  const properties = PropertiesService.getScriptProperties();
+  assertStoredPubSubTransportIdentity_(properties, projectId, true);
   const topic = getDriveEventTopicName_(projectId);
   const subscription = getDriveEventPullSubscriptionName_(projectId);
 
   ensurePubSubTopic_(topic);
   grantDrivePublisher_(topic);
   ensurePubSubPullSubscription_(subscription, topic);
-  const properties = PropertiesService.getScriptProperties();
   properties.setProperties({
     PUBSUB_TOPIC: topic,
     PUBSUB_SUBSCRIPTION: subscription
@@ -189,9 +203,9 @@ function provisionDriveEventTransportUnlocked_() {
 }
 
 /**
- * Replace this automation's Drive event subscription while preserving the
- * shared Pub/Sub topic and pull subscription. Use only to repair an event
- * path that is configured but not receiving new-file notifications.
+ * Replace this automation's Drive event subscription and reconcile its
+ * installation-specific Pub/Sub topic and pull subscription. Use only to
+ * repair an event path that is configured but not receiving notifications.
  */
 function recreateDriveEventSubscription() {
   return withCatalogLifecycleLock_('recreate-event-subscription', function () {
@@ -204,6 +218,8 @@ function recreateDriveEventSubscriptionUnlocked_() {
   if (!projectId) {
     throw new Error('Configure GOOGLE_CLOUD_PROJECT_ID in Script Properties first.');
   }
+  const properties = PropertiesService.getScriptProperties();
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
   const topic = getDriveEventTopicName_(projectId);
   const subscription = getDriveEventPullSubscriptionName_(projectId);
 
@@ -211,7 +227,6 @@ function recreateDriveEventSubscriptionUnlocked_() {
   grantDrivePublisher_(topic);
   ensurePubSubPullSubscription_(subscription, topic);
 
-  const properties = PropertiesService.getScriptProperties();
   const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
   if (current) {
     try {
@@ -222,7 +237,7 @@ function recreateDriveEventSubscriptionUnlocked_() {
         { method: 'delete' }
       ), false);
     } catch (error) {
-      if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+      if (!isUnavailableWorkspaceEventSubscriptionError_(error)) {
         throw error;
       }
     }
@@ -256,11 +271,22 @@ function renewDriveEventSubscription() {
 
 function renewDriveEventSubscriptionUnlocked_() {
   const properties = PropertiesService.getScriptProperties();
-  const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
-  if (!topic) {
+  const storedTopic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
+  const storedPull = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION
+  );
+  if (!storedTopic && !storedPull) {
     console.log('Drive event transport is not configured; renewal skipped.');
     return { renewed: false, reason: 'not-configured' };
   }
+  const projectId = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID
+  );
+  if (!projectId) {
+    throw new Error('Google Cloud project is not configured.');
+  }
+  assertStoredPubSubTransportIdentity_(properties, projectId, false);
+  const topic = getDriveEventTopicName_(projectId);
 
   const current = properties.getProperty(CONFIG.PROPERTY_KEYS.WORKSPACE_EVENT_SUBSCRIPTION);
   if (!current) {
@@ -272,7 +298,14 @@ function renewDriveEventSubscriptionUnlocked_() {
   try {
     live = getWorkspaceEventSubscription_(current);
   } catch (error) {
-    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+    if (isInaccessibleWorkspaceEventSubscriptionError_(error)) {
+      recreateDriveEventSubscriptionUnlocked_();
+      return {
+        renewed: true,
+        reason: 'inaccessible-subscription-recreated'
+      };
+    }
+    if (!isCloudHttpStatus_(error, 404)) {
       throw error;
     }
     const replacement = createDriveEventSubscription_(topic);
@@ -302,6 +335,38 @@ function renewDriveEventSubscriptionUnlocked_() {
   return { renewed: true, subscription: subscription.name };
 }
 
+function assertStoredPubSubTransportIdentity_(properties, projectId,
+  allowUnconfigured) {
+  const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
+  const pull = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.PUBSUB_SUBSCRIPTION
+  );
+  if (allowUnconfigured && !topic && !pull) {
+    return;
+  }
+  if (topic !== getDriveEventTopicName_(projectId) ||
+    pull !== getDriveEventPullSubscriptionName_(projectId)) {
+    throw new Error(
+      'Stored Pub/Sub transport names do not match this Apps Script project. ' +
+      'Repair the installation before changing the Workspace subscription.'
+    );
+  }
+}
+
+function isUnavailableWorkspaceEventSubscriptionError_(error) {
+  return isCloudHttpStatus_(error, 404) ||
+    isInaccessibleWorkspaceEventSubscriptionError_(error);
+}
+
+function isInaccessibleWorkspaceEventSubscriptionError_(error) {
+  return isCloudHttpStatus_(error, 403) &&
+    error.cloudReason === 'SUBSCRIPTION_ACCESS_DENIED';
+}
+
+function isCloudHttpStatus_(error, statusCode) {
+  return Number(error && error.cloudHttpStatus) === statusCode;
+}
+
 function withCatalogLifecycleLock_(operation, callback) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
@@ -318,7 +383,7 @@ function ensurePubSubTopic_(topic) {
   try {
     cloudFetch_('https://pubsub.googleapis.com/v1/' + topic, { method: 'get' });
   } catch (error) {
-    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+    if (!isCloudHttpStatus_(error, 404)) {
       throw error;
     }
     cloudFetch_('https://pubsub.googleapis.com/v1/' + topic, {
@@ -360,7 +425,7 @@ function ensurePubSubPullSubscription_(subscription, topic) {
       { method: 'get' }
     );
   } catch (error) {
-    if (error.message.indexOf('Google Cloud HTTP 404:') === -1) {
+    if (!isCloudHttpStatus_(error, 404)) {
       throw error;
     }
     cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription, {
@@ -407,8 +472,7 @@ function createDriveEventSubscription_(topic) {
             payloadOptions: { includeResource: false },
             // A folder target receives child-file changes only when this is true.
             driveOptions: { includeDescendants: true },
-            notificationEndpoint: { pubsubTopic: topic },
-            ttl: '0s'
+            notificationEndpoint: { pubsubTopic: topic }
           })
         }
       );
@@ -580,7 +644,28 @@ function cloudFetch_(url, options) {
   });
   const text = response.getContentText();
   if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
-    throw new Error('Google Cloud HTTP ' + response.getResponseCode() + ': ' + text);
+    throw createCloudHttpError_(response.getResponseCode(), text);
   }
   return text ? JSON.parse(text) : {};
+}
+
+function createCloudHttpError_(statusCode, responseText) {
+  const error = new Error(
+    'Google Cloud HTTP ' + statusCode + ': ' + responseText
+  );
+  error.cloudHttpStatus = Number(statusCode);
+  error.cloudReason = '';
+  try {
+    const body = JSON.parse(responseText);
+    const details = body && body.error && body.error.details;
+    if (Array.isArray(details)) {
+      const detail = details.filter(function (item) {
+        return item && typeof item.reason === 'string';
+      })[0];
+      error.cloudReason = detail ? detail.reason : '';
+    }
+  } catch (parseError) {
+    error.cloudReason = '';
+  }
+  return error;
 }

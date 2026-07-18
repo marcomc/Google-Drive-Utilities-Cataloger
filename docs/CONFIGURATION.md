@@ -86,6 +86,7 @@ margin below the official
 | JSON key | What to customize |
 | --- | --- |
 | `locale` | `en` for English or `it` for Italian output and sheet-header aliases. |
+| `time_zone` | IANA time zone used by Apps Script and the spreadsheet; defaults to `Europe/Rome`. |
 | `canonical_supplies` | Canonical utility categories used in folders and Sheets. |
 | `canonical_suppliers` and `supplier_aliases` | Supplier names and spelling variants. |
 | `supply_aliases` | Terms recognized in documents for each utility category. |
@@ -166,3 +167,9 @@ Before activation:
    valid Drive `AGENTS.md`, then run `getSetupStatus`.
 
 Continue with [controlled validation](INSTALLATION.md#controlled-validation).
+
+To change only the time zone after installation, edit `time_zone` and run
+`make install-reconfigure-time-zone`. The installer validates it through the
+runtime IANA database, rejects fixed UTC offsets, and keeps installer state and
+`AUTOMATION_CONFIG_JSON` synchronized. See
+[Reconfigure time zone](INSTALLATION.md#reconfigure-time-zone).

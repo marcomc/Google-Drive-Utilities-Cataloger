@@ -20,18 +20,21 @@ function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-    recoverPendingMutations_(rootFolder);
-    flushPendingReports_();
-    const file = DriveApp.getFileById(fileId);
 
+    if (hasMutationJournal_(fileId)) {
+      recoverMutationJournalForFile_(rootFolder, fileId);
+    }
     if (hasMutationJournal_(fileId)) {
       throw new Error(
         'The specified file has an unresolved mutation journal; review it first.'
       );
     }
+    const file = DriveApp.getFileById(fileId);
     if (!isDirectIntakePdf_(file, rootFolder)) {
       throw new Error('The specified file is not a PDF located directly in the intake folder.');
     }
+
+    flushPendingReports_();
 
     const driveAgentsPolicy = loadDriveAgentsPolicy_(rootFolder);
     logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
@@ -74,6 +77,14 @@ function withCatalogProcessingLock_(triggerSource, callback) {
   const lock = LockService.getScriptLock();
   logCatalogEvent_('catalog-run-start', { triggerSource: triggerSource });
 
+  if (isCatalogMaintenanceActive_()) {
+    logCatalogEvent_('catalog-run-skipped', {
+      triggerSource: triggerSource,
+      reason: 'maintenance'
+    });
+    return { triggerSource: triggerSource, skipped: 'maintenance', results: [] };
+  }
+
   if (!lock.tryLock(1000)) {
     console.log('Utilities cataloging is already running; trigger skipped: ' + triggerSource);
     logCatalogEvent_('catalog-run-skipped', {
@@ -83,11 +94,26 @@ function withCatalogProcessingLock_(triggerSource, callback) {
     return { triggerSource: triggerSource, skipped: 'already-running', results: [] };
   }
 
+  if (isCatalogMaintenanceActive_()) {
+    lock.releaseLock();
+    logCatalogEvent_('catalog-run-skipped', {
+      triggerSource: triggerSource,
+      reason: 'maintenance'
+    });
+    return { triggerSource: triggerSource, skipped: 'maintenance', results: [] };
+  }
+
   try {
     return callback();
   } finally {
     lock.releaseLock();
   }
+}
+
+function isCatalogMaintenanceActive_() {
+  return Boolean(PropertiesService.getScriptProperties().getProperty(
+    CONFIG.PROPERTY_KEYS.TIME_ZONE_RECONFIGURATION
+  ));
 }
 
 /**
@@ -402,7 +428,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   };
   const generationConfig = {
     maxOutputTokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS,
-    responseMimeType: 'application/json'
+    responseMimeType: 'application/json',
+    responseJsonSchema: buildExtractionResponseSchema_()
   };
   if (model === 'gemini-3.5-flash') {
     generationConfig.thinkingConfig = {
@@ -524,6 +551,84 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return valid extraction JSON.');
   }
   return parts[0].text;
+}
+
+function buildExtractionResponseSchema_() {
+  const nullableString = { type: ['string', 'null'] };
+  const nullableNumber = { type: ['number', 'null'] };
+  const required = [
+    'document_type',
+    'supplier',
+    'supply_type',
+    'address_type',
+    'address_evidence',
+    'issue_date',
+    'identifier',
+    'contract_number',
+    'customer_code',
+    'contract_object',
+    'reference_year',
+    'reference_month',
+    'frequency',
+    'period_start',
+    'period_end',
+    'consumption_description',
+    'cost_consumption',
+    'cost_non_consumption',
+    'vat',
+    'total',
+    'sheet_values',
+    'problems'
+  ];
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      document_type: {
+        type: 'string',
+        enum: ['Invoice', 'Contract', 'Report', 'unknown']
+      },
+      supplier: nullableString,
+      supply_type: nullableString,
+      address_type: {
+        type: 'string',
+        enum: ['import', 'archive_only', 'unknown']
+      },
+      address_evidence: nullableString,
+      issue_date: nullableString,
+      identifier: nullableString,
+      contract_number: nullableString,
+      customer_code: nullableString,
+      contract_object: nullableString,
+      reference_year: { type: ['integer', 'null'] },
+      reference_month: nullableString,
+      frequency: nullableString,
+      period_start: nullableString,
+      period_end: nullableString,
+      consumption_description: nullableString,
+      cost_consumption: nullableNumber,
+      cost_non_consumption: nullableNumber,
+      vat: nullableNumber,
+      total: nullableNumber,
+      sheet_values: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            header: { type: 'string' },
+            value: { type: ['string', 'number', 'boolean', 'null'] }
+          },
+          required: ['header', 'value']
+        }
+      },
+      problems: {
+        type: 'array',
+        items: { type: 'string' }
+      }
+    },
+    required: required
+  };
 }
 
 /**
@@ -693,7 +798,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "cost_non_consumption": 0.00,',
     '  "vat": 0.00,',
     '  "total": 0.00,',
-    '  "sheet_values": [{"header":"exact allowed header","value": "number, text, or date"}],',
+    '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date"}],',
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
@@ -1493,14 +1598,14 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     .getFormulas()[0];
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
+  const monthColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('month'));
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
-    if (column && !rowFormulas[column - 1] &&
-      !sheetValuesMatch_(
-        sheet.getRange(row, column).getValue(),
-        expected[normalizedHeader],
-        extracted.issue_date
-      )) {
+    const actual = column ? sheet.getRange(row, column).getValue() : null;
+    const matches = column === monthColumn ?
+      referenceMonthValuesMatch_(actual, expected[normalizedHeader]) :
+      sheetValuesMatch_(actual, expected[normalizedHeader], extracted.issue_date);
+    if (column && !rowFormulas[column - 1] && !matches) {
       throw new Error('Spreadsheet value verification failed for: ' +
         layout.headers[column - 1]);
     }
@@ -1556,6 +1661,17 @@ function sheetValuesMatch_(actual, expected, issueDate) {
   }
   return String(actual === null || actual === undefined ? '' : actual) ===
     String(expected === null || expected === undefined ? '' : expected);
+}
+
+function referenceMonthValuesMatch_(actual, expected) {
+  const actualText = String(actual === null || actual === undefined ? '' : actual);
+  const expectedText = String(expected === null || expected === undefined ? '' : expected);
+  if (!/^\d{1,2}$/.test(actualText) || !/^\d{2}$/.test(expectedText)) {
+    return false;
+  }
+  const actualMonth = Number(actualText);
+  const expectedMonth = Number(expectedText);
+  return actualMonth >= 1 && actualMonth <= 12 && actualMonth === expectedMonth;
 }
 
 function sha256ForFile_(file) {
@@ -1847,76 +1963,97 @@ function recoverPendingMutations_(rootFolder) {
     return key.indexOf(prefix) === 0;
   }).forEach(function (key) {
     const fileId = key.slice(prefix.length);
-    const recoveryAlertKey =
-      CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId;
-    let file = null;
-    let journal = null;
-    try {
-      journal = JSON.parse(allProperties[key]);
-      if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
-        throw new Error('The mutation journal is not a JSON object.');
-      }
-      file = DriveApp.getFileById(fileId);
-      if (!isFileInFolder_(file, rootFolder)) {
-        file.moveTo(rootFolder);
-      }
-      if (journal.originalName && file.getName() !== journal.originalName) {
-        file.setName(journal.originalName);
-      }
-      const sheetRecovery = rollbackJournalSheetRow_(journal, file);
-      const result = buildErrorResult_(
-        file,
-        'A previously interrupted mutation was recovered safely.',
-        'Review the PDF in intake; the daily run can retry it on the next day.',
-        journal.originalName || file.getName(),
-        { renamed: false, moved: false, imported: false }
-      );
-      if (journal.createdFolderPath) {
-        result.actions += ' Empty destination folders may remain at ' +
-          journal.createdFolderPath + '.';
-      }
-      if (sheetRecovery.unmarkedRowMayRemain) {
-        result.actions +=
-          ' An unmarked spreadsheet row may remain at the planned position.';
-      }
-      recordIntakeFileOutcome_(state, file, result);
-      queuePendingReports_([result]);
-      saveIntakeFileState_(state);
-      clearMutationJournal_(fileId);
-      logCatalogEvent_('catalog-mutation-recovered', { fileId: fileId });
+    const result = recoverMutationJournalForFile_(
+      rootFolder, fileId, allProperties[key], state, properties
+    );
+    if (result) {
       results.push(result);
-    } catch (error) {
-      const recoveryAlreadyReported =
-        Boolean(properties.getProperty(recoveryAlertKey)) ||
-        Boolean(journal && journal.recoveryReported);
-      if (!recoveryAlreadyReported) {
-        let result;
-        if (file) {
-          result = buildErrorResult_(
-            file,
-            'An interrupted mutation requires manual spreadsheet review: ' +
-              describeError_(error),
-            'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
-            (journal && journal.originalName) || file.getName(),
-            { renamed: false, moved: false, imported: true }
-          );
-          recordIntakeFileOutcome_(state, file, result);
-          saveIntakeFileState_(state);
-        } else {
-          result = buildUnavailableRecoveryResult_(fileId, journal, error);
-        }
-        queuePendingReports_([result]);
-        results.push(result);
-        properties.setProperty(recoveryAlertKey, String(Date.now()));
-        logCatalogEvent_('catalog-mutation-recovery-failed', {
-          fileId: fileId,
-          errorType: error.name || 'Error',
-          errorCategory: classifyCatalogErrorForLog_(error)
-        });
-      }
     }
   });
   return results;
+}
+
+function recoverMutationJournalForFile_(
+  rootFolder, fileId, rawJournal, intakeState, scriptProperties
+) {
+  const properties = scriptProperties ||
+    PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
+  const recoveryAlertKey =
+    CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId;
+  const raw = rawJournal === undefined ? properties.getProperty(key) : rawJournal;
+  const state = intakeState || loadIntakeFileState_();
+  let file = null;
+  let journal = null;
+
+  if (!raw) {
+    return null;
+  }
+  try {
+    journal = JSON.parse(raw);
+    if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
+      throw new Error('The mutation journal is not a JSON object.');
+    }
+    file = DriveApp.getFileById(fileId);
+    if (!isFileInFolder_(file, rootFolder)) {
+      file.moveTo(rootFolder);
+    }
+    if (journal.originalName && file.getName() !== journal.originalName) {
+      file.setName(journal.originalName);
+    }
+    const sheetRecovery = rollbackJournalSheetRow_(journal, file);
+    const result = buildErrorResult_(
+      file,
+      'A previously interrupted mutation was recovered safely.',
+      'Review the PDF in intake; the daily run can retry it on the next day.',
+      journal.originalName || file.getName(),
+      { renamed: false, moved: false, imported: false }
+    );
+    if (journal.createdFolderPath) {
+      result.actions += ' Empty destination folders may remain at ' +
+        journal.createdFolderPath + '.';
+    }
+    if (sheetRecovery.unmarkedRowMayRemain) {
+      result.actions +=
+        ' An unmarked spreadsheet row may remain at the planned position.';
+    }
+    recordIntakeFileOutcome_(state, file, result);
+    queuePendingReports_([result]);
+    saveIntakeFileState_(state);
+    clearMutationJournal_(fileId);
+    logCatalogEvent_('catalog-mutation-recovered', { fileId: fileId });
+    return result;
+  } catch (error) {
+    const recoveryAlreadyReported =
+      Boolean(properties.getProperty(recoveryAlertKey)) ||
+      Boolean(journal && journal.recoveryReported);
+    if (recoveryAlreadyReported) {
+      return null;
+    }
+    let result;
+    if (file) {
+      result = buildErrorResult_(
+        file,
+        'An interrupted mutation requires manual spreadsheet review: ' +
+          describeError_(error),
+        'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
+        (journal && journal.originalName) || file.getName(),
+        { renamed: false, moved: false, imported: true }
+      );
+      recordIntakeFileOutcome_(state, file, result);
+      saveIntakeFileState_(state);
+    } else {
+      result = buildUnavailableRecoveryResult_(fileId, journal, error);
+    }
+    queuePendingReports_([result]);
+    properties.setProperty(recoveryAlertKey, String(Date.now()));
+    logCatalogEvent_('catalog-mutation-recovery-failed', {
+      fileId: fileId,
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+    return result;
+  }
 }
 
 function buildUnavailableRecoveryResult_(fileId, journal, error) {

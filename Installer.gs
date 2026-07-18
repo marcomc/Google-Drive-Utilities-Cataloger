@@ -80,6 +80,248 @@ function bootstrapCatalogerInstallation(options) {
 }
 
 /**
+ * Reconfigure only the installed time zone without reading the deleted
+ * installer handoff or changing triggers and event transport.
+ */
+function beginCatalogerTimeZoneReconfiguration(options) {
+  return withCatalogLifecycleLock_('begin-time-zone-reconfiguration', function () {
+    return beginCatalogerTimeZoneReconfigurationUnlocked_(options);
+  });
+}
+
+function beginCatalogerTimeZoneReconfigurationUnlocked_(options) {
+  const validated = validateInstallerTimeZoneReconfiguration_(options, false);
+  const properties = PropertiesService.getScriptProperties();
+  const transactionKey = CONFIG.PROPERTY_KEYS.TIME_ZONE_RECONFIGURATION;
+  const existingTransaction = properties.getProperty(transactionKey);
+  if (existingTransaction) {
+    const existing = JSON.parse(existingTransaction);
+    if (existing.targetTimeZone !== validated.timeZone) {
+      throw new Error('Another time-zone reconfiguration is pending.');
+    }
+    return existing;
+  }
+  const spreadsheetId = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SPREADSHEET_ID
+  );
+  const previousConfig = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON
+  );
+  if (!spreadsheetId || !previousConfig) {
+    throw new Error('A completed cataloger installation is required.');
+  }
+  let automationConfig;
+  try {
+    automationConfig = JSON.parse(previousConfig);
+  } catch (error) {
+    throw new Error('Installed automation configuration is invalid JSON.');
+  }
+  const legacyConfigNeedsTimeZone = !Object.prototype.hasOwnProperty.call(
+    automationConfig,
+    'time_zone'
+  );
+  validateAutomationConfig_(automationConfig, {
+    allowLegacyMissingTimeZone: true
+  });
+  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  const previousTimeZone = spreadsheet.getSpreadsheetTimeZone();
+  if (legacyConfigNeedsTimeZone) {
+    automationConfig.time_zone = previousTimeZone;
+    validateAutomationConfig_(automationConfig);
+    properties.setProperty(
+      CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON,
+      JSON.stringify(automationConfig)
+    );
+  } else if (automationConfig.time_zone !== previousTimeZone) {
+    throw new Error(
+      'Installed spreadsheet and automation configuration time zones diverge.'
+    );
+  }
+  const transaction = {
+    transactionId: Utilities.getUuid(),
+    previousTimeZone: previousTimeZone,
+    targetTimeZone: validated.timeZone
+  };
+  properties.setProperty(transactionKey, JSON.stringify(transaction));
+  return transaction;
+}
+
+function reconfigureCatalogerTimeZone(options) {
+  return withCatalogLifecycleLock_('apply-time-zone-reconfiguration', function () {
+    return reconfigureCatalogerTimeZoneUnlocked_(options);
+  });
+}
+
+function reconfigureCatalogerTimeZoneUnlocked_(options) {
+  const validated = validateInstallerTimeZoneReconfiguration_(options, true);
+  const properties = PropertiesService.getScriptProperties();
+  const transaction = loadTimeZoneReconfiguration_(
+    properties,
+    validated.transactionId
+  );
+  if (transaction.targetTimeZone !== validated.timeZone) {
+    throw new Error('Time-zone reconfiguration target does not match.');
+  }
+  applyCatalogerTimeZone_(properties, validated.timeZone);
+  return {
+    configured: true,
+    timeZone: validated.timeZone,
+    transactionId: validated.transactionId,
+    automaticProcessingPreserved: true
+  };
+}
+
+function rollbackCatalogerTimeZoneReconfiguration(options) {
+  return withCatalogLifecycleLock_('rollback-time-zone-reconfiguration', function () {
+    return rollbackCatalogerTimeZoneReconfigurationUnlocked_(options);
+  });
+}
+
+function rollbackCatalogerTimeZoneReconfigurationUnlocked_(options) {
+  const validated = validateInstallerTimeZoneTransaction_(options);
+  const properties = PropertiesService.getScriptProperties();
+  const transaction = loadTimeZoneReconfiguration_(
+    properties,
+    validated.transactionId
+  );
+  applyCatalogerTimeZone_(properties, transaction.previousTimeZone);
+  return {
+    configured: true,
+    timeZone: transaction.previousTimeZone,
+    transactionId: validated.transactionId
+  };
+}
+
+function finishCatalogerTimeZoneReconfiguration(options) {
+  return withCatalogLifecycleLock_('finish-time-zone-reconfiguration', function () {
+    return finishCatalogerTimeZoneReconfigurationUnlocked_(options);
+  });
+}
+
+function finishCatalogerTimeZoneReconfigurationUnlocked_(options) {
+  const validated = validateInstallerTimeZoneTransaction_(options);
+  const properties = PropertiesService.getScriptProperties();
+  const transaction = loadTimeZoneReconfiguration_(
+    properties,
+    validated.transactionId
+  );
+  const expectedTimeZone = String(options.expectedTimeZone || '').trim();
+  if (
+    expectedTimeZone !== transaction.targetTimeZone &&
+    expectedTimeZone !== transaction.previousTimeZone
+  ) {
+    throw new Error('Time-zone completion value does not match the transaction.');
+  }
+  assertInstalledTimeZone_(properties, expectedTimeZone);
+  properties.deleteProperty(CONFIG.PROPERTY_KEYS.TIME_ZONE_RECONFIGURATION);
+  return { completed: true, timeZone: expectedTimeZone };
+}
+
+function applyCatalogerTimeZone_(properties, timeZone) {
+  const spreadsheetId = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SPREADSHEET_ID
+  );
+  const previousConfig = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON
+  );
+  const automationConfig = JSON.parse(previousConfig);
+  automationConfig.time_zone = timeZone;
+  validateAutomationConfig_(automationConfig);
+  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  const previousTimeZone = spreadsheet.getSpreadsheetTimeZone();
+
+  try {
+    spreadsheet.setSpreadsheetTimeZone(timeZone);
+    properties.setProperty(
+      CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON,
+      JSON.stringify(automationConfig)
+    );
+    assertCatalogConfiguration_();
+    if (spreadsheet.getSpreadsheetTimeZone() !== timeZone) {
+      throw new Error('Spreadsheet did not retain the configured time zone.');
+    }
+  } catch (error) {
+    let rollbackError = null;
+    try {
+      spreadsheet.setSpreadsheetTimeZone(previousTimeZone);
+      properties.setProperty(
+        CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON,
+        previousConfig
+      );
+    } catch (restoreError) {
+      rollbackError = restoreError;
+    }
+    if (rollbackError) {
+      throw new Error(
+        'Time-zone reconfiguration failed and rollback was incomplete: ' +
+        rollbackError.message
+      );
+    }
+    throw error;
+  }
+
+}
+
+function assertInstalledTimeZone_(properties, expectedTimeZone) {
+  const automationConfig = JSON.parse(properties.getProperty(
+    CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON
+  ));
+  const spreadsheet = SpreadsheetApp.openById(properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SPREADSHEET_ID
+  ));
+  if (
+    automationConfig.time_zone !== expectedTimeZone ||
+    spreadsheet.getSpreadsheetTimeZone() !== expectedTimeZone
+  ) {
+    throw new Error('Installed time-zone state did not converge.');
+  }
+}
+
+function loadTimeZoneReconfiguration_(properties, transactionId) {
+  const serialized = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.TIME_ZONE_RECONFIGURATION
+  );
+  if (!serialized) {
+    throw new Error('No time-zone reconfiguration is pending.');
+  }
+  const transaction = JSON.parse(serialized);
+  if (transaction.transactionId !== transactionId) {
+    throw new Error('Time-zone reconfiguration transaction does not match.');
+  }
+  return transaction;
+}
+
+function validateInstallerTimeZoneReconfiguration_(options, requireTransaction) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('Time-zone reconfiguration options must be an object.');
+  }
+  const timeZone = String(options.timeZone || '').trim();
+  if (!isValidIanaTimeZone_(timeZone)) {
+    throw new Error(
+      'Time-zone reconfiguration requires a valid IANA time zone.'
+    );
+  }
+  const validated = { timeZone: timeZone };
+  if (requireTransaction) {
+    validated.transactionId = validateInstallerTimeZoneTransaction_(
+      options
+    ).transactionId;
+  }
+  return validated;
+}
+
+function validateInstallerTimeZoneTransaction_(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('Time-zone transaction options must be an object.');
+  }
+  const transactionId = String(options.transactionId || '').trim();
+  if (!transactionId) {
+    throw new Error('Time-zone reconfiguration transaction is required.');
+  }
+  return { transactionId: transactionId };
+}
+
+/**
  * Verify the installed resources without processing intake PDFs.
  */
 function validateCatalogerInstallation() {
@@ -170,6 +412,11 @@ function validateInstallerOptions_(options) {
 
   const config = options.automationConfig;
   validateAutomationConfig_(config);
+  if (config.time_zone !== String(options.timeZone).trim()) {
+    throw new Error(
+      'Installer timeZone must match automationConfig.time_zone.'
+    );
+  }
   ['canonical_supplies', 'canonical_suppliers', 'address_rules'].forEach(
     function (key) {
       if (!Array.isArray(config[key])) {
@@ -493,9 +740,7 @@ function getInstallerLocalization_(locale) {
 }
 
 function validateInstallerSheetHeaders_(sheet, locale) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn())
-    .getDisplayValues()[0]
-    .map(normalizeHeader_);
+  const headers = getSheetLayout_(sheet).headers.map(normalizeHeader_);
   const seenHeaders = Object.create(null);
   headers.forEach(function (header) {
     if (!header) {

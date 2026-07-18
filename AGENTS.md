@@ -27,6 +27,16 @@
   belongs to the target script, preserve installation-specific manifest values,
   and distinguish project HEAD used by installable triggers from the versioned
   API executable deployment.
+- When an installer must temporarily modify a tracked manifest before a remote
+  push, isolate the mutation in a subshell: create and validate the backup
+  before mutation, restore it with an `EXIT` and signal trap, and clean up
+  allocation failures before the trap exists. Test successful pushes, failed
+  pushes, and handled interruptions, and never depend on a dirty worktree to
+  preserve installation-specific settings across resume.
+- A settings-only reconfiguration must not reuse an installation bootstrap
+  secret after that temporary secret has been deleted. Use a narrow explicit
+  runtime contract and preserve existing credentials, triggers, transport, and
+  processing state unless the user explicitly requests those changes.
 - Emit concise, structured progress logs for trigger receipt, lock outcome,
   scan scope, per-file result, notification result, and run completion. Do not
   log credentials, recipients, filenames, document text, or extracted values.
@@ -41,6 +51,9 @@
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
   fallback path.
+- Validate the complete script-scoped Pub/Sub topic and subscription identity
+  before every pull or acknowledgement. Treat an entirely absent pair as an
+  unconfigured no-op where appropriate, and reject partial or mismatched state.
 - Serialize every processing entry point with the shared processing lock and
   every trigger or transport mutation with the lifecycle lock.
 - Write untrusted spreadsheet text as literal rich text. Reject normalized
@@ -56,6 +69,9 @@
   command name.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
+- Persist the identity of a newly created remote resource before subsequent
+  validation so a transient inspection failure cannot duplicate it on resume.
+  Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.
 - Classify automatic paid-backend fallback only from provider-specific,

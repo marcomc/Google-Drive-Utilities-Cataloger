@@ -9,10 +9,12 @@ MARKDOWN_FILES := $(sort $(wildcard *.md docs/*.md))
 SHELL_FILES := $(sort $(wildcard scripts/*.sh scripts/*/*.sh tests/*.sh))
 
 .DEFAULT_GOAL := help
-.NOTPARALLEL: install install-resume install-debug install-resume-debug install-reset
+.NOTPARALLEL: install install-resume install-debug install-resume-debug
+.NOTPARALLEL: install-reconfigure-time-zone install-reset
 
 .PHONY: help install install-resume install-check install-debug
-.PHONY: install-resume-debug install-reset test lint lint-shell lint-md
+.PHONY: install-resume-debug install-reconfigure-time-zone install-reset
+.PHONY: test lint lint-shell lint-md
 .PHONY: lint-json check
 
 help: ## Show available commands
@@ -35,11 +37,15 @@ install-debug: ## Start the installer with diagnostic output
 install-resume-debug: ## Resume with diagnostic output
 	@$(INSTALLER) --resume --debug
 
+install-reconfigure-time-zone: ## Update the installed IANA time zone
+	@$(INSTALLER) --reconfigure-time-zone
+
 install-reset: ## Remove local installer state, preserving Google resources
 	@$(INSTALLER) --reset
 
 test: ## Run installer helper and Apps Script tests
 	@./tests/install_test.sh
+	@./tests/install_time_zone_push_test.sh
 	@./tests/deploy_apps_script_test.sh
 	@node --check scripts/list-locales.js
 	@node --check scripts/validate-config.js

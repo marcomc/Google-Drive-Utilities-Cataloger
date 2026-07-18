@@ -9,6 +9,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # shellcheck source=scripts/lib/install-common.sh
 source "${SCRIPT_DIR}/lib/install-common.sh"
+# shellcheck source=scripts/lib/apps-script-deployment.sh
+source "${SCRIPT_DIR}/lib/apps-script-deployment.sh"
 
 INSTALLER_VERSION=1
 DEFAULT_STATE_DIR="${PROJECT_ROOT}/.installer"
@@ -76,6 +78,8 @@ Install Google Drive Utilities Cataloger using a resumable CLI-first workflow.
 Options:
   --check             Check local tools and authentication without provisioning.
   --resume            Continue after the documented Google browser steps.
+  --reconfigure-time-zone
+                      Update an installed instance's IANA time zone only.
   --debug             Show additional non-secret diagnostic information.
   --no-open           Do not open browser handoff URLs automatically.
   --non-interactive   Read required values from GDUC_* environment variables.
@@ -85,6 +89,7 @@ Options:
 Make targets:
   make install
   make install-resume
+  make install-reconfigure-time-zone
   make install-check
   make install-debug
 EOF
@@ -152,6 +157,11 @@ directory_contains_only_installer_state() {
     fi
     case "${entry##*/}" in
       .gduc-installer-state | state.json)
+        if [[ -L "${entry}" || ! -f "${entry}" ]]; then
+          return 1
+        fi
+        ;;
+      appsscript.backup.*)
         if [[ -L "${entry}" || ! -f "${entry}" ]]; then
           return 1
         fi
@@ -348,6 +358,9 @@ parse_arguments() {
         ;;
       --resume)
         MODE="resume"
+        ;;
+      --reconfigure-time-zone)
+        MODE="reconfigure-time-zone"
         ;;
       --debug)
         DEBUG=1
@@ -861,7 +874,7 @@ collect_installation_inputs() {
   fi
   prompt_value time_zone \
     "Apps Script IANA time zone" \
-    "Etc/UTC" \
+    "Europe/Rome" \
     "${GDUC_TIME_ZONE:-}"
   evaluate_predicate is_valid_time_zone "${time_zone}"
   if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
@@ -955,9 +968,11 @@ collect_installation_inputs() {
 
 prepare_local_config() {
   local locale
+  local time_zone
   local temp_file
 
   locale="$(state_get '.locale')"
+  time_zone="$(state_get '.timeZone')"
   if [[ -f "${PROJECT_ROOT}/config.local.json" ]]; then
     if ! jq empty "${PROJECT_ROOT}/config.local.json"; then
       die "config.local.json is not valid JSON." \
@@ -970,7 +985,8 @@ prepare_local_config() {
 
   temp_file="$(mktemp "${PROJECT_ROOT}/config.local.json.tmp.XXXXXX")"
   TEMP_PATHS+=("${temp_file}")
-  jq --arg locale "${locale}" '.locale = $locale' \
+  jq --arg locale "${locale}" --arg time_zone "${time_zone}" \
+    '.locale = $locale | .time_zone = $time_zone' \
     "${PROJECT_ROOT}/config.example.json" >"${temp_file}"
   chmod 600 "${temp_file}"
   mv "${temp_file}" "${PROJECT_ROOT}/config.local.json"
@@ -980,6 +996,7 @@ prepare_local_config() {
 
 validate_local_config_for_installation() {
   local configured_locale
+  local configured_time_zone
   local locale
 
   if [[ ! -f "${PROJECT_ROOT}/config.local.json" ]]; then
@@ -988,6 +1005,7 @@ validate_local_config_for_installation() {
   fi
   if ! jq -e '
     (.locale | type == "string" and length > 0) and
+    (.time_zone | type == "string" and length > 0) and
     (.canonical_supplies | type == "array" and length > 0) and
     (.canonical_suppliers | type == "array" and length > 0) and
     (.supply_aliases | type == "object") and
@@ -1010,6 +1028,13 @@ validate_local_config_for_installation() {
   configured_locale="$(jq -r '.locale' "${PROJECT_ROOT}/config.local.json")"
   if [[ "${configured_locale}" != "${locale}" ]]; then
     die "config.local.json locale does not match the installer locale ${locale}." \
+      "docs/CONFIGURATION.md#local-configuration-file"
+  fi
+  configured_time_zone="$(jq -r '.time_zone' \
+    "${PROJECT_ROOT}/config.local.json")"
+  evaluate_predicate is_valid_time_zone "${configured_time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "config.local.json contains an invalid IANA time zone." \
       "docs/CONFIGURATION.md#local-configuration-file"
   fi
   if jq -e '
@@ -1247,29 +1272,121 @@ create_apps_script_project() {
   success "Created standalone Apps Script project"
 }
 
-push_apps_script_source() {
+push_apps_script_source() (
   local auth_dir="$1"
+  local requested_time_zone="${2:-}"
+  local source_mode="${3:-local}"
+  local manifest_backup
+  local manifest_tmp
+  local push_status
   local staging_dir
   local time_zone
   local source_file
+  local signal_status=130
+  local -a stale_manifest_backups=()
 
-  staging_dir="$(mktemp -d)"
-  TEMP_PATHS+=("${staging_dir}")
-  time_zone="$(state_get '.timeZone')"
+  # Invoked indirectly by the EXIT trap in this subshell.
+  # shellcheck disable=SC2329
+  restore_tracked_manifest() {
+    local command_status=$?
+
+    trap - EXIT HUP INT TERM
+    rm -f "${manifest_tmp:-}"
+    rm -rf "${staging_dir:-}"
+    if [[ -n "${manifest_backup:-}" && -f "${manifest_backup}" ]]; then
+      if cp -p "${manifest_backup}" \
+        "${PROJECT_ROOT}/appsscript.json"; then
+        rm -f "${manifest_backup}"
+      else
+        command_status=1
+        printf 'Could not restore appsscript.json; backup retained at %s.\n' \
+          "${manifest_backup}" >&2
+      fi
+    fi
+    exit "${command_status}"
+  }
+
+  shopt -s nullglob
+  stale_manifest_backups=("${STATE_DIR}"/appsscript.backup.*)
+  shopt -u nullglob
+  if [[ "${#stale_manifest_backups[@]}" -gt 1 ]]; then
+    die "Multiple interrupted manifest backups require manual review." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  if [[ "${#stale_manifest_backups[@]}" -eq 1 ]]; then
+    if ! cp -p "${stale_manifest_backups[0]}" \
+      "${PROJECT_ROOT}/appsscript.json"; then
+      error "Could not recover appsscript.json; backup was retained."
+      return 1
+    fi
+    rm -f "${stale_manifest_backups[0]}" || return 1
+    info "Recovered appsscript.json from an interrupted push"
+  fi
+
+  time_zone="${requested_time_zone:-$(state_get '.timeZone')}"
+  evaluate_predicate is_valid_time_zone "${time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "Installer state contains an invalid IANA time zone." \
+      "${INSTALL_DOC}#project-settings"
+  fi
+  if ! staging_dir="$(mktemp -d)"; then
+    return 1
+  fi
+  if ! manifest_backup="$(mktemp "${STATE_DIR}/appsscript.backup.XXXXXX")"; then
+    rm -rf "${staging_dir}"
+    return 1
+  fi
+  if ! manifest_tmp="$(mktemp "${PROJECT_ROOT}/appsscript.json.tmp.XXXXXX")"; then
+    rm -rf "${staging_dir}"
+    rm -f "${manifest_backup}"
+    return 1
+  fi
+  if ! cp -p "${PROJECT_ROOT}/appsscript.json" "${manifest_backup}"; then
+    rm -rf "${staging_dir}"
+    rm -f "${manifest_backup}" "${manifest_tmp}"
+    return 1
+  fi
+  trap restore_tracked_manifest EXIT
+  trap 'exit "${signal_status}"' HUP INT TERM
   cp "${PROJECT_ROOT}/.clasp.json" "${staging_dir}/.clasp.json"
+  if [[ "${source_mode}" == "remote" ]]; then
+    "${CLASP[@]}" -A "${auth_dir}/.clasprc.json" \
+      -P "${staging_dir}" pull || {
+      push_status=$?
+      error "Could not read installed Apps Script source."
+      return "${push_status}"
+    }
+  elif [[ "${source_mode}" != "local" ]]; then
+    error "Unknown Apps Script source mode: ${source_mode}"
+    return 1
+  fi
   jq --arg timeZone "${time_zone}" '.timeZone = $timeZone' \
-    "${PROJECT_ROOT}/appsscript.json" >"${staging_dir}/appsscript.json"
-  for source_file in "${PROJECT_ROOT}"/*.gs; do
-    cp "${source_file}" "${staging_dir}/"
-  done
-  mkdir -p "${staging_dir}/locales"
-  cp "${PROJECT_ROOT}"/locales/*.gs "${staging_dir}/locales/"
+    "${PROJECT_ROOT}/appsscript.json" >"${manifest_tmp}"
+  mv "${manifest_tmp}" "${PROJECT_ROOT}/appsscript.json"
+  if [[ "${source_mode}" == "remote" ]]; then
+    jq --arg timeZone "${time_zone}" '.timeZone = $timeZone' \
+      "${staging_dir}/appsscript.json" >"${staging_dir}/appsscript.tmp"
+    mv "${staging_dir}/appsscript.tmp" \
+      "${staging_dir}/appsscript.json"
+  else
+    cp "${PROJECT_ROOT}/appsscript.json" "${staging_dir}/appsscript.json"
+    for source_file in "${PROJECT_ROOT}"/*.gs; do
+      cp "${source_file}" "${staging_dir}/"
+    done
+    mkdir -p "${staging_dir}/locales"
+    cp "${PROJECT_ROOT}"/locales/*.gs "${staging_dir}/locales/"
+  fi
 
   debug "Uploading Apps Script source with time zone ${time_zone}"
   "${CLASP[@]}" -A "${auth_dir}/.clasprc.json" \
-    -P "${staging_dir}" push --force
+    -P "${staging_dir}" push --force || {
+    push_status=$?
+    error "Apps Script source upload failed."
+    return "${push_status}"
+  }
+  state_set "sourceTimeZone" "${time_zone}"
   success "Apps Script source uploaded"
-}
+)
 
 open_browser_handoff() {
   local project_id
@@ -1427,41 +1544,107 @@ authorize_installer_execution() {
 }
 
 ensure_api_executable_deployment() {
+  local creation_description
+  local deployment_count
   local deployment_id
+  local deployments_json
+  local deployment_json
   local deployment_output
-  local existing_deployments
+  local script_id
 
+  script_id="$(state_get '.scriptId')"
   deployment_id="$(state_get '.deploymentId')"
   if [[ -n "${deployment_id}" ]]; then
-    if ! existing_deployments="$("${CLASP[@]}" \
-      -A "${AUTH_DIR}/.clasprc.json" --json \
-      deployments 2>/dev/null)"; then
+    deployment_json=""
+    # Helpers explicitly check failures; this branch adds installer guidance.
+    # shellcheck disable=SC2310
+    if ! read_apps_script_deployment \
+      "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" \
+      "${deployment_id}" \
+      deployment_json; then
       die "Could not verify the stored Apps Script API deployment." \
         "${INSTALL_DOC}#api-executable"
     fi
-    if printf '%s' "${existing_deployments}" |
-      jq -e --arg id "${deployment_id}" \
-        'any(.[]; .deploymentId == $id)' >/dev/null; then
-      success "Using installer API deployment"
-      return 0
+    # shellcheck disable=SC2310
+    if ! validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"; then
+      die "The stored deployment is not an owner-only API executable; explicit operator repair is required." \
+        "${INSTALL_DOC}#api-executable"
     fi
-    warning "The stored Apps Script deployment no longer exists; recreating it."
-    state_set "deploymentId" ""
+    success "Using installer API deployment"
+    return 0
   fi
 
-  debug "Creating owner-only Apps Script API deployment"
-  deployment_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
-    --json deploy \
-    --description "Owner-only installer bootstrap")"
-  deployment_id="$(printf '%s' "${deployment_output}" |
-    jq -r '.deploymentId // empty' 2>/dev/null || true)"
+  creation_description="$(state_get '.deploymentCreationDescription')"
+  if [[ -z "${creation_description}" ]]; then
+    creation_description="Owner-only installer bootstrap $(date -u +%Y%m%dT%H%M%SZ)-$$"
+    state_set "deploymentCreationDescription" "${creation_description}"
+  fi
+  deployments_json="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
+    --json deployments)"
+  deployment_count="$(jq -er --arg description "${creation_description}" '
+    [.[] | select(.description == $description)] | length
+  ' <<<"${deployments_json}")"
+  if [[ "${deployment_count}" -gt 1 ]]; then
+    die "Multiple Apps Script deployments match the pending creation marker; explicit operator repair is required." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  if [[ "${deployment_count}" -eq 1 ]]; then
+    deployment_id="$(jq -er --arg description "${creation_description}" '
+      .[] | select(.description == $description) | .deploymentId
+    ' <<<"${deployments_json}")"
+    debug "Recovered pending owner-only Apps Script API deployment"
+  else
+    debug "Creating owner-only Apps Script API deployment"
+    deployment_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
+      --json deploy \
+      --description "${creation_description}")"
+    deployment_id="$(printf '%s' "${deployment_output}" |
+      jq -r '.deploymentId // empty' 2>/dev/null || true)"
+  fi
   if [[ -z "${deployment_id}" ]]; then
-    printf '%s\n' "${deployment_output}" >&2
     die "Could not identify the Apps Script API deployment." \
       "${INSTALL_DOC}#api-executable"
   fi
+  # Persist the resource identity before remote validation. If inspection is
+  # temporarily unavailable, a resume verifies this deployment instead of
+  # creating a duplicate.
   state_set "deploymentId" "${deployment_id}"
+  deployment_json=""
+  # Helpers explicitly check failures; this branch adds installer guidance.
+  # shellcheck disable=SC2310
+  if ! read_apps_script_deployment \
+    "${AUTH_DIR}/.clasprc.json" \
+    "${script_id}" \
+    "${deployment_id}" \
+    deployment_json ||
+    ! validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"; then
+    die "The new deployment is not an owner-only API executable; explicit operator repair is required." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  state_set "deploymentCreationDescription" ""
   success "Created owner-only Apps Script API deployment"
+}
+
+prepare_apps_script_source_and_deployment() {
+  local deployment_id
+
+  deployment_id="$(state_get '.deploymentId')"
+  if [[ -n "${deployment_id}" ]]; then
+    # A stored deployment proves the initial source push and deployment
+    # creation completed. Resume verifies it without splitting project HEAD
+    # from the pinned API executable.
+    ensure_api_executable_deployment
+    return 0
+  fi
+  push_apps_script_source "${AUTH_DIR}"
+  ensure_api_executable_deployment
 }
 
 read_gemini_key() {
@@ -1708,13 +1891,20 @@ discard_rejected_bootstrap_if_needed() {
 build_bootstrap_payload() {
   local gemini_api_key="$1"
   local result_variable="$2"
+  local automation_config
   local serialized_payload
+  local time_zone
+
+  time_zone="$(state_get '.timeZone')"
+  automation_config="$(jq --arg time_zone "${time_zone}" \
+    '.time_zone = $time_zone' \
+    "${PROJECT_ROOT}/config.local.json")"
 
   serialized_payload="$(
     printf '%s' "${gemini_api_key}" |
       jq -Rsc \
         --slurpfile installerState "${STATE_FILE}" \
-        --slurpfile automationConfig "${PROJECT_ROOT}/config.local.json" \
+        --argjson automationConfig "${automation_config}" \
         --rawfile agentsPolicy "${PROJECT_ROOT}/AGENTS.example.md" \
         '{
           projectId: $installerState[0].projectId,
@@ -1727,13 +1917,13 @@ build_bootstrap_payload() {
           geminiModel: $installerState[0].geminiModel,
           autoVertexFallback: $installerState[0].geminiAutoVertexFallback,
           vertexLocation: $installerState[0].vertexAiLocation,
-          automationConfig: $automationConfig[0],
+          automationConfig: $automationConfig,
           agentsPolicy: $agentsPolicy,
           timeZone: $installerState[0].timeZone
         }'
   )"
   printf -v "${result_variable}" '%s' "${serialized_payload}"
-  unset serialized_payload
+  unset automation_config serialized_payload
 }
 
 build_bootstrap_parameters() {
@@ -1868,7 +2058,37 @@ verify_installed_resources() {
 
 apply_resume_overrides() {
   local gemini_model="${GDUC_GEMINI_MODEL:-}"
+  local configured_time_zone
+  local deployment_id
+  local phase
+  local source_time_zone
+  local time_zone
   local vertex_ai_location="${GDUC_VERTEX_AI_LOCATION:-}"
+
+  configured_time_zone=""
+  if [[ -f "${PROJECT_ROOT}/config.local.json" ]]; then
+    configured_time_zone="$(jq -r '.time_zone // empty' \
+      "${PROJECT_ROOT}/config.local.json")"
+  fi
+  time_zone="${GDUC_TIME_ZONE:-${configured_time_zone:-Europe/Rome}}"
+  evaluate_predicate is_valid_time_zone "${time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "Invalid IANA time zone: ${time_zone}" \
+      "${INSTALL_DOC}#project-settings"
+  fi
+  deployment_id="$(state_get '.deploymentId')"
+  source_time_zone="$(state_get '.sourceTimeZone')"
+  if [[ -n "${deployment_id}" && -z "${source_time_zone}" ]]; then
+    die "The persisted API deployment predates source-timezone tracking; resume with the original configuration or perform explicit recovery." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  if [[ -n "${deployment_id}" &&
+    "${time_zone}" != "${source_time_zone}" ]]; then
+    die "The initial API deployment already uses ${source_time_zone}; finish installation before running --reconfigure-time-zone." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  state_set "timeZone" "${time_zone}"
+  success "Using installer time zone ${time_zone}"
 
   if [[ -n "${gemini_model}" ]]; then
     evaluate_predicate is_valid_gemini_model "${gemini_model}"
@@ -1904,12 +2124,11 @@ complete_installation() {
       "" \
       ""
   fi
-  apply_resume_overrides
   validate_local_config_for_installation
+  apply_resume_overrides
   validate_oauth_client "${client_file}"
   authorize_installer_execution "${client_file}"
-  push_apps_script_source "${AUTH_DIR}"
-  ensure_api_executable_deployment
+  prepare_apps_script_source_and_deployment
   run_apps_script_bootstrap
   verify_installed_resources
   bootstrap_secret_version="$(state_get '.bootstrapSecretVersion')"
@@ -1967,6 +2186,209 @@ resume_installation() {
   esac
 }
 
+reconfigure_time_zone() {
+  local client_file="${GDUC_OAUTH_CLIENT_JSON:-}"
+  local configured_time_zone
+  local finish_output
+  local finish_status
+  local begin_output
+  local pending_time_zone
+  local requested_time_zone
+  local parameters
+  local output
+  local phase
+  local previous_time_zone
+  local rollback_output
+  local rollback_push_status
+  local rollback_run_status
+  local run_status
+  local transaction_id
+
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    die "No completed installer state exists." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  validate_installer_state
+  phase="$(state_get '.phase')"
+  if [[ "${phase}" != "complete" ]]; then
+    die "Complete the installation before reconfiguring its time zone." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  validate_local_config_for_installation
+  configured_time_zone="$(jq -r '.time_zone // empty' \
+    "${PROJECT_ROOT}/config.local.json")"
+  pending_time_zone="$(state_get '.pendingTimeZone')"
+  requested_time_zone="${GDUC_TIME_ZONE:-${pending_time_zone:-${configured_time_zone:-Europe/Rome}}}"
+  evaluate_predicate is_valid_time_zone "${requested_time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "Invalid IANA time zone: ${requested_time_zone}" \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  state_set "pendingTimeZone" "${requested_time_zone}"
+
+  if [[ -z "${client_file}" ]]; then
+    prompt_value client_file \
+      "Path to the Desktop OAuth client JSON downloaded from Google Cloud" \
+      "" \
+      ""
+  fi
+  validate_oauth_client "${client_file}"
+  authorize_installer_execution "${client_file}"
+  ensure_api_executable_deployment
+
+  parameters="$(jq -cn --arg timeZone "${requested_time_zone}" \
+    '[{timeZone: $timeZone}]')"
+  begin_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+    run beginCatalogerTimeZoneReconfiguration \
+    --params "${parameters}" 2>&1)" || {
+    printf '%s\n' "${begin_output}" >&2
+    die "Could not start the time-zone reconfiguration transaction." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  }
+  if ! jq -e '
+    .response.transactionId | type == "string" and length > 0
+  ' <<<"${begin_output}" >/dev/null 2>&1; then
+    printf '%s\n' "${begin_output}" >&2
+    die "Apps Script returned an invalid time-zone transaction." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  transaction_id="$(jq -r '.response.transactionId' <<<"${begin_output}")"
+  previous_time_zone="$(jq -r '.response.previousTimeZone' <<<"${begin_output}")"
+  evaluate_predicate is_valid_time_zone "${previous_time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "Apps Script returned an invalid current IANA time zone." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  state_set "timeZoneTransactionId" "${transaction_id}"
+  state_set "previousTimeZone" "${previous_time_zone}"
+
+  set +e
+  push_apps_script_source \
+    "${AUTH_DIR}" "${requested_time_zone}" "remote"
+  run_status=$?
+  set -e
+  if [[ "${run_status}" -ne 0 ]]; then
+    set +e
+    push_apps_script_source \
+      "${AUTH_DIR}" "${previous_time_zone}" "remote"
+    rollback_push_status=$?
+    set -e
+    if [[ "${rollback_push_status}" -ne 0 ]]; then
+      die "Apps Script push failed ambiguously and manifest rollback could not be proven; maintenance mode remains active." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    fi
+    parameters="$(jq -cn \
+      --arg transactionId "${transaction_id}" \
+      --arg expectedTimeZone "${previous_time_zone}" \
+      '[{transactionId: $transactionId, expectedTimeZone: $expectedTimeZone}]')"
+    finish_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+      run finishCatalogerTimeZoneReconfiguration \
+      --params "${parameters}" 2>&1)" ||
+      die "Manifest rollback completed but maintenance mode remains active." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    if ! jq -e --arg timeZone "${previous_time_zone}" '
+      .response.completed == true and .response.timeZone == $timeZone
+    ' <<<"${finish_output}" >/dev/null 2>&1; then
+      printf '%s\n' "${finish_output}" >&2
+      die "Manifest rollback completed but maintenance cleanup was not verified." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    fi
+    return "${run_status}"
+  fi
+
+  parameters="$(jq -cn \
+    --arg timeZone "${requested_time_zone}" \
+    --arg transactionId "${transaction_id}" \
+    '[{timeZone: $timeZone, transactionId: $transactionId}]')"
+  set +e
+  output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+    run reconfigureCatalogerTimeZone --params "${parameters}" 2>&1)"
+  run_status=$?
+  set -e
+  if [[ "${run_status}" -ne 0 ]] ||
+    ! jq -e --arg timeZone "${requested_time_zone}" \
+      --arg transactionId "${transaction_id}" '
+      .response.configured == true and
+      .response.timeZone == $timeZone and
+      .response.transactionId == $transactionId and
+      .response.automaticProcessingPreserved == true
+    ' <<<"${output}" >/dev/null 2>&1; then
+    printf '%s\n' "${output}" >&2
+    parameters="$(jq -cn --arg transactionId "${transaction_id}" \
+      '[{transactionId: $transactionId}]')"
+    set +e
+    rollback_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+      run rollbackCatalogerTimeZoneReconfiguration \
+      --params "${parameters}" 2>&1)"
+    rollback_run_status=$?
+    if [[ "${rollback_run_status}" -eq 0 ]] &&
+      ! jq -e --arg timeZone "${previous_time_zone}" \
+        --arg transactionId "${transaction_id}" '
+        .response.configured == true and
+        .response.timeZone == $timeZone and
+        .response.transactionId == $transactionId
+      ' <<<"${rollback_output}" >/dev/null 2>&1; then
+      rollback_run_status=1
+    fi
+    push_apps_script_source \
+      "${AUTH_DIR}" "${previous_time_zone}" "remote"
+    rollback_push_status=$?
+    set -e
+    if [[ "${rollback_run_status}" -ne 0 ||
+      "${rollback_push_status}" -ne 0 ]]; then
+      printf '%s\n' "${rollback_output}" >&2
+      die "Time-zone reconfiguration failed and remote rollback was incomplete; pending state was retained." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    fi
+    parameters="$(jq -cn \
+      --arg transactionId "${transaction_id}" \
+      --arg expectedTimeZone "${previous_time_zone}" \
+      '[{transactionId: $transactionId, expectedTimeZone: $expectedTimeZone}]')"
+    finish_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+      run finishCatalogerTimeZoneReconfiguration \
+      --params "${parameters}" 2>&1)" || {
+      printf '%s\n' "${finish_output}" >&2
+      die "Time-zone rollback converged but maintenance mode could not be cleared." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    }
+    if ! jq -e --arg timeZone "${previous_time_zone}" '
+      .response.completed == true and .response.timeZone == $timeZone
+    ' <<<"${finish_output}" >/dev/null 2>&1; then
+      printf '%s\n' "${finish_output}" >&2
+      die "Time-zone rollback converged but maintenance cleanup was not verified." \
+        "${INSTALL_DOC}#reconfigure-time-zone"
+    fi
+    state_set "timeZone" "${previous_time_zone}"
+    die "Apps Script time-zone reconfiguration failed; remote state was restored and pending state was retained for retry." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+
+  parameters="$(jq -cn \
+    --arg transactionId "${transaction_id}" \
+    --arg expectedTimeZone "${requested_time_zone}" \
+    '[{transactionId: $transactionId, expectedTimeZone: $expectedTimeZone}]')"
+  set +e
+  finish_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" --json \
+    run finishCatalogerTimeZoneReconfiguration \
+    --params "${parameters}" 2>&1)"
+  finish_status=$?
+  set -e
+  if [[ "${finish_status}" -ne 0 ]] ||
+    ! jq -e --arg timeZone "${requested_time_zone}" '
+      .response.completed == true and .response.timeZone == $timeZone
+    ' <<<"${finish_output}" >/dev/null 2>&1; then
+    printf '%s\n' "${finish_output}" >&2
+    die "Time-zone values converged but maintenance mode remains active." \
+      "${INSTALL_DOC}#reconfigure-time-zone"
+  fi
+  state_set "timeZone" "${requested_time_zone}"
+  state_set "pendingTimeZone" ""
+  state_set "timeZoneTransactionId" ""
+  state_set "previousTimeZone" ""
+  rm -rf "${AUTH_DIR}" "${MANAGEMENT_AUTH_DIR}"
+  success "Time zone reconfigured: ${requested_time_zone}"
+}
+
 reset_installer_state() {
   if [[ ! -d "${STATE_DIR}" && ! -f "${PROJECT_ROOT}/.clasp.json" ]]; then
     success "No private installer state or Apps Script mapping exists."
@@ -2008,7 +2430,7 @@ main() {
       reset_installer_state
       exit 0
       ;;
-    install | resume)
+    install | resume | reconfigure-time-zone)
       ;;
     *)
       die "Unsupported installer mode: ${MODE}" "${INSTALL_DOC}#quick-start"
@@ -2017,6 +2439,10 @@ main() {
 
   acquire_installer_lock
   run_preflight
+  if [[ "${MODE}" == "reconfigure-time-zone" ]]; then
+    reconfigure_time_zone
+    exit 0
+  fi
   if [[ "${MODE}" == "resume" ]]; then
     resume_installation
     exit 0

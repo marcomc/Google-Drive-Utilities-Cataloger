@@ -168,6 +168,38 @@ function testPopulatedSpreadsheetSettingsAreNotChangedSilently() {
   );
 }
 
+function testSpreadsheetValidationUsesDetectedHeaderRow() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: [
+      'Data di emissione',
+      'Fornitore',
+      'Numero fattura',
+      'File sorgente'
+    ]
+  });
+  context.getInstallerLocalization_ = () => ({
+    headerAliases: {
+      issueDate: ['data di emissione'],
+      supplier: ['fornitore'],
+      identifier: ['numero fattura'],
+      sourceFile: ['file sorgente']
+    }
+  });
+  context.normalizeHeader_ = (value) => String(value).trim().toLowerCase();
+  const sheet = {
+    getName: () => 'Acqua',
+    getRange: () => {
+      throw new Error('validator must use the detected header row');
+    }
+  };
+
+  context.validateInstallerSheetHeaders_(sheet, 'it');
+}
+
 function response(statusCode, body) {
   return {
     getContentText: () => JSON.stringify(body),
@@ -299,13 +331,235 @@ function testCredentialFailureIsRedacted() {
   );
 }
 
+function testTimeZoneReconfigurationPreservesCredentialsAndTriggers() {
+  const context = loadInstaller(() => {
+    throw new Error('Secret Manager and Gemini must not be called');
+  });
+  const stored = {
+    SPREADSHEET_ID: 'spreadsheet-id',
+    AUTOMATION_CONFIG_JSON: JSON.stringify({
+      locale: 'en'
+    }),
+    TIME_ZONE_RECONFIGURATION: JSON.stringify({
+      transactionId: 'transaction-1',
+      previousTimeZone: 'Europe/Rome',
+      targetTimeZone: 'Pacific/Auckland'
+    }),
+    GEMINI_BACKEND: 'gemini_api',
+    GEMINI_API_KEY: 'persisted-key'
+  };
+  const triggerHandlers = [
+    'runDailyUtilitiesCataloging',
+    'processDriveEventQueue',
+    'renewDriveEventSubscription'
+  ];
+  let spreadsheetTimeZone = 'Europe/Rome';
+  context.CONFIG = {
+    PROPERTY_KEYS: {
+      SPREADSHEET_ID: 'SPREADSHEET_ID',
+      AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
+      TIME_ZONE_RECONFIGURATION: 'TIME_ZONE_RECONFIGURATION'
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => {
+        stored[key] = value;
+      }
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: (spreadsheetId) => {
+      assert.equal(spreadsheetId, 'spreadsheet-id');
+      return {
+        getSpreadsheetTimeZone: () => spreadsheetTimeZone,
+        setSpreadsheetTimeZone: (timeZone) => {
+          spreadsheetTimeZone = timeZone;
+        }
+      };
+    }
+  };
+  context.ScriptApp.getProjectTriggers = () => triggerHandlers.map(
+    (handler) => ({ getHandlerFunction: () => handler })
+  );
+  context.isValidIanaTimeZone_ = (timeZone) =>
+    timeZone === 'Pacific/Auckland';
+  context.validateAutomationConfig_ = (config) => {
+    assert.equal(config.time_zone, 'Pacific/Auckland');
+  };
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
+
+  const result = context.reconfigureCatalogerTimeZone({
+    timeZone: 'Pacific/Auckland',
+    transactionId: 'transaction-1'
+  });
+
+  assert.equal(result.configured, true);
+  assert.equal(spreadsheetTimeZone, 'Pacific/Auckland');
+  assert.equal(
+    JSON.parse(stored.AUTOMATION_CONFIG_JSON).time_zone,
+    'Pacific/Auckland'
+  );
+  assert.equal(stored.GEMINI_BACKEND, 'gemini_api');
+  assert.equal(stored.GEMINI_API_KEY, 'persisted-key');
+  assert.deepEqual(
+    context.ScriptApp.getProjectTriggers().map(
+      (trigger) => trigger.getHandlerFunction()
+    ),
+    triggerHandlers
+  );
+}
+
+function testTimeZoneReconfigurationRollsBackRemoteState() {
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  const originalConfig = JSON.stringify({
+    locale: 'en',
+    time_zone: 'Europe/Rome'
+  });
+  const stored = {
+    SPREADSHEET_ID: 'spreadsheet-id',
+    AUTOMATION_CONFIG_JSON: originalConfig,
+    TIME_ZONE_RECONFIGURATION: JSON.stringify({
+      transactionId: 'transaction-1',
+      previousTimeZone: 'Europe/Rome',
+      targetTimeZone: 'Pacific/Auckland'
+    })
+  };
+  let spreadsheetTimeZone = 'Europe/Rome';
+  let validationCalls = 0;
+  context.CONFIG = {
+    PROPERTY_KEYS: {
+      SPREADSHEET_ID: 'SPREADSHEET_ID',
+      AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
+      TIME_ZONE_RECONFIGURATION: 'TIME_ZONE_RECONFIGURATION'
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => {
+        stored[key] = value;
+      }
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({
+      getSpreadsheetTimeZone: () => spreadsheetTimeZone,
+      setSpreadsheetTimeZone: (timeZone) => {
+        spreadsheetTimeZone = timeZone;
+      }
+    })
+  };
+  context.isValidIanaTimeZone_ = () => true;
+  context.validateAutomationConfig_ = () => {};
+  context.assertCatalogConfiguration_ = () => {
+    validationCalls += 1;
+    throw new Error('post-update validation failed');
+  };
+  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
+
+  assert.throws(
+    () => context.reconfigureCatalogerTimeZone({
+      timeZone: 'Pacific/Auckland',
+      transactionId: 'transaction-1'
+    }),
+    /post-update validation failed/
+  );
+  assert.equal(validationCalls, 1);
+  assert.equal(spreadsheetTimeZone, 'Europe/Rome');
+  assert.equal(stored.AUTOMATION_CONFIG_JSON, originalConfig);
+}
+
+function testTimeZoneTransactionLifecycle() {
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  const stored = {
+    SPREADSHEET_ID: 'spreadsheet-id',
+    AUTOMATION_CONFIG_JSON: JSON.stringify({
+      locale: 'en',
+      time_zone: 'Europe/Rome'
+    })
+  };
+  let spreadsheetTimeZone = 'Europe/Rome';
+  context.CONFIG = {
+    PROPERTY_KEYS: {
+      SPREADSHEET_ID: 'SPREADSHEET_ID',
+      AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
+      TIME_ZONE_RECONFIGURATION: 'TIME_ZONE_RECONFIGURATION'
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => { stored[key] = value; },
+      deleteProperty: (key) => { delete stored[key]; }
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({
+      getSpreadsheetTimeZone: () => spreadsheetTimeZone,
+      setSpreadsheetTimeZone: (timeZone) => {
+        spreadsheetTimeZone = timeZone;
+      }
+    })
+  };
+  context.Utilities = { getUuid: () => 'transaction-1' };
+  context.isValidIanaTimeZone_ = () => true;
+  context.validateAutomationConfig_ = () => {};
+  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
+
+  const first = context.beginCatalogerTimeZoneReconfiguration({
+    timeZone: 'Pacific/Auckland'
+  });
+  const resumed = context.beginCatalogerTimeZoneReconfiguration({
+    timeZone: 'Pacific/Auckland'
+  });
+  assert.equal(first.transactionId, 'transaction-1');
+  assert.equal(first.previousTimeZone, 'Europe/Rome');
+  assert.equal(
+    JSON.parse(stored.AUTOMATION_CONFIG_JSON).time_zone,
+    'Europe/Rome'
+  );
+  assert.equal(resumed.transactionId, first.transactionId);
+  assert.throws(
+    () => context.beginCatalogerTimeZoneReconfiguration({
+      timeZone: 'Asia/Tokyo'
+    }),
+    /Another time-zone reconfiguration is pending/
+  );
+
+  const finished = context.finishCatalogerTimeZoneReconfiguration({
+    transactionId: 'transaction-1',
+    expectedTimeZone: 'Europe/Rome'
+  });
+  assert.equal(finished.completed, true);
+  assert.equal(stored.TIME_ZONE_RECONFIGURATION, undefined);
+
+  spreadsheetTimeZone = 'Pacific/Auckland';
+  assert.throws(
+    () => context.beginCatalogerTimeZoneReconfiguration({
+      timeZone: 'Asia/Tokyo'
+    }),
+    /time zones diverge/
+  );
+}
+
 testSecretManagerBootstrapHandoff();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
+testSpreadsheetValidationUsesDetectedHeaderRow();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
 testCredentialFailureIsRedacted();
+testTimeZoneReconfigurationPreservesCredentialsAndTriggers();
+testTimeZoneReconfigurationRollsBackRemoteState();
+testTimeZoneTransactionLifecycle();
 
 console.log('Apps Script installer tests passed.');

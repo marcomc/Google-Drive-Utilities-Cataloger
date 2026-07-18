@@ -7,6 +7,9 @@ This guide covers one deployed cataloger instance. Use the separate
 
 - [Architecture](#architecture)
 - [Installation and first validation](#installation-and-first-validation)
+- [Reconfigure time zone](#reconfigure-time-zone)
+- [Event transport identity](#event-transport-identity)
+- [Release validation evidence](#release-validation-evidence)
 - [Configuration reference](CONFIGURATION.md)
 - [Cadence and cost](#cadence-and-cost)
 - [Use cases](#use-cases)
@@ -64,12 +67,67 @@ Use the [controlled validation](INSTALLATION.md#controlled-validation) before
 pausing any prior automation. Do not run `runDailyUtilitiesCataloging` or
 `processDriveEventQueue` as a harmless test: either may process intake PDFs.
 
-The event subscription requests Google's maximum available TTL. Keep the
-six-hour `renewDriveEventSubscription` trigger enabled; it checks live state
-and renews within 12 hours of expiry. If the stored subscription is confirmed
-missing, renewal creates a replacement; ownership or topology conflicts still
-stop for manual review. Events may cover descendants, but the cataloger still
-processes only direct-root PDFs.
+The event subscription requests Google's maximum available TTL by omitting the
+TTL during creation and using the documented zero-TTL patch during renewal.
+Keep the six-hour `renewDriveEventSubscription` trigger enabled; it checks live
+state and renews within 12 hours of expiry. If the stored subscription is
+confirmed missing or Google explicitly reports `SUBSCRIPTION_ACCESS_DENIED`,
+renewal creates a replacement. Generic permission failures and ownership or
+topology conflicts still stop for manual review. Events may cover descendants,
+but the cataloger still processes only direct-root PDFs.
+
+## Reconfigure time zone
+
+Set `time_zone` in `config.local.json`, then run:
+
+```bash
+GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
+  make install-reconfigure-time-zone
+```
+
+This narrow operation updates the Apps Script and spreadsheet time zone plus
+the persisted installer and runtime configuration. It preserves Gemini
+credentials, triggers, event transport, and enabled processing state. Use
+`GDUC_TIME_ZONE` only for a temporary command-level override. Full behavior and
+rollback details are in the
+[installation guide](INSTALLATION.md#reconfigure-time-zone).
+Installations using `GDUC_STATE_DIR` must export the same path here.
+
+## Event transport identity
+
+The supported topic and pull subscription names include the current Apps
+Script ID. Provisioning accepts either an entirely unconfigured pair or the
+exact script-scoped pair. Provisioning, repair, and renewal reject partial,
+generic, foreign, or mistyped names instead of overwriting or treating them as
+a compatibility transport. Verify the only active cataloger resources are the
+script-scoped pair:
+
+```bash
+SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
+PROJECT_ID="$(jq -er '.projectId' .clasp.json)"
+gcloud pubsub topics describe \
+  "drive-utilities-events-${SCRIPT_ID}" --project="${PROJECT_ID}"
+gcloud pubsub subscriptions describe \
+  "drive-utilities-events-pull-${SCRIPT_ID}" --project="${PROJECT_ID}"
+```
+
+Release `0.1.0` does not support or automatically migrate legacy, generic, or
+mismatched names. An entirely absent pair can be provisioned with
+`provisionDriveEventTransport`; a partial or mismatched pair fails closed. No
+in-place migration procedure is provided in this release. Use a fresh
+installation, or design and review a one-off migration before changing remote
+resources. Do not change Script Properties alone.
+
+## Release validation evidence
+
+The `0.1.0` controlled validation on 2026-07-18 observed the complete event
+path on the script-scoped transport: Workspace event receipt, one eligible PDF,
+Gemini `STOP`, Sheet import, canonical Drive move, and `IMPORTED` completion.
+The exact test row and PDF were then deleted and verified absent. The obsolete
+generic Pub/Sub topic and pull subscription were removed, the script-scoped
+pair remained `ACTIVE`, and final installation validation completed. No test
+document identifiers, installation IDs, or extracted private values are kept
+in this repository.
 
 ## Cadence and cost
 
@@ -107,7 +165,12 @@ network, `408`, generic `429`, and selected `5xx` failures receive one bounded
 retry. A verified Gemini Developer API daily-quota or depleted-prepayment
 response instead retries once on Vertex when automatic fallback is enabled.
 Unchanged completed, duplicate, or review documents are not resubmitted on
-each event.
+each event. Both model backends receive the same JSON Schema in addition to the
+JSON MIME type; application validation still checks dates, totals, configured
+headers, and business rules before any Drive or Sheet mutation.
+Post-write verification treats `6`, `06`, and the numeric value `6` as the same
+reference month, because Sheets can coerce that field; this equivalence is not
+applied to invoice, contract, or customer identifiers.
 
 ## Operations
 
@@ -116,10 +179,10 @@ each event.
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
-| `processDriveEventQueue` | 15-minute trigger only. | Pulls events and processes only direct-root PDFs named by those events. |
-| `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active Drive event subscription when due. |
+| `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
+| `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
-| `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Replaces only this automation's Drive event subscription; keeps the Pub/Sub topic and pull subscription. |
+| `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
 
 After a transport repair, run `installAutomationTriggers` to restore all three
