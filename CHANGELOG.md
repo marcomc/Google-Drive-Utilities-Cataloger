@@ -39,6 +39,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   maximum-TTL patch renewal, long-running operation polling, live topology
   validation, missing-subscription self-healing, and controlled transport
   repair.
+- Strict script-scoped Pub/Sub resource identity across provision, repair, and
+  renewal, with mismatched stored names rejected instead of overwritten or
+  accepted as a compatibility transport.
+- Recovery from the explicit Workspace Events
+  `SUBSCRIPTION_ACCESS_DENIED` terminal signal while unrelated `403` failures
+  continue to fail closed for operator review.
+- Maximum-duration Workspace Events creation by omitting `ttl`, avoiding a
+  live API interpretation of `"0s"` as an already-expired subscription while
+  retaining the documented zero-TTL patch for renewal.
 - One-message pulls with a five-minute acknowledgement lease and acknowledgement
   only after durable processing state.
 - Shared processing and lifecycle locks plus durable per-file processing
@@ -58,6 +67,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   switch for generic quota errors.
 - PDF extraction into a strict JSON contract constrained by the configured
   per-supply spreadsheet headers and Drive policy.
+- Provider-enforced JSON Schema output for both Gemini Developer API and
+  Vertex AI, preventing trailing model text from invalidating an otherwise
+  successful extraction response.
 - Gemini 3.5 Flash extraction with medium thinking, an 8,192-token response
   budget, and explicit incomplete-response detection.
 - Provider usage logging for prompt, response, thinking, and total tokens,
@@ -95,6 +107,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the two values are never substituted for one another.
 - Preservation of existing formulas, styles, column structure, and date and
   currency formats when inserting rows.
+- Post-write verification that accepts Google Sheets' numeric coercion only
+  for the two-digit reference-month field while keeping identifiers strict.
 - Literal writes for all untrusted text, with duplicate normalized headers and
   formula-backed columns rejected.
 - Root-relative source-file hyperlinks plus post-write verification of invoice
@@ -154,6 +168,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Durable OAuth audience guidance for Workspace and personal Google accounts.
 - Final validation of Pub/Sub topology, publisher IAM, Workspace event state,
   Script Properties, spreadsheet structure, and Apps Script triggers.
+- Installer validation that reuses the runtime's bounded header-row detection,
+  allowing existing spreadsheets with a title row above their real headers.
 
 #### Operations and quality
 

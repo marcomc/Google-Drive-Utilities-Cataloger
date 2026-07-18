@@ -265,6 +265,39 @@ function testDeveloperApiKeyUsesHeader() {
     payload.generationConfig.thinkingConfig.thinkingLevel,
     vm.runInContext('CONFIG.GEMINI_35_FLASH_THINKING_LEVEL', context)
   );
+  assert.equal(payload.generationConfig.responseMimeType, 'application/json');
+  assert.equal(payload.generationConfig.responseJsonSchema.type, 'object');
+  assert.deepEqual(
+    payload.generationConfig.responseJsonSchema.required,
+    [
+      'document_type',
+      'supplier',
+      'supply_type',
+      'address_type',
+      'address_evidence',
+      'issue_date',
+      'identifier',
+      'contract_number',
+      'customer_code',
+      'contract_object',
+      'reference_year',
+      'reference_month',
+      'frequency',
+      'period_start',
+      'period_end',
+      'consumption_description',
+      'cost_consumption',
+      'cost_non_consumption',
+      'vat',
+      'total',
+      'sheet_values',
+      'problems'
+    ]
+  );
+  assert.deepEqual(
+    payload.generationConfig.responseJsonSchema.properties.document_type.enum,
+    ['Invoice', 'Contract', 'Report', 'unknown']
+  );
 }
 
 function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
@@ -985,6 +1018,16 @@ function testSpreadsheetFormulaArgumentSeparatorFollowsLocale() {
   assert.equal(separatorFor('en_GB'), ',');
 }
 
+function testReferenceMonthVerificationAcceptsSheetNumericCoercion() {
+  const context = loadCataloger();
+
+  assert.equal(context.referenceMonthValuesMatch_(6, '06'), true);
+  assert.equal(context.referenceMonthValuesMatch_('6', '06'), true);
+  assert.equal(context.referenceMonthValuesMatch_('06', '06'), true);
+  assert.equal(context.referenceMonthValuesMatch_(7, '06'), false);
+  assert.equal(context.referenceMonthValuesMatch_('invoice-6', '06'), false);
+}
+
 function testFormulaTotalMustReconcileWithExtraction() {
   const context = loadCataloger();
   context.getHeaderAliases_ = (key) => ({
@@ -1196,6 +1239,7 @@ testSourceHyperlinkFormulaIsPreserved();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
+testReferenceMonthVerificationAcceptsSheetNumericCoercion();
 testFormulaTotalMustReconcileWithExtraction();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();

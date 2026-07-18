@@ -164,7 +164,7 @@ modify:
 | Apps Script triggers | Not created, removed, or changed; existing triggers run the new project HEAD. |
 | Drive folders and files | Not created, moved, renamed, or scanned. |
 | Google Sheets | Not created or modified. |
-| Pub/Sub and Workspace Events | Not created, renewed, or repaired. |
+| Pub/Sub and Workspace Events | Not changed by the workflow itself. After deployment, the scheduled renewal handler can replace an explicitly inaccessible Workspace Events subscription; mismatched Pub/Sub names fail closed. |
 | Cloud project, APIs, billing, IAM, and Secret Manager | Not provisioned or changed. |
 | Repository `AGENTS.md` | Not uploaded to Apps Script; it contains coding-agent guidance only. |
 | Drive `AGENTS.md` policy | Not copied or overwritten. The live Drive copy remains authoritative. |

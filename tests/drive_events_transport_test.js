@@ -206,7 +206,7 @@ function testIncompatibleWorkspaceSubscriptionIsRejected() {
   );
 }
 
-function testWorkspaceSubscriptionRequestsAllIntakeEvents() {
+function testWorkspaceSubscriptionRequestsAllIntakeEventsAtMaximumTtl() {
   const requests = [];
   const context = loadDriveEvents((url, options) => {
     requests.push({ url, options });
@@ -224,7 +224,7 @@ function testWorkspaceSubscriptionRequestsAllIntakeEvents() {
   );
 
   const payload = JSON.parse(requests[0].options.payload);
-  assert.equal(payload.ttl, '0s');
+  assert.equal(Object.hasOwn(payload, 'ttl'), false);
   assert.deepEqual(
     Array.from(payload.eventTypes),
     [
@@ -287,7 +287,11 @@ function testPublisherPermissionPropagationIsRetried() {
 function testRenewalPatchesMaximumTtl() {
   const requests = [];
   const stored = {
-    PUBSUB_TOPIC: 'projects/example/topics/drive-utilities-events',
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id',
     WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/example'
   };
   const context = loadDriveEvents((url, options) => {
@@ -323,7 +327,11 @@ function testRenewalPatchesMaximumTtl() {
 
 function testRenewalRecreatesMissingStoredSubscription() {
   const stored = {
-    PUBSUB_TOPIC: 'projects/example/topics/drive-utilities-events',
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id',
     WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/missing'
   };
   const context = loadDriveEvents(() => ({}));
@@ -334,7 +342,7 @@ function testRenewalRecreatesMissingStoredSubscription() {
     })
   };
   context.getWorkspaceEventSubscription_ = () => {
-    throw new Error('Google Cloud HTTP 404: missing');
+    throw context.createCloudHttpError_(404, '{"error":{"message":"missing"}}');
   };
   context.createDriveEventSubscription_ = () => ({
     name: 'subscriptions/replacement',
@@ -348,16 +356,170 @@ function testRenewalRecreatesMissingStoredSubscription() {
   assert.equal(stored.WORKSPACE_EVENT_SUBSCRIPTION, 'subscriptions/replacement');
 }
 
+function testRenewalRejectsNonScriptScopedTransport() {
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC: 'projects/example/topics/drive-utilities-events',
+    PUBSUB_SUBSCRIPTION:
+      'projects/example/subscriptions/drive-utilities-events-pull',
+    WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/inaccessible'
+  };
+  const context = loadDriveEvents(() => ({}));
+  context.LockService = {
+    getScriptLock: () => ({
+      tryLock: () => true,
+      releaseLock: () => {}
+    })
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperties: (values) => Object.assign(stored, values)
+    })
+  };
+  context.recreateDriveEventSubscriptionUnlocked_ = () => {
+    throw new Error('must not reconcile an unexpected transport');
+  };
+
+  assert.throws(
+    () => context.renewDriveEventSubscription(),
+    /do not match this Apps Script project/
+  );
+  assert.equal(
+    stored.PUBSUB_TOPIC,
+    'projects/example/topics/drive-utilities-events'
+  );
+  assert.equal(
+    stored.PUBSUB_SUBSCRIPTION,
+    'projects/example/subscriptions/drive-utilities-events-pull'
+  );
+  assert.equal(stored.WORKSPACE_EVENT_SUBSCRIPTION, 'subscriptions/inaccessible');
+}
+
+function testProvisionAcceptsOnlyAbsentOrScriptScopedTransport() {
+  const context = loadDriveEvents(() => ({}));
+  const propertiesFor = (stored) => ({
+    getProperty: (key) => stored[key] || ''
+  });
+
+  assert.doesNotThrow(() =>
+    context.assertStoredPubSubTransportIdentity_(
+      propertiesFor({}),
+      'example',
+      true
+    )
+  );
+  assert.throws(
+    () => context.assertStoredPubSubTransportIdentity_(
+      propertiesFor({
+        PUBSUB_TOPIC: 'projects/example/topics/drive-utilities-events'
+      }),
+      'example',
+      true
+    ),
+    /do not match this Apps Script project/
+  );
+}
+
+function testRenewalRecreatesInaccessibleStoredSubscription() {
+  const expectedTopic =
+    'projects/example/topics/drive-utilities-events-test-script-id';
+  const expectedPull = 'projects/example/subscriptions/' +
+    'drive-utilities-events-pull-test-script-id';
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC: expectedTopic,
+    PUBSUB_SUBSCRIPTION: expectedPull,
+    WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/inaccessible'
+  };
+  const context = loadDriveEvents(() => ({}));
+  context.LockService = {
+    getScriptLock: () => ({
+      tryLock: () => true,
+      releaseLock: () => {}
+    })
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperties: (values) => Object.assign(stored, values)
+    })
+  };
+  context.getScriptProperty_ = (key) => stored[key] || '';
+  context.ensurePubSubTopic_ = () => {};
+  context.grantDrivePublisher_ = () => {};
+  context.ensurePubSubPullSubscription_ = () => {};
+  context.getWorkspaceEventSubscription_ = () => {
+    throw context.createCloudHttpError_(
+      403,
+      '{"error":{"details":[{"reason":"SUBSCRIPTION_ACCESS_DENIED"}]}}'
+    );
+  };
+  context.createDriveEventSubscription_ = () => ({
+    name: 'subscriptions/replacement',
+    expireTime: '2030-01-01T00:00:00Z'
+  });
+  context.getSetupStatus = () => ({ pubSubConfigured: true });
+
+  const result = context.renewDriveEventSubscription();
+
+  assert.equal(result.renewed, true);
+  assert.equal(result.reason, 'inaccessible-subscription-recreated');
+  assert.equal(stored.PUBSUB_TOPIC, expectedTopic);
+  assert.equal(stored.PUBSUB_SUBSCRIPTION, expectedPull);
+  assert.equal(stored.WORKSPACE_EVENT_SUBSCRIPTION, 'subscriptions/replacement');
+}
+
+function testRenewalRejectsGenericPermissionFailure() {
+  const expectedTopic =
+    'projects/example/topics/drive-utilities-events-test-script-id';
+  const expectedPull = 'projects/example/subscriptions/' +
+    'drive-utilities-events-pull-test-script-id';
+  const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC: expectedTopic,
+    PUBSUB_SUBSCRIPTION: expectedPull,
+    WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/forbidden'
+  };
+  const context = loadDriveEvents(() => ({}));
+  context.LockService = {
+    getScriptLock: () => ({
+      tryLock: () => true,
+      releaseLock: () => {}
+    })
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperties: (values) => Object.assign(stored, values)
+    })
+  };
+  context.getWorkspaceEventSubscription_ = () => {
+    throw new Error('Google Cloud HTTP 403: permission denied');
+  };
+
+  assert.throws(
+    () => context.renewDriveEventSubscription(),
+    /permission denied/
+  );
+  assert.equal(stored.WORKSPACE_EVENT_SUBSCRIPTION, 'subscriptions/forbidden');
+}
+
 function testRecreateDeletesOnlyOwnedSubscription() {
   const requests = [];
   const stored = {
+    GOOGLE_CLOUD_PROJECT_ID: 'example',
+    PUBSUB_TOPIC:
+      'projects/example/topics/drive-utilities-events-test-script-id',
+    PUBSUB_SUBSCRIPTION: 'projects/example/subscriptions/' +
+      'drive-utilities-events-pull-test-script-id',
     WORKSPACE_EVENT_SUBSCRIPTION: 'subscriptions/example'
   };
   const context = loadDriveEvents((url, options) => {
     requests.push({ url, options });
     return { response: {} };
   });
-  context.getScriptProperty_ = () => 'example';
+  context.getScriptProperty_ = (key) => stored[key] || '';
   context.ensurePubSubTopic_ = () => {};
   context.grantDrivePublisher_ = () => {};
   context.ensurePubSubPullSubscription_ = () => {};
@@ -400,11 +562,15 @@ testUnexpectedTopicIsRejected();
 testDrivePublisherUsesUnconditionalIamBinding();
 testWorkspaceSubscriptionTopology();
 testIncompatibleWorkspaceSubscriptionIsRejected();
-testWorkspaceSubscriptionRequestsAllIntakeEvents();
+testWorkspaceSubscriptionRequestsAllIntakeEventsAtMaximumTtl();
 testWorkspaceOperationIsPolled();
 testPublisherPermissionPropagationIsRetried();
 testRenewalPatchesMaximumTtl();
 testRenewalRecreatesMissingStoredSubscription();
+testRenewalRejectsNonScriptScopedTransport();
+testProvisionAcceptsOnlyAbsentOrScriptScopedTransport();
+testRenewalRecreatesInaccessibleStoredSubscription();
+testRenewalRejectsGenericPermissionFailure();
 testRecreateDeletesOnlyOwnedSubscription();
 
 console.log('Drive event transport tests passed.');

@@ -214,6 +214,8 @@ For the spreadsheet:
   and source-file headers.
 - A populated existing spreadsheet must already use the selected locale and
   time zone; the installer refuses to change workbook-wide settings silently.
+- Existing utility tabs may keep title rows above their real column headers;
+  validation uses the same bounded header-row detection as runtime imports.
 - Unrelated existing tabs are not deleted.
 
 If no intake `AGENTS.md` exists, the installer creates one from the public

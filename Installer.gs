@@ -493,9 +493,7 @@ function getInstallerLocalization_(locale) {
 }
 
 function validateInstallerSheetHeaders_(sheet, locale) {
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn())
-    .getDisplayValues()[0]
-    .map(normalizeHeader_);
+  const headers = getSheetLayout_(sheet).headers.map(normalizeHeader_);
   const seenHeaders = Object.create(null);
   headers.forEach(function (header) {
     if (!header) {

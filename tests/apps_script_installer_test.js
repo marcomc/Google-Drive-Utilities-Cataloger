@@ -168,6 +168,38 @@ function testPopulatedSpreadsheetSettingsAreNotChangedSilently() {
   );
 }
 
+function testSpreadsheetValidationUsesDetectedHeaderRow() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: [
+      'Data di emissione',
+      'Fornitore',
+      'Numero fattura',
+      'File sorgente'
+    ]
+  });
+  context.getInstallerLocalization_ = () => ({
+    headerAliases: {
+      issueDate: ['data di emissione'],
+      supplier: ['fornitore'],
+      identifier: ['numero fattura'],
+      sourceFile: ['file sorgente']
+    }
+  });
+  context.normalizeHeader_ = (value) => String(value).trim().toLowerCase();
+  const sheet = {
+    getName: () => 'Acqua',
+    getRange: () => {
+      throw new Error('validator must use the detected header row');
+    }
+  };
+
+  context.validateInstallerSheetHeaders_(sheet, 'it');
+}
+
 function response(statusCode, body) {
   return {
     getContentText: () => JSON.stringify(body),
@@ -303,6 +335,7 @@ testSecretManagerBootstrapHandoff();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
+testSpreadsheetValidationUsesDetectedHeaderRow();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

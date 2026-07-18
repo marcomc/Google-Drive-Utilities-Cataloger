@@ -402,7 +402,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   };
   const generationConfig = {
     maxOutputTokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS,
-    responseMimeType: 'application/json'
+    responseMimeType: 'application/json',
+    responseJsonSchema: buildExtractionResponseSchema_()
   };
   if (model === 'gemini-3.5-flash') {
     generationConfig.thinkingConfig = {
@@ -524,6 +525,84 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return valid extraction JSON.');
   }
   return parts[0].text;
+}
+
+function buildExtractionResponseSchema_() {
+  const nullableString = { type: ['string', 'null'] };
+  const nullableNumber = { type: ['number', 'null'] };
+  const required = [
+    'document_type',
+    'supplier',
+    'supply_type',
+    'address_type',
+    'address_evidence',
+    'issue_date',
+    'identifier',
+    'contract_number',
+    'customer_code',
+    'contract_object',
+    'reference_year',
+    'reference_month',
+    'frequency',
+    'period_start',
+    'period_end',
+    'consumption_description',
+    'cost_consumption',
+    'cost_non_consumption',
+    'vat',
+    'total',
+    'sheet_values',
+    'problems'
+  ];
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      document_type: {
+        type: 'string',
+        enum: ['Invoice', 'Contract', 'Report', 'unknown']
+      },
+      supplier: nullableString,
+      supply_type: nullableString,
+      address_type: {
+        type: 'string',
+        enum: ['import', 'archive_only', 'unknown']
+      },
+      address_evidence: nullableString,
+      issue_date: nullableString,
+      identifier: nullableString,
+      contract_number: nullableString,
+      customer_code: nullableString,
+      contract_object: nullableString,
+      reference_year: { type: ['integer', 'null'] },
+      reference_month: nullableString,
+      frequency: nullableString,
+      period_start: nullableString,
+      period_end: nullableString,
+      consumption_description: nullableString,
+      cost_consumption: nullableNumber,
+      cost_non_consumption: nullableNumber,
+      vat: nullableNumber,
+      total: nullableNumber,
+      sheet_values: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            header: { type: 'string' },
+            value: { type: ['string', 'number', 'null'] }
+          },
+          required: ['header', 'value']
+        }
+      },
+      problems: {
+        type: 'array',
+        items: { type: 'string' }
+      }
+    },
+    required: required
+  };
 }
 
 /**
@@ -1493,14 +1572,14 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     .getFormulas()[0];
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
+  const monthColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('month'));
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
-    if (column && !rowFormulas[column - 1] &&
-      !sheetValuesMatch_(
-        sheet.getRange(row, column).getValue(),
-        expected[normalizedHeader],
-        extracted.issue_date
-      )) {
+    const actual = column ? sheet.getRange(row, column).getValue() : null;
+    const matches = column === monthColumn ?
+      referenceMonthValuesMatch_(actual, expected[normalizedHeader]) :
+      sheetValuesMatch_(actual, expected[normalizedHeader], extracted.issue_date);
+    if (column && !rowFormulas[column - 1] && !matches) {
       throw new Error('Spreadsheet value verification failed for: ' +
         layout.headers[column - 1]);
     }
@@ -1556,6 +1635,17 @@ function sheetValuesMatch_(actual, expected, issueDate) {
   }
   return String(actual === null || actual === undefined ? '' : actual) ===
     String(expected === null || expected === undefined ? '' : expected);
+}
+
+function referenceMonthValuesMatch_(actual, expected) {
+  const actualText = String(actual === null || actual === undefined ? '' : actual);
+  const expectedText = String(expected === null || expected === undefined ? '' : expected);
+  if (!/^\d{1,2}$/.test(actualText) || !/^\d{2}$/.test(expectedText)) {
+    return false;
+  }
+  const actualMonth = Number(actualText);
+  const expectedMonth = Number(expectedText);
+  return actualMonth >= 1 && actualMonth <= 12 && actualMonth === expectedMonth;
 }
 
 function sha256ForFile_(file) {
