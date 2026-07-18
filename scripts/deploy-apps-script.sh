@@ -2,6 +2,13 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# shellcheck source=scripts/lib/apps-script-deployment.sh
+source "${SCRIPT_DIR}/lib/apps-script-deployment.sh"
+
+CLASP=(clasp)
+
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${APPS_SCRIPT_DEPLOYMENT_ID:?APPS_SCRIPT_DEPLOYMENT_ID is required}"
 : "${DEPLOY_COMMIT_SHA:?DEPLOY_COMMIT_SHA is required}"
@@ -15,6 +22,7 @@ jq -e '
   (.scriptId | type == "string" and length > 0) and
   .rootDir == "."
 ' .clasp.json >/dev/null
+script_id="$(jq -er '.scriptId' .clasp.json)"
 
 git fetch --no-tags origin main
 current_main_sha="$(git rev-parse FETCH_HEAD)"
@@ -23,20 +31,36 @@ if [[ "${DEPLOY_COMMIT_SHA}" != "${current_main_sha}" ]]; then
   exit 0
 fi
 
-deployments_json="$(clasp -A "${auth_file}" --json deployments)"
-jq -e --arg id "${APPS_SCRIPT_DEPLOYMENT_ID}" '
-  any(.[];
-    .deploymentId == $id and
-    (.versionNumber | type == "number")
-  )
-' <<<"${deployments_json}" >/dev/null
+pre_deployment_json=""
+# Helpers explicitly check each fallible command; callers branch for diagnostics.
+# shellcheck disable=SC2310
+if ! read_apps_script_deployment \
+  "${auth_file}" \
+  "${script_id}" \
+  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  pre_deployment_json; then
+  printf '%s\n' \
+    "Deployment preflight failed; no Apps Script source was changed." >&2
+  exit 1
+fi
+# shellcheck disable=SC2310
+if ! validate_owner_only_api_deployment \
+  "${pre_deployment_json}" \
+  "${script_id}" \
+  "${APPS_SCRIPT_DEPLOYMENT_ID}"; then
+  printf '%s\n' \
+    "Deployment preflight failed; explicit operator repair is required." >&2
+  exit 1
+fi
+pre_entry_points="$(canonical_deployment_entry_points \
+  "${pre_deployment_json}")"
 
 snapshot_dir="${RUNNER_TEMP}/apps-script-snapshot"
 mkdir -m 700 "${snapshot_dir}"
 cp .clasp.json "${snapshot_dir}/.clasp.json"
 (
   cd "${snapshot_dir}"
-  clasp -A "${auth_file}" pull
+  "${CLASP[@]}" -A "${auth_file}" pull
 )
 remote_time_zone="$(jq -er '
   .timeZone | select(type == "string" and length > 0)
@@ -47,12 +71,13 @@ jq --arg time_zone "${remote_time_zone}" \
 mv "${manifest_tmp}" appsscript.json
 
 version_label="main-${DEPLOY_COMMIT_SHA::12}"
-clasp -A "${auth_file}" push --force
-version_json="$(clasp -A "${auth_file}" --json version "${version_label}")"
+"${CLASP[@]}" -A "${auth_file}" push --force
+version_json="$("${CLASP[@]}" -A "${auth_file}" --json version \
+  "${version_label}")"
 version_id="$(jq -er '
   .versionNumber | select(type == "number")
 ' <<<"${version_json}")"
-deployment_json="$(clasp -A "${auth_file}" --json deploy \
+deployment_json="$("${CLASP[@]}" -A "${auth_file}" --json deploy \
   --deploymentId "${APPS_SCRIPT_DEPLOYMENT_ID}" \
   --versionNumber "${version_id}" \
   --description "${version_label}")"
@@ -61,3 +86,33 @@ jq -e \
   --argjson version "${version_id}" '
     .deploymentId == $id and .versionNumber == $version
   ' <<<"${deployment_json}" >/dev/null
+
+post_deployment_json=""
+# Helpers explicitly check each fallible command; callers branch for diagnostics.
+# shellcheck disable=SC2310
+if ! read_apps_script_deployment \
+  "${auth_file}" \
+  "${script_id}" \
+  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  post_deployment_json; then
+  printf '%s\n' \
+    "The deployment was updated but post-update API verification failed." >&2
+  exit 1
+fi
+# shellcheck disable=SC2310
+if ! validate_owner_only_api_deployment \
+  "${post_deployment_json}" \
+  "${script_id}" \
+  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  "${version_id}"; then
+  printf '%s\n' \
+    "The updated deployment failed owner-only API executable validation." >&2
+  exit 1
+fi
+post_entry_points="$(canonical_deployment_entry_points \
+  "${post_deployment_json}")"
+if [[ "${post_entry_points}" != "${pre_entry_points}" ]]; then
+  printf '%s\n' \
+    "The Apps Script deployment entry points changed during the update." >&2
+  exit 1
+fi

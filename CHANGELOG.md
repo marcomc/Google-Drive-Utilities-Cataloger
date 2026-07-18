@@ -22,6 +22,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   upload without recreating triggers, Script Properties, or Google resources.
 - Production GitHub Actions concurrency control and isolated deployment secrets
   documented in the deployment guide.
+- Apps Script Deployments API validation of deployment identity and the
+  owner-only `EXECUTION_API` entry point before source upload, followed by
+  post-update version and entry-point preservation checks.
+- Fail-closed installer handling for missing or incompatible API deployments,
+  without automatic deletion, state clearing, or replacement.
 
 #### Development workflow
 

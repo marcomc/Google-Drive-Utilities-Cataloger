@@ -547,6 +547,144 @@ test_restrictive_installer_umask() {
   fi
 }
 
+deployment_fixture() {
+  local script_id="$1"
+  local entry_point_type="$2"
+  local access="$3"
+
+  jq -cn \
+    --arg script_id "${script_id}" \
+    --arg entry_point_type "${entry_point_type}" \
+    --arg access "${access}" '
+      {
+        deploymentId: "deployment-1",
+        deploymentConfig: {
+          scriptId: $script_id,
+          versionNumber: 4,
+          manifestFileName: "appsscript"
+        },
+        entryPoints: [{
+          entryPointType: $entry_point_type,
+          executionApi: {entryPointConfig: {access: $access}}
+        }]
+      }
+    '
+}
+
+test_owner_only_api_deployment_validation() {
+  local mixed_public
+  local missing_entry
+  local wrong_access
+  local valid
+
+  valid="$(deployment_fixture "test-script" "EXECUTION_API" "MYSELF")"
+  missing_entry="$(deployment_fixture "test-script" "WEB_APP" "MYSELF")"
+  wrong_access="$(deployment_fixture "test-script" "EXECUTION_API" "ANYONE")"
+  mixed_public="$(jq -c '.entryPoints += [{
+    entryPointType: "WEB_APP",
+    webApp: {
+      entryPointConfig: {
+        access: "ANYONE",
+        executeAs: "USER_DEPLOYING"
+      }
+    }
+  }]' <<<"${valid}")"
+  assert_success "accept an owner-only API executable" \
+    validate_owner_only_api_deployment \
+    "${valid}" "test-script" "deployment-1" "4"
+  assert_failure "reject a deployment from another script" \
+    validate_owner_only_api_deployment \
+    "${valid}" "other-script" "deployment-1"
+  assert_failure "reject a deployment without EXECUTION_API" \
+    validate_owner_only_api_deployment \
+    "${missing_entry}" \
+    "test-script" "deployment-1"
+  assert_failure "reject an API executable not restricted to MYSELF" \
+    validate_owner_only_api_deployment \
+    "${wrong_access}" \
+    "test-script" "deployment-1"
+  assert_failure "reject a mixed deployment with a public web app" \
+    validate_owner_only_api_deployment \
+    "${mixed_public}" "test-script" "deployment-1"
+}
+
+test_invalid_stored_deployment_is_not_recreated() {
+  local activity_log="${TEST_STATE_DIR}/stored-deployment-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    local invalid_deployment
+
+    invalid_deployment="$(deployment_fixture \
+      "test-script" "EXECUTION_API" "ANYONE")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '%s\n' "deployment-1" ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${invalid_deployment}"
+    }
+    state_set() {
+      printf 'state-set %s\n' "$1" >>"${activity_log}"
+    }
+    CLASP=(false)
+    ensure_api_executable_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 || -s "${activity_log}" ]]; then
+    printf 'FAIL: invalid stored deployment was accepted or replaced\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_invalid_new_deployment_is_not_stored() {
+  local activity_log="${TEST_STATE_DIR}/new-deployment-activity"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    local invalid_deployment
+
+    invalid_deployment="$(deployment_fixture \
+      "test-script" "WEB_APP" "MYSELF")"
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '\n' ;;
+        *) return 1 ;;
+      esac
+    }
+    read_apps_script_deployment() {
+      printf -v "$4" '%s' "${invalid_deployment}"
+    }
+    state_set() {
+      printf 'state-set %s\n' "$1" >>"${activity_log}"
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf '%s\n' '{"deploymentId":"deployment-1"}'
+    }
+    CLASP=(clasp_fixture)
+    ensure_api_executable_deployment
+  ) >/dev/null 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 ]] || grep -q '^state-set' "${activity_log}"; then
+    printf 'FAIL: invalid new deployment was accepted or stored\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
 test_drive_id_extraction
 test_input_validation
 test_version_parsing
@@ -563,6 +701,9 @@ test_preflight_does_not_require_global_clasp_login
 test_reset_removes_private_state_after_releasing_lock
 test_private_artifacts_are_ignored
 test_restrictive_installer_umask
+test_owner_only_api_deployment_validation
+test_invalid_stored_deployment_is_not_recreated
+test_invalid_new_deployment_is_not_stored
 
 if ! bash "${PROJECT_ROOT}/scripts/install.sh" --help >/dev/null; then
   printf 'FAIL: installer help is unavailable\n' >&2

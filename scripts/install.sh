@@ -9,6 +9,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # shellcheck source=scripts/lib/install-common.sh
 source "${SCRIPT_DIR}/lib/install-common.sh"
+# shellcheck source=scripts/lib/apps-script-deployment.sh
+source "${SCRIPT_DIR}/lib/apps-script-deployment.sh"
 
 INSTALLER_VERSION=1
 DEFAULT_STATE_DIR="${PROJECT_ROOT}/.installer"
@@ -1428,25 +1430,34 @@ authorize_installer_execution() {
 
 ensure_api_executable_deployment() {
   local deployment_id
+  local deployment_json
   local deployment_output
-  local existing_deployments
+  local script_id
 
+  script_id="$(state_get '.scriptId')"
   deployment_id="$(state_get '.deploymentId')"
   if [[ -n "${deployment_id}" ]]; then
-    if ! existing_deployments="$("${CLASP[@]}" \
-      -A "${AUTH_DIR}/.clasprc.json" --json \
-      deployments 2>/dev/null)"; then
+    deployment_json=""
+    # Helpers explicitly check failures; this branch adds installer guidance.
+    # shellcheck disable=SC2310
+    if ! read_apps_script_deployment \
+      "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" \
+      "${deployment_id}" \
+      deployment_json; then
       die "Could not verify the stored Apps Script API deployment." \
         "${INSTALL_DOC}#api-executable"
     fi
-    if printf '%s' "${existing_deployments}" |
-      jq -e --arg id "${deployment_id}" \
-        'any(.[]; .deploymentId == $id)' >/dev/null; then
-      success "Using installer API deployment"
-      return 0
+    # shellcheck disable=SC2310
+    if ! validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"; then
+      die "The stored deployment is not an owner-only API executable; explicit operator repair is required." \
+        "${INSTALL_DOC}#api-executable"
     fi
-    warning "The stored Apps Script deployment no longer exists; recreating it."
-    state_set "deploymentId" ""
+    success "Using installer API deployment"
+    return 0
   fi
 
   debug "Creating owner-only Apps Script API deployment"
@@ -1458,6 +1469,21 @@ ensure_api_executable_deployment() {
   if [[ -z "${deployment_id}" ]]; then
     printf '%s\n' "${deployment_output}" >&2
     die "Could not identify the Apps Script API deployment." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  deployment_json=""
+  # Helpers explicitly check failures; this branch adds installer guidance.
+  # shellcheck disable=SC2310
+  if ! read_apps_script_deployment \
+    "${AUTH_DIR}/.clasprc.json" \
+    "${script_id}" \
+    "${deployment_id}" \
+    deployment_json ||
+    ! validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"; then
+    die "The new deployment is not an owner-only API executable; explicit operator repair is required." \
       "${INSTALL_DOC}#api-executable"
   fi
   state_set "deploymentId" "${deployment_id}"

@@ -44,6 +44,13 @@ Configure these secrets in the `production` environment:
 Do not commit any of these values. The workflow writes them only to the
 runner's temporary directory or to the ignored local `.clasp.json`.
 
+`CLASP_AUTH_JSON` must authorize the
+[`https://www.googleapis.com/auth/script.deployments` OAuth
+scope](https://developers.google.com/apps-script/api/reference/rest/v1/projects.deployments/get#authorization-scopes).
+`clasp login --include-clasp-scopes` requests this management scope. The
+workflow needs it both to update the deployment and to inspect it through the
+Apps Script Deployments API.
+
 ## Bootstrap production deployment
 
 Complete this once before merging the pull request that introduces the
@@ -75,21 +82,27 @@ environment and all three secrets exist.
    chmod 600 "$DEPLOY_AUTH_FILE"
    ```
 
-4. Verify that the stored deployment belongs to the same script before
-   uploading any secret.
+4. Verify the complete deployment configuration before uploading any secret.
+   This uses the same read-only Apps Script Deployments API check as CI.
 
    ```bash
    DEPLOYMENT_ID="$(jq -er '.deploymentId' .installer/state.json)"
    SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
    test "$(jq -er '.rootDir' .clasp.json)" = "."
-   clasp -A "$DEPLOY_AUTH_FILE" --json deployments "$SCRIPT_ID" |
-     jq -e --arg id "$DEPLOYMENT_ID" '
-       any(.[];
-         .deploymentId == $id and
-         (.versionNumber | type == "number")
-       )
-     '
+   CLASP=(clasp)
+   source scripts/lib/apps-script-deployment.sh
+   DEPLOYMENT_JSON=""
+   read_apps_script_deployment \
+     "$DEPLOY_AUTH_FILE" "$SCRIPT_ID" "$DEPLOYMENT_ID" DEPLOYMENT_JSON
+   validate_owner_only_api_deployment \
+     "$DEPLOYMENT_JSON" "$SCRIPT_ID" "$DEPLOYMENT_ID"
+   unset DEPLOYMENT_JSON
    ```
+
+   Validation requires the configured deployment ID, matching `scriptId`, a
+   numbered version, a manifest file, and an `EXECUTION_API` entry point whose
+   access is `MYSELF`. A missing or incompatible deployment is not deleted or
+   replaced automatically.
 
 5. Create `production`, restrict it to `main`, and store the secrets. The
    environment can also be configured on GitHub's [Environments settings
@@ -148,8 +161,17 @@ merge commit to the configured Apps Script project:
 | API executable | Moves `APPS_SCRIPT_DEPLOYMENT_ID` to the new numbered version. |
 | Manifest time zone | Reads and preserves the target project's current `timeZone` before upload. |
 
-The stable API executable deployment ID is preserved. The workflow validates
-that it belongs to the configured Apps Script project before `clasp push`.
+The stable API executable deployment ID is preserved. Before `clasp push`, the
+workflow reads it through the official Deployments API and validates its script
+ID, numbered version, manifest, and `EXECUTION_API`/`MYSELF` entry point. After
+`clasp deploy --deploymentId`, it reads the deployment again and requires the
+same deployment ID, the new version, and an unchanged entry-point structure.
+
+The workflow deliberately retains `clasp deploy --deploymentId`. The existing
+manifest already declares owner-only Execution API access, and the pre/post API
+comparison proves whether `clasp` preserved it. Direct deployment `PUT` is not
+needed and would require rebuilding a configuration that does not otherwise
+need to change.
 
 ## What the deployment does not install
 
@@ -190,13 +212,15 @@ flowchart LR
   merge --> event["Push protected main"]
   event --> checkout["Checkout main commit"]
   checkout --> validate["Run make check"]
-  validate --> target["Verify newest main and target IDs"]
-  target --> manifest["Preserve live time zone"]
+  validate --> target["Verify newest main commit"]
+  target --> preflight["GET deployment: script ID and EXECUTION_API / MYSELF"]
+  preflight --> manifest["Preserve live time zone"]
   manifest --> push["clasp push to project HEAD"]
   push --> triggers["Installable triggers use HEAD"]
   push --> version["Create numbered version"]
   version --> deploy["Update stable API executable"]
-  deploy --> api["Owner-only installer calls"]
+  deploy --> postflight["GET deployment: version and unchanged entry points"]
+  postflight --> api["Owner-only installer calls"]
 ```
 
 Therefore an approval alone never deploys code, and closing a pull request
@@ -228,7 +252,8 @@ uploads the reverted source to HEAD, creates a new immutable version, and moves
 the stable API executable to that matching version.
 
 After recovery, recreate the temporary authorization as in step 3, derive the
-script ID again, and verify the deployment list:
+script ID again, and run the complete API validation from bootstrap step 4.
+Then inspect recent executions:
 
 ```bash
 DEPLOY_AUTH_DIR="$(mktemp -d)"
@@ -239,14 +264,13 @@ clasp -A "$DEPLOY_AUTH_FILE" login \
   --use-project-scopes \
   --include-clasp-scopes
 SCRIPT_ID="$(jq -er '.scriptId' .clasp.json)"
-clasp -A "$DEPLOY_AUTH_FILE" --json deployments "$SCRIPT_ID"
 printf 'https://script.google.com/home/projects/%s/executions\n' "$SCRIPT_ID"
 rm -rf "$DEPLOY_AUTH_DIR"
 ```
 
 Open the printed Executions URL and confirm successful recent runs for the
-daily, Pub/Sub poll, and subscription-renewal handlers. The deployment list
-verifies the API executable; the Executions page verifies trigger health.
+daily, Pub/Sub poll, and subscription-renewal handlers. The Deployments API
+check verifies the API executable; the Executions page verifies trigger health.
 
 For an intentional manual deployment, use the same isolated credentials and
 stable deployment ID, preserve the target manifest time zone, and run the same

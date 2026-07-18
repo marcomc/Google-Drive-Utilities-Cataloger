@@ -463,6 +463,20 @@ Resume creates a versioned, owner-only Apps Script API executable. It exists
 only so the installer can invoke `bootstrapCatalogerInstallation` and
 `validateCatalogerInstallation`; there is no public web application.
 
+The installer reads every stored or newly created deployment through the
+[Apps Script Deployments
+API](https://developers.google.com/apps-script/api/reference/rest/v1/projects.deployments/get)
+and accepts it only when the deployment ID and script ID match, it has a
+numbered version and manifest, and its entry point is `EXECUTION_API` with
+`MYSELF` access. The owner authorization therefore includes
+`https://www.googleapis.com/auth/script.deployments`, requested by the existing
+`clasp login --include-clasp-scopes` command.
+
+If a stored deployment is missing or incompatible, the installer stops with a
+diagnostic. It does not clear installer state, delete the deployment, or create
+a replacement automatically. Repair or replacement is an explicit operator
+action so an unrelated deployment cannot be silently substituted.
+
 The owner-only bootstrap:
 
 - reads the complete private payload from the installation-owned Secret
