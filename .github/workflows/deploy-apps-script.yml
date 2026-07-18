@@ -30,6 +30,12 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq shellcheck
+          npm install --global markdownlint-cli@0.47.0
+
       - name: Run validation
         run: make check
 
@@ -42,6 +48,8 @@ jobs:
           CLASP_PROJECT_JSON: ${{ secrets.CLASP_PROJECT_JSON }}
         run: |
           set -euo pipefail
+          test -n "$CLASP_AUTH_JSON"
+          test -n "$CLASP_PROJECT_JSON"
           auth_dir="$RUNNER_TEMP/clasp-auth"
           mkdir -m 700 "$auth_dir"
           printf '%s' "$CLASP_AUTH_JSON" > "$auth_dir/.clasprc.json"
@@ -52,10 +60,13 @@ jobs:
       - name: Push source and update deployment
         env:
           APPS_SCRIPT_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          test -n "$APPS_SCRIPT_DEPLOYMENT_ID"
+          test -n "$MERGE_COMMIT_SHA"
           auth_dir="$RUNNER_TEMP/clasp-auth"
-          version_label="main-${GITHUB_SHA::12}"
+          version_label="main-${MERGE_COMMIT_SHA::12}"
           clasp -A "$auth_dir" push --force
           version_id="$(clasp -A "$auth_dir" version "$version_label" | awk 'NF { value=$NF } END { print value }')"
           test -n "$version_id"
@@ -63,4 +74,3 @@ jobs:
             --deploymentId "$APPS_SCRIPT_DEPLOYMENT_ID" \
             --versionNumber "$version_id" \
             --description "$version_label"
-
