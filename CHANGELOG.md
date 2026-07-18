@@ -12,11 +12,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 #### Deployment automation
 
 - Pull-request validation with `make check` before merging into `main`.
-- Automatic Apps Script source deployment after a pull request is merged into
-  `main`.
-- Numbered Apps Script versions labelled with the merged commit SHA and updates
-  to a stable deployment ID without recreating the Apps Script project,
-  triggers, Script Properties, or Google resources.
+- Automatic Apps Script source deployment when an approved pull request updates
+  protected `main`, with serialized execution, stale-run detection, and target
+  verification before mutation.
+- Project HEAD updates for installable triggers plus numbered Apps Script
+  versions labelled with the merged commit SHA and updates to the stable,
+  owner-only API executable deployment.
+- Preservation of the installation-specific Apps Script time zone during source
+  upload without recreating triggers, Script Properties, or Google resources.
 - Production GitHub Actions concurrency control and isolated deployment secrets
   documented in the deployment guide.
 

@@ -426,12 +426,17 @@ Both are required.
 
 ## Desktop OAuth client
 
-In the project-specific Google Auth client page opened by the installer:
+Open [Google Auth Platform > Clients](https://console.cloud.google.com/auth/clients),
+select the installation's Cloud project, then:
 
 1. Select **Create client**.
 2. Choose **Desktop app**.
 3. Download the JSON file.
 4. Pass its path through `GDUC_OAUTH_CLIENT_JSON` on resume.
+
+Google's [OAuth guide for desktop
+applications](https://developers.google.com/identity/protocols/oauth2/native-app)
+documents the underlying authorization flow.
 
 The installer rejects a client whose ID does not start with the selected Cloud
 project number. Keep the JSON private, save it with the other project secrets

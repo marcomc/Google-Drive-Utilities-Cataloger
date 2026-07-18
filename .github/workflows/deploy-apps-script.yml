@@ -1,8 +1,7 @@
 name: Deploy Apps Script
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches:
       - main
 
@@ -15,18 +14,17 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     environment: production
 
     steps:
-      - name: Check out merged revision
-        uses: actions/checkout@v4
+      - name: Check out main revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
 
@@ -50,6 +48,12 @@ jobs:
           set -euo pipefail
           test -n "$CLASP_AUTH_JSON"
           test -n "$CLASP_PROJECT_JSON"
+          jq -e 'type == "object"' <<<"$CLASP_AUTH_JSON" >/dev/null
+          jq -e '
+            type == "object" and
+            (.scriptId | type == "string" and length > 0) and
+            .rootDir == "."
+          ' <<<"$CLASP_PROJECT_JSON" >/dev/null
           auth_dir="$RUNNER_TEMP/clasp-auth"
           mkdir -m 700 "$auth_dir"
           printf '%s' "$CLASP_AUTH_JSON" > "$auth_dir/.clasprc.json"
@@ -57,20 +61,8 @@ jobs:
           printf '%s' "$CLASP_PROJECT_JSON" > .clasp.json
           chmod 600 .clasp.json
 
-      - name: Push source and update deployment
+      - name: Verify target, preserve manifest, and deploy
         env:
           APPS_SCRIPT_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
-          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-        run: |
-          set -euo pipefail
-          test -n "$APPS_SCRIPT_DEPLOYMENT_ID"
-          test -n "$MERGE_COMMIT_SHA"
-          auth_dir="$RUNNER_TEMP/clasp-auth"
-          version_label="main-${MERGE_COMMIT_SHA::12}"
-          clasp -A "$auth_dir" push --force
-          version_id="$(clasp -A "$auth_dir" version "$version_label" | awk 'NF { value=$NF } END { print value }')"
-          test -n "$version_id"
-          clasp -A "$auth_dir" deploy \
-            --deploymentId "$APPS_SCRIPT_DEPLOYMENT_ID" \
-            --versionNumber "$version_id" \
-            --description "$version_label"
+          DEPLOY_COMMIT_SHA: ${{ github.sha }}
+        run: ./scripts/deploy-apps-script.sh

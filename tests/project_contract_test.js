@@ -169,8 +169,47 @@ function testLocaleParity() {
   assert.equal(italian.headerAliases.customerCode.includes('codice cliente'), true);
 }
 
+function testDeploymentContract() {
+  const workflow = fs.readFileSync(
+    path.join(projectRoot, '.github/workflows/deploy-apps-script.yml'),
+    'utf8'
+  );
+  const deploymentGuide = fs.readFileSync(
+    path.join(projectRoot, 'docs/DEPLOYMENT.md'),
+    'utf8'
+  );
+
+  assert.match(workflow, /^on:\n  push:\n    branches:\n      - main$/m);
+  assert.doesNotMatch(workflow, /pull_request:/);
+  const deployScript = fs.readFileSync(
+    path.join(projectRoot, 'scripts/deploy-apps-script.sh'),
+    'utf8'
+  );
+  assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /run: \.\/scripts\/deploy-apps-script\.sh/);
+  assert.match(deployScript, /A newer main revision exists; skipping stale deployment/);
+  assert.match(deployScript, /--json deployments/);
+  assert.match(deployScript, /remote_time_zone=/);
+  assert.match(deployScript, /--json version/);
+  assert.match(deployScript, /--json deploy/);
+  assert.ok(
+    deployScript.indexOf('--json deployments') < deployScript.indexOf('push --force'),
+    'deployment ownership must be checked before pushing source'
+  );
+  assert.ok(
+    deployScript.indexOf('remote_time_zone=') < deployScript.indexOf('push --force'),
+    'the installation time zone must be preserved before pushing source'
+  );
+  assert.match(
+    deploymentGuide,
+    /installable triggers[\s\S]{0,80}execute the\s+project HEAD/i
+  );
+  assert.match(deploymentGuide, /owner-only API executable/);
+}
+
 testCommittedJsonAndRuntimeConfig();
 testNormalizedConfigurationCollisions();
 testLocaleParity();
+testDeploymentContract();
 
 console.log('Project contract tests passed.');

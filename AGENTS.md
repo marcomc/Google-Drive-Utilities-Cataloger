@@ -23,6 +23,10 @@
 - Create `clasp` projects outside the source checkout. Move only the required
   local configuration into the repository, and do not publish generated
   `.clasp.json` files.
+- Before an automated `clasp push`, verify that the configured deployment ID
+  belongs to the target script, preserve installation-specific manifest values,
+  and distinguish project HEAD used by installable triggers from the versioned
+  API executable deployment.
 - Emit concise, structured progress logs for trigger receipt, lock outcome,
   scan scope, per-file result, notification result, and run completion. Do not
   log credentials, recipients, filenames, document text, or extracted values.
