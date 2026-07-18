@@ -338,8 +338,7 @@ function testTimeZoneReconfigurationPreservesCredentialsAndTriggers() {
   const stored = {
     SPREADSHEET_ID: 'spreadsheet-id',
     AUTOMATION_CONFIG_JSON: JSON.stringify({
-      locale: 'en',
-      time_zone: 'Europe/Rome'
+      locale: 'en'
     }),
     TIME_ZONE_RECONFIGURATION: JSON.stringify({
       transactionId: 'transaction-1',
@@ -522,6 +521,10 @@ function testTimeZoneTransactionLifecycle() {
   });
   assert.equal(first.transactionId, 'transaction-1');
   assert.equal(first.previousTimeZone, 'Europe/Rome');
+  assert.equal(
+    JSON.parse(stored.AUTOMATION_CONFIG_JSON).time_zone,
+    'Europe/Rome'
+  );
   assert.equal(resumed.transactionId, first.transactionId);
   assert.throws(
     () => context.beginCatalogerTimeZoneReconfiguration({

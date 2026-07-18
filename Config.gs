@@ -229,11 +229,14 @@ function getAutomationConfig_() {
     throw new Error('AUTOMATION_CONFIG_JSON does not contain valid JSON: ' + error.message);
   }
 
-  validateAutomationConfig_(automationConfig);
+  validateAutomationConfig_(automationConfig, {
+    allowLegacyMissingTimeZone: true
+  });
   return automationConfig;
 }
 
-function validateAutomationConfig_(automationConfig) {
+function validateAutomationConfig_(automationConfig, options) {
+  const validationOptions = options || {};
   if (!automationConfig || typeof automationConfig !== 'object' ||
     Array.isArray(automationConfig)) {
     throw new Error('AUTOMATION_CONFIG_JSON must contain an object.');
@@ -244,7 +247,14 @@ function validateAutomationConfig_(automationConfig) {
       'AUTOMATION_CONFIG_JSON exceeds the safe 8 KiB Script Property limit.'
     );
   }
-  if (!isValidIanaTimeZone_(automationConfig.time_zone)) {
+  const hasTimeZone = Object.prototype.hasOwnProperty.call(
+    automationConfig,
+    'time_zone'
+  );
+  if (
+    (!hasTimeZone && !validationOptions.allowLegacyMissingTimeZone) ||
+    (hasTimeZone && !isValidIanaTimeZone_(automationConfig.time_zone))
+  ) {
     throw new Error(
       'AUTOMATION_CONFIG_JSON time_zone must be a valid IANA time zone.'
     );

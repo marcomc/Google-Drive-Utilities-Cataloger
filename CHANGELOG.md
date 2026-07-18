@@ -23,6 +23,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Live-baseline maintenance transactions that pause catalog processing during
   reconfiguration and preserve installed remote source files while changing
   only the manifest timezone.
+- Backward-compatible migration of pre-timezone runtime configuration from the
+  existing spreadsheet timezone, without interrupting scheduled processing.
 
 #### Deployment automation
 

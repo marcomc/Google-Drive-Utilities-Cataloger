@@ -116,10 +116,23 @@ function beginCatalogerTimeZoneReconfigurationUnlocked_(options) {
   } catch (error) {
     throw new Error('Installed automation configuration is invalid JSON.');
   }
-  validateAutomationConfig_(automationConfig);
+  const legacyConfigNeedsTimeZone = !Object.prototype.hasOwnProperty.call(
+    automationConfig,
+    'time_zone'
+  );
+  validateAutomationConfig_(automationConfig, {
+    allowLegacyMissingTimeZone: true
+  });
   const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
   const previousTimeZone = spreadsheet.getSpreadsheetTimeZone();
-  if (automationConfig.time_zone !== previousTimeZone) {
+  if (legacyConfigNeedsTimeZone) {
+    automationConfig.time_zone = previousTimeZone;
+    validateAutomationConfig_(automationConfig);
+    properties.setProperty(
+      CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON,
+      JSON.stringify(automationConfig)
+    );
+  } else if (automationConfig.time_zone !== previousTimeZone) {
     throw new Error(
       'Installed spreadsheet and automation configuration time zones diverge.'
     );

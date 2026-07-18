@@ -167,6 +167,23 @@ function testNormalizedConfigurationCollisions() {
   );
   assert.throws(
     () => context.validateAutomationConfig_(mutate((config) => {
+      delete config.time_zone;
+    })),
+    /valid IANA time zone/
+  );
+  assert.doesNotThrow(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      delete config.time_zone;
+    }), { allowLegacyMissingTimeZone: true })
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
+      config.time_zone = 'Europe/Not-A-Zone';
+    }), { allowLegacyMissingTimeZone: true }),
+    /valid IANA time zone/
+  );
+  assert.throws(
+    () => context.validateAutomationConfig_(mutate((config) => {
       config.time_zone = 'Europe/Not-A-Zone';
     })),
     /valid IANA time zone/
