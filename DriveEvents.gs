@@ -1,3 +1,9 @@
+const AUTOMATION_TRIGGER_HANDLERS = Object.freeze([
+  'runDailyUtilitiesCataloging',
+  'processDriveEventQueue',
+  'renewDriveEventSubscription'
+]);
+
 /**
  * Install the daily run, the Pub/Sub event poller and the event-subscription
  * renewal trigger. This does not create Cloud resources by itself.
@@ -5,48 +11,80 @@
 function installAutomationTriggers() {
   return withCatalogLifecycleLock_('install-triggers', function () {
     return installAutomationTriggersUnlocked_();
-  });
+  }, CONFIG.MAX_RUNTIME_MS);
 }
 
 function installAutomationTriggersUnlocked_() {
   assertCatalogConfiguration_();
-  removeTriggersFor_('runDailyUtilitiesCataloging');
-  removeTriggersFor_('processDriveEventQueue');
-  removeTriggersFor_('renewDriveEventSubscription');
+  const existing = getManagedAutomationTriggers_();
+  const created = [];
+  try {
+    created.push(ScriptApp.newTrigger('runDailyUtilitiesCataloging')
+      .timeBased()
+      .everyDays(1)
+      .atHour(CONFIG.DAILY_TRIGGER_HOUR)
+      .create());
+    created.push(ScriptApp.newTrigger('processDriveEventQueue')
+      .timeBased()
+      .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
+      .create());
+    created.push(ScriptApp.newTrigger('renewDriveEventSubscription')
+      .timeBased()
+      .everyHours(6)
+      .create());
+  } catch (error) {
+    const cleanupFailures = [];
+    created.forEach(function (trigger) {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+      } catch (cleanupError) {
+        cleanupFailures.push(trigger.getHandlerFunction() + ': ' + cleanupError.message);
+      }
+    });
+    if (cleanupFailures.length > 0) {
+      error.message += ' Replacement trigger cleanup also failed: ' +
+        cleanupFailures.join('; ');
+    }
+    throw error;
+  }
+  existing.forEach(function (trigger) { ScriptApp.deleteTrigger(trigger); });
 
-  ScriptApp.newTrigger('runDailyUtilitiesCataloging')
-    .timeBased()
-    .everyDays(1)
-    .atHour(CONFIG.DAILY_TRIGGER_HOUR)
-    .create();
-  ScriptApp.newTrigger('processDriveEventQueue')
-    .timeBased()
-    .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
-    .create();
-  ScriptApp.newTrigger('renewDriveEventSubscription')
-    .timeBased()
-    .everyHours(6)
-    .create();
-
-  return getSetupStatus();
+  return Object.assign({}, getSetupStatus(), getAutomationTriggerStatus_());
 }
 
 function removeAutomationTriggers() {
   return withCatalogLifecycleLock_('remove-triggers', function () {
-    [
-      'runDailyUtilitiesCataloging',
-      'processDriveEventQueue',
-      'renewDriveEventSubscription'
-    ].forEach(removeTriggersFor_);
+    getManagedAutomationTriggers_().forEach(function (trigger) {
+      ScriptApp.deleteTrigger(trigger);
+    });
   });
 }
 
-function removeTriggersFor_(handlerFunction) {
-  ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === handlerFunction) {
-      ScriptApp.deleteTrigger(trigger);
-    }
+function getManagedAutomationTriggers_() {
+  return ScriptApp.getProjectTriggers().filter(function (trigger) {
+    return AUTOMATION_TRIGGER_HANDLERS.indexOf(trigger.getHandlerFunction()) >= 0;
   });
+}
+
+function getAutomationTriggerStatus_() {
+  const triggerCounts = AUTOMATION_TRIGGER_HANDLERS.reduce(function (counts, handler) {
+    counts[handler] = 0;
+    return counts;
+  }, {});
+  getManagedAutomationTriggers_().forEach(function (trigger) {
+    triggerCounts[trigger.getHandlerFunction()] += 1;
+  });
+  const missingTriggerHandlers = AUTOMATION_TRIGGER_HANDLERS.filter(function (handler) {
+    return triggerCounts[handler] === 0;
+  });
+  const duplicateTriggerHandlers = AUTOMATION_TRIGGER_HANDLERS.filter(function (handler) {
+    return triggerCounts[handler] > 1;
+  });
+  return {
+    triggerCounts: triggerCounts,
+    missingTriggerHandlers: missingTriggerHandlers,
+    duplicateTriggerHandlers: duplicateTriggerHandlers
+  };
 }
 
 /**
@@ -367,9 +405,9 @@ function isCloudHttpStatus_(error, statusCode) {
   return Number(error && error.cloudHttpStatus) === statusCode;
 }
 
-function withCatalogLifecycleLock_(operation, callback) {
+function withCatalogLifecycleLock_(operation, callback, timeoutMs) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) {
+  if (!lock.tryLock(timeoutMs || 10000)) {
     throw new Error('Another catalog operation is already running: ' + operation);
   }
   try {

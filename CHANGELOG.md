@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-07-19
+
+### Fixed
+
+- Create all three replacement triggers before deleting the existing managed
+  automation, preserving the previous schedule if replacement fails.
+- Report managed trigger counts and wait for active catalog processing before
+  deployment-time trigger reconciliation.
+- Rebind managed triggers through the promoted stable API executable so they
+  cannot remain associated with the preceding source version.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added

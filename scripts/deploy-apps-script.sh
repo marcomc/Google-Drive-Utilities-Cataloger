@@ -120,3 +120,33 @@ if [[ "${post_entry_points}" != "${pre_entry_points}" ]]; then
     "The Apps Script deployment entry points changed during the update." >&2
   exit 1
 fi
+
+# Installable triggers keep the source version used to create them. Recreate
+# only the managed triggers through the exact stable executable after promotion.
+trigger_operation_json=""
+# Helpers explicitly check each fallible command; callers branch for diagnostics.
+# shellcheck disable=SC2310
+if ! run_apps_script_function \
+  "${auth_file}" \
+  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  installAutomationTriggers \
+  trigger_operation_json; then
+  printf '%s\n' \
+    "The deployment was promoted but managed trigger reconciliation failed." >&2
+  exit 1
+fi
+if ! jq -e '
+  .done == true and
+  .error == null and
+  .response["@type"] ==
+    "type.googleapis.com/google.apps.script.v1.ExecutionResponse" and
+  .response.result.triggerCounts.runDailyUtilitiesCataloging == 1 and
+  .response.result.triggerCounts.processDriveEventQueue == 1 and
+  .response.result.triggerCounts.renewDriveEventSubscription == 1 and
+  .response.result.missingTriggerHandlers == [] and
+  .response.result.duplicateTriggerHandlers == []
+' <<<"${trigger_operation_json}" >/dev/null; then
+  printf '%s\n' \
+    "Managed trigger reconciliation returned an invalid execution result." >&2
+  exit 1
+fi

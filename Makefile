@@ -51,12 +51,14 @@ test: ## Run installer helper and Apps Script tests
 	@node --check scripts/validate-config.js
 	@node --check scripts/validate-apps-script.js
 	@node --check tests/apps_script_installer_test.js
+	@node --check tests/automation_status_test.js
 	@node --check tests/drive_events_transport_test.js
 	@node --check tests/project_contract_test.js
 	@node --check tests/utilities_cataloging_test.js
 	@node scripts/validate-apps-script.js
 	@node scripts/list-locales.js >/dev/null
 	@node tests/apps_script_installer_test.js
+	@node tests/automation_status_test.js
 	@node tests/drive_events_transport_test.js
 	@node tests/project_contract_test.js
 	@node tests/utilities_cataloging_test.js

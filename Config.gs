@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.1.0',
+  APP_VERSION: '0.1.1',
   DEFAULT_MODEL: 'gemini-3.5-flash',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,

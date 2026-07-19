@@ -146,12 +146,13 @@ The update has two related but distinct effects:
 
 | Runtime path | Source used after deployment |
 | --- | --- |
-| Daily, Pub/Sub poll, and subscription-renewal installable triggers | Project HEAD uploaded by `clasp push`. |
+| Daily, Pub/Sub poll, and subscription-renewal installable triggers | The numbered stable version through which deployment recreates them. |
 | Owner-only installer calls through the Apps Script Execution API | The numbered version selected by `APPS_SCRIPT_DEPLOYMENT_ID`. |
 
-The deployment ID does not control the installable triggers. They execute the
-project HEAD. Updating the stable deployment keeps the owner-only API executable
-on the same source revision as those triggers.
+Installable triggers retain the source version used to create them. After
+moving the stable deployment, the workflow invokes `installAutomationTriggers`
+through that exact non-development executable. It creates all replacements
+before deleting the prior managed triggers and verifies one trigger per handler.
 
 ## What the deployment installs
 
@@ -163,6 +164,7 @@ merge commit to the configured Apps Script project:
 | Apps Script source | Uploads root and `locales/` `.gs` files plus `appsscript.json` through `clasp push`. |
 | Apps Script version | Creates a numbered version labelled with the merged commit SHA. |
 | API executable | Moves `APPS_SCRIPT_DEPLOYMENT_ID` to the new numbered version. |
+| Managed triggers | Recreates the daily, event-poll, and renewal triggers through the promoted stable executable. |
 | Manifest time zone | Reads and preserves the target project's current `timeZone` before upload. |
 
 The stable API executable deployment ID is preserved. Before `clasp push`, the
@@ -188,7 +190,7 @@ modify:
 | --- | --- |
 | Apps Script project | Must already exist; its identity and deployment are validated before upload. |
 | Script Properties | Not changed. Existing installation-specific values remain in Apps Script. |
-| Apps Script triggers | Not created, removed, or changed; existing triggers run the new project HEAD. |
+| Unmanaged Apps Script triggers | Not created, removed, or changed; only the three cataloger handlers are reconciled. |
 | Drive folders and files | Not created, moved, renamed, or scanned. |
 | Google Sheets | Not created or modified. |
 | Pub/Sub and Workspace Events | Not changed by the workflow itself. After deployment, the scheduled renewal handler can replace an explicitly inaccessible Workspace Events subscription; mismatched Pub/Sub names fail closed. |
@@ -213,8 +215,8 @@ and that its stable deployment ID is known.
 The workflow runs when protected `main` advances. It checks out that revision,
 runs `make check`, rejects stale runs, validates the target project and API
 deployment, preserves the live manifest time zone, pushes source with the
-pinned `clasp` version, creates a numbered version, and moves the stable API
-executable to that version.
+pinned `clasp` version, creates a numbered version, moves the stable API
+executable to that version, and reconciles the three managed triggers.
 
 ```mermaid
 flowchart LR
@@ -228,11 +230,11 @@ flowchart LR
   target --> preflight["GET deployment: script ID and EXECUTION_API / MYSELF"]
   preflight --> manifest["Preserve live time zone"]
   manifest --> push["clasp push to project HEAD"]
-  push --> triggers["Installable triggers use HEAD"]
   push --> version["Create numbered version"]
   version --> deploy["Update stable API executable"]
   deploy --> postflight["GET deployment: version and unchanged entry points"]
-  postflight --> api["Owner-only installer calls"]
+  postflight --> triggers["Recreate three managed triggers through stable API"]
+  triggers --> api["Owner-only installer calls"]
 ```
 
 Therefore an approval alone never deploys code, and closing a pull request
@@ -258,10 +260,11 @@ triggers can temporarily run the new HEAD while the API executable remains on
 the previous numbered version.
 
 When the failed run is still the current `main` revision, re-run that workflow;
-its preflight verifies the target again and aligns both runtime paths. If source
-must be rolled back, merge a revert pull request. The resulting `main` push
-uploads the reverted source to HEAD, creates a new immutable version, and moves
-the stable API executable to that matching version.
+its preflight verifies the target again, aligns both runtime paths, and repairs
+the managed triggers. If source must be rolled back, merge a revert pull
+request. The resulting `main` push uploads the reverted source to HEAD, creates
+a new immutable version, moves the stable API executable to that matching
+version, and recreates the managed triggers.
 
 After recovery, use one temporary authorization to rerun the complete API
 validation and derive the Executions URL. The cleanup trap removes it on both
