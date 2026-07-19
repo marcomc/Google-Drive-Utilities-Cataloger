@@ -106,6 +106,19 @@ events.length = 0;
 context.installAutomationTriggers();
 assert.deepEqual(events, []);
 
+scriptProperties.delete('AUTOMATION_TRIGGER_SCHEDULES');
+events.length = 0;
+context.installAutomationTriggers();
+assert.deepEqual(events, []);
+assert.deepEqual(
+  JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES')),
+  {
+    runDailyUtilitiesCataloging: { frequency: 'daily', hour: 7 },
+    processDriveEventQueue: { frequency: 'minutes', interval: 15 },
+    renewDriveEventSubscription: { frequency: 'hours', interval: 6 }
+  }
+);
+
 const storedSchedules = JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES'));
 storedSchedules.processDriveEventQueue = { frequency: 'minutes', interval: 5 };
 scriptProperties.set('AUTOMATION_TRIGGER_SCHEDULES', JSON.stringify(storedSchedules));

@@ -28,7 +28,8 @@ function installAutomationTriggersUnlocked_() {
     const schedule = getAutomationTriggerSchedule_(handler);
     if (triggersByHandler[handler].length === 0) {
       createManagedAutomationTrigger_(handler, schedule);
-    } else if (!sameAutomationTriggerSchedule_(storedSchedules[handler], schedule)) {
+    } else if (Object.prototype.hasOwnProperty.call(storedSchedules, handler) &&
+      !sameAutomationTriggerSchedule_(storedSchedules[handler], schedule)) {
       replaceManagedAutomationTrigger_(triggersByHandler[handler][0], handler, schedule);
     }
     storedSchedules[handler] = schedule;

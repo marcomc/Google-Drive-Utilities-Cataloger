@@ -61,8 +61,9 @@
   every trigger or transport mutation with the lifecycle lock.
 - Because Apps Script trigger metadata does not expose its cadence, persist each
   managed trigger's canonical desired schedule. On reconciliation, preserve a
-  matching trigger and replace only a changed schedule; test fresh install,
-  unchanged reconciliation, schedule changes, and replacement cleanup failure.
+  matching or legacy trigger and replace only a changed recorded schedule; test
+  fresh install, legacy baseline migration, unchanged reconciliation, schedule
+  changes, and replacement cleanup failure.
 - Write untrusted spreadsheet text as literal rich text. Reject normalized
   duplicate headers and never overwrite formula-backed columns.
 - When inserting template rows, copy formulas with range-level formula paste so

@@ -133,7 +133,9 @@ in this repository.
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
 redeploy the Apps Script project; then run `installAutomationTriggers` to
-refresh the managed trigger when its stored schedule differs.
+refresh the managed trigger when its stored schedule differs. On the first
+post-upgrade run, the cataloger records existing triggers as the schedule
+baseline without recreating them.
 
 | Choice | Effect |
 | --- | --- |
