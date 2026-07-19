@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-07-19
+
+### Fixed
+
+- Reconcile managed triggers by removing duplicates and adding only missing
+  schedules, without replacing healthy triggers.
+- Report managed trigger counts and wait for active catalog processing before
+  trigger reconciliation.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added

@@ -27,6 +27,9 @@
   belongs to the target script, preserve installation-specific manifest values,
   and distinguish project HEAD used by installable triggers from the versioned
   API executable deployment.
+- Do not use Apps Script Execution API calls to create or remove installable
+  triggers: that API cannot manage triggers, and existing installable triggers
+  execute the project HEAD rather than the API executable's pinned version.
 - When an installer must temporarily modify a tracked manifest before a remote
   push, isolate the mutation in a subshell: create and validate the backup
   before mutation, restore it with an `EXIT` and signal trap, and clean up
@@ -56,6 +59,11 @@
   unconfigured no-op where appropriate, and reject partial or mismatched state.
 - Serialize every processing entry point with the shared processing lock and
   every trigger or transport mutation with the lifecycle lock.
+- Because Apps Script trigger metadata does not expose its cadence, persist each
+  managed trigger's canonical desired schedule. On reconciliation, preserve a
+  matching or legacy trigger and replace only a changed recorded schedule; test
+  fresh install, legacy baseline migration, unchanged reconciliation, schedule
+  changes, and replacement cleanup failure.
 - Write untrusted spreadsheet text as literal rich text. Reject normalized
   duplicate headers and never overwrite formula-backed columns.
 - When inserting template rows, copy formulas with range-level formula paste so

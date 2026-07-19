@@ -1,3 +1,9 @@
+const AUTOMATION_TRIGGER_HANDLERS = Object.freeze([
+  'runDailyUtilitiesCataloging',
+  'processDriveEventQueue',
+  'renewDriveEventSubscription'
+]);
+
 /**
  * Install the daily run, the Pub/Sub event poller and the event-subscription
  * renewal trigger. This does not create Cloud resources by itself.
@@ -5,48 +11,150 @@
 function installAutomationTriggers() {
   return withCatalogLifecycleLock_('install-triggers', function () {
     return installAutomationTriggersUnlocked_();
-  });
+  }, CONFIG.MAX_RUNTIME_MS);
 }
 
 function installAutomationTriggersUnlocked_() {
   assertCatalogConfiguration_();
-  removeTriggersFor_('runDailyUtilitiesCataloging');
-  removeTriggersFor_('processDriveEventQueue');
-  removeTriggersFor_('renewDriveEventSubscription');
+  const properties = PropertiesService.getScriptProperties();
+  const storedSchedules = getStoredAutomationTriggerSchedules_(properties);
+  const triggersByHandler = getManagedAutomationTriggersByHandler_();
+  AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
+    triggersByHandler[handler].slice(1).forEach(function (trigger) {
+      ScriptApp.deleteTrigger(trigger);
+    });
+  });
+  AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
+    const schedule = getAutomationTriggerSchedule_(handler);
+    if (triggersByHandler[handler].length === 0) {
+      createManagedAutomationTrigger_(handler, schedule);
+    } else if (Object.prototype.hasOwnProperty.call(storedSchedules, handler) &&
+      !sameAutomationTriggerSchedule_(storedSchedules[handler], schedule)) {
+      replaceManagedAutomationTrigger_(triggersByHandler[handler][0], handler, schedule);
+    }
+    storedSchedules[handler] = schedule;
+    properties.setProperty(
+      CONFIG.PROPERTY_KEYS.AUTOMATION_TRIGGER_SCHEDULES,
+      JSON.stringify(storedSchedules)
+    );
+  });
 
-  ScriptApp.newTrigger('runDailyUtilitiesCataloging')
-    .timeBased()
-    .everyDays(1)
-    .atHour(CONFIG.DAILY_TRIGGER_HOUR)
-    .create();
-  ScriptApp.newTrigger('processDriveEventQueue')
-    .timeBased()
-    .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
-    .create();
-  ScriptApp.newTrigger('renewDriveEventSubscription')
-    .timeBased()
-    .everyHours(6)
-    .create();
+  return Object.assign({}, getSetupStatus(), getAutomationTriggerStatus_());
+}
 
-  return getSetupStatus();
+function getAutomationTriggerSchedule_(handler) {
+  switch (handler) {
+    case 'runDailyUtilitiesCataloging':
+      return { frequency: 'daily', hour: CONFIG.DAILY_TRIGGER_HOUR };
+    case 'processDriveEventQueue':
+      return { frequency: 'minutes', interval: CONFIG.EVENT_POLL_MINUTES };
+    case 'renewDriveEventSubscription':
+      return { frequency: 'hours', interval: 6 };
+    default:
+      throw new Error('Unknown managed trigger handler: ' + handler);
+  }
+}
+
+function createManagedAutomationTrigger_(handler, schedule) {
+  switch (schedule.frequency) {
+    case 'daily':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyDays(1)
+        .atHour(schedule.hour)
+        .create();
+    case 'minutes':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyMinutes(schedule.interval)
+        .create();
+    case 'hours':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyHours(schedule.interval)
+        .create();
+    default:
+      throw new Error('Unknown managed trigger schedule for: ' + handler);
+  }
+}
+
+function replaceManagedAutomationTrigger_(existing, handler, schedule) {
+  const replacement = createManagedAutomationTrigger_(handler, schedule);
+  try {
+    ScriptApp.deleteTrigger(existing);
+  } catch (error) {
+    try {
+      ScriptApp.deleteTrigger(replacement);
+    } catch (cleanupError) {
+      error.message += ' Replacement trigger cleanup also failed: ' + cleanupError.message;
+    }
+    throw error;
+  }
 }
 
 function removeAutomationTriggers() {
   return withCatalogLifecycleLock_('remove-triggers', function () {
-    [
-      'runDailyUtilitiesCataloging',
-      'processDriveEventQueue',
-      'renewDriveEventSubscription'
-    ].forEach(removeTriggersFor_);
+    getManagedAutomationTriggers_().forEach(function (trigger) {
+      ScriptApp.deleteTrigger(trigger);
+    });
   });
 }
 
-function removeTriggersFor_(handlerFunction) {
-  ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === handlerFunction) {
-      ScriptApp.deleteTrigger(trigger);
-    }
+function getManagedAutomationTriggers_() {
+  return ScriptApp.getProjectTriggers().filter(function (trigger) {
+    return AUTOMATION_TRIGGER_HANDLERS.indexOf(trigger.getHandlerFunction()) >= 0;
   });
+}
+
+function getManagedAutomationTriggersByHandler_() {
+  const triggersByHandler = AUTOMATION_TRIGGER_HANDLERS.reduce(function (triggers, handler) {
+    triggers[handler] = [];
+    return triggers;
+  }, {});
+  getManagedAutomationTriggers_().forEach(function (trigger) {
+    triggersByHandler[trigger.getHandlerFunction()].push(trigger);
+  });
+  return triggersByHandler;
+}
+
+function getStoredAutomationTriggerSchedules_(properties) {
+  const serialized = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.AUTOMATION_TRIGGER_SCHEDULES
+  );
+  if (!serialized) {
+    return {};
+  }
+  try {
+    const schedules = JSON.parse(serialized);
+    return schedules && typeof schedules === 'object' ? schedules : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function sameAutomationTriggerSchedule_(stored, expected) {
+  return JSON.stringify(stored) === JSON.stringify(expected);
+}
+
+function getAutomationTriggerStatus_() {
+  const triggerCounts = AUTOMATION_TRIGGER_HANDLERS.reduce(function (counts, handler) {
+    counts[handler] = 0;
+    return counts;
+  }, {});
+  getManagedAutomationTriggers_().forEach(function (trigger) {
+    triggerCounts[trigger.getHandlerFunction()] += 1;
+  });
+  const missingTriggerHandlers = AUTOMATION_TRIGGER_HANDLERS.filter(function (handler) {
+    return triggerCounts[handler] === 0;
+  });
+  const duplicateTriggerHandlers = AUTOMATION_TRIGGER_HANDLERS.filter(function (handler) {
+    return triggerCounts[handler] > 1;
+  });
+  return {
+    triggerCounts: triggerCounts,
+    missingTriggerHandlers: missingTriggerHandlers,
+    duplicateTriggerHandlers: duplicateTriggerHandlers
+  };
 }
 
 /**
@@ -367,9 +475,9 @@ function isCloudHttpStatus_(error, statusCode) {
   return Number(error && error.cloudHttpStatus) === statusCode;
 }
 
-function withCatalogLifecycleLock_(operation, callback) {
+function withCatalogLifecycleLock_(operation, callback, timeoutMs) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) {
+  if (!lock.tryLock(timeoutMs || 10000)) {
     throw new Error('Another catalog operation is already running: ' + operation);
   }
   try {

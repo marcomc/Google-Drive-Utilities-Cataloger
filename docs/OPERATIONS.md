@@ -133,7 +133,9 @@ in this repository.
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
 redeploy the Apps Script project; then run `installAutomationTriggers` to
-replace the existing poll trigger.
+refresh the managed trigger when its stored schedule differs. On the first
+post-upgrade run, the cataloger records existing triggers as the schedule
+baseline without recreating them.
 
 | Choice | Effect |
 | --- | --- |
@@ -186,7 +188,8 @@ applied to invoice, contract, or customer identifiers.
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
 
 After a transport repair, run `installAutomationTriggers` to restore all three
-triggers. It removes and recreates only the cataloger's matching triggers.
+triggers. It preserves matching schedules, removes duplicates, and refreshes
+only handlers whose stored cadence differs from the deployed source.
 
 ### CLI health check
 

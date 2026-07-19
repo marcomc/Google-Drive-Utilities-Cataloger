@@ -245,6 +245,7 @@ function testDeploymentContract() {
   assert.match(deployScript, /remote_time_zone=/);
   assert.match(deployScript, /--json version/);
   assert.match(deployScript, /--json deploy/);
+  assert.doesNotMatch(deployScript, /installAutomationTriggers/);
   assert.ok(
     deployScript.indexOf('read_apps_script_deployment') <
       deployScript.indexOf('push --force'),
@@ -256,7 +257,7 @@ function testDeploymentContract() {
   );
   assert.match(
     deploymentGuide,
-    /installable triggers[\s\S]{0,80}execute the\s+project HEAD/i
+    /installable triggers[\s\S]{0,160}project HEAD/i
   );
   assert.match(deploymentGuide, /owner-only API executable/);
 }

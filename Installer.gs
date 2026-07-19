@@ -331,21 +331,7 @@ function validateCatalogerInstallation() {
   validateInstallerConfiguredSheets_();
   getSheetHeadersBySupply_();
 
-  const expectedHandlers = [
-    'runDailyUtilitiesCataloging',
-    'processDriveEventQueue',
-    'renewDriveEventSubscription'
-  ];
-  const triggerHandlers = ScriptApp.getProjectTriggers()
-    .map(function (trigger) { return trigger.getHandlerFunction(); });
-  const missingTriggerHandlers = expectedHandlers.filter(function (handler) {
-    return triggerHandlers.indexOf(handler) < 0;
-  });
-  const duplicateTriggerHandlers = expectedHandlers.filter(function (handler) {
-    return triggerHandlers.filter(function (candidate) {
-      return candidate === handler;
-    }).length > 1;
-  });
+  const triggerStatus = getAutomationTriggerStatus_();
   const setup = getSetupStatus();
   let workspaceEventActive = false;
   let workspaceEventError = '';
@@ -363,10 +349,11 @@ function validateCatalogerInstallation() {
       setup.cloudProjectConfigured &&
       setup.pubSubConfigured &&
       workspaceEventActive &&
-      missingTriggerHandlers.length === 0 &&
-      duplicateTriggerHandlers.length === 0,
-    missingTriggerHandlers: missingTriggerHandlers,
-    duplicateTriggerHandlers: duplicateTriggerHandlers,
+      triggerStatus.missingTriggerHandlers.length === 0 &&
+      triggerStatus.duplicateTriggerHandlers.length === 0,
+    missingTriggerHandlers: triggerStatus.missingTriggerHandlers,
+    duplicateTriggerHandlers: triggerStatus.duplicateTriggerHandlers,
+    triggerCounts: triggerStatus.triggerCounts,
     workspaceEventActive: workspaceEventActive,
     workspaceEventError: workspaceEventError,
     geminiBackend: setup.geminiBackend,
