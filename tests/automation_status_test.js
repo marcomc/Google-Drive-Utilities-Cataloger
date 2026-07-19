@@ -109,11 +109,13 @@ assert.deepEqual(events, []);
 const storedSchedules = JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES'));
 storedSchedules.processDriveEventQueue = { frequency: 'minutes', interval: 5 };
 scriptProperties.set('AUTOMATION_TRIGGER_SCHEDULES', JSON.stringify(storedSchedules));
+const originalPollTriggerId = activeTriggers.find((trigger) =>
+  trigger.getHandlerFunction() === 'processDriveEventQueue').getUniqueId();
 events.length = 0;
 context.installAutomationTriggers();
 assert.deepEqual(events, [
   'create:processDriveEventQueue',
-  'delete:new-processDriveEventQueue-2'
+  `delete:${originalPollTriggerId}`
 ]);
 assert.equal(
   activeTriggers.filter((trigger) =>
@@ -124,6 +126,34 @@ assert.deepEqual(
   JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES')).processDriveEventQueue,
   { frequency: 'minutes', interval: 15 }
 );
+
+const refreshedPollTriggerId = activeTriggers.find((trigger) =>
+  trigger.getHandlerFunction() === 'processDriveEventQueue').getUniqueId();
+storedSchedules.processDriveEventQueue = { frequency: 'minutes', interval: 5 };
+scriptProperties.set('AUTOMATION_TRIGGER_SCHEDULES', JSON.stringify(storedSchedules));
+failDeletionFor = refreshedPollTriggerId;
+events.length = 0;
+assert.throws(
+  () => context.installAutomationTriggers(),
+  new RegExp(`cannot delete ${refreshedPollTriggerId}`)
+);
+assert.equal(events[0], 'create:processDriveEventQueue');
+assert.equal(events[1], `delete:${refreshedPollTriggerId}`);
+assert.match(events[2], /^delete:new-processDriveEventQueue-/);
+assert.deepEqual(
+  activeTriggers.filter((trigger) =>
+    trigger.getHandlerFunction() === 'processDriveEventQueue').map((trigger) =>
+    trigger.getUniqueId()),
+  [refreshedPollTriggerId]
+);
+
+failDeletionFor = '';
+events.length = 0;
+context.installAutomationTriggers();
+assert.deepEqual(events, [
+  'create:processDriveEventQueue',
+  `delete:${refreshedPollTriggerId}`
+]);
 
 events.length = 0;
 activeTriggers = [];
@@ -136,8 +166,8 @@ assert.deepEqual(events, [
   'create:runDailyUtilitiesCataloging',
   'create:processDriveEventQueue'
 ]);
-assert.deepEqual(activeTriggers.map((trigger) => trigger.getUniqueId()), [
-  'new-runDailyUtilitiesCataloging-5'
+assert.deepEqual(activeTriggers.map((trigger) => trigger.getHandlerFunction()), [
+  'runDailyUtilitiesCataloging'
 ]);
 
 failCreationFor = '';
