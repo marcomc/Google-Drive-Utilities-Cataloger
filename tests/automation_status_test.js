@@ -13,6 +13,8 @@ let failCreationFor = '';
 let failDeletionFor = '';
 let lockAvailable = true;
 let lockReleases = 0;
+let nextTriggerId = 0;
+const scriptProperties = new Map();
 
 function makeTrigger(handler, id) {
   return {
@@ -26,7 +28,7 @@ function createTrigger(handler) {
   if (handler === failCreationFor) {
     throw new Error(`cannot create ${handler}`);
   }
-  const trigger = makeTrigger(handler, `new-${handler}`);
+  const trigger = makeTrigger(handler, `new-${handler}-${++nextTriggerId}`);
   activeTriggers.push(trigger);
   return trigger;
 }
@@ -65,6 +67,12 @@ const context = vm.createContext({
       },
       releaseLock: () => { lockReleases += 1; }
     })
+  },
+  PropertiesService: {
+    getScriptProperties: () => ({
+      getProperty: (key) => scriptProperties.has(key) ? scriptProperties.get(key) : null,
+      setProperty: (key, value) => scriptProperties.set(key, value)
+    })
   }
 });
 
@@ -98,6 +106,25 @@ events.length = 0;
 context.installAutomationTriggers();
 assert.deepEqual(events, []);
 
+const storedSchedules = JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES'));
+storedSchedules.processDriveEventQueue = { frequency: 'minutes', interval: 5 };
+scriptProperties.set('AUTOMATION_TRIGGER_SCHEDULES', JSON.stringify(storedSchedules));
+events.length = 0;
+context.installAutomationTriggers();
+assert.deepEqual(events, [
+  'create:processDriveEventQueue',
+  'delete:new-processDriveEventQueue-2'
+]);
+assert.equal(
+  activeTriggers.filter((trigger) =>
+    trigger.getHandlerFunction() === 'processDriveEventQueue').length,
+  1
+);
+assert.deepEqual(
+  JSON.parse(scriptProperties.get('AUTOMATION_TRIGGER_SCHEDULES')).processDriveEventQueue,
+  { frequency: 'minutes', interval: 15 }
+);
+
 events.length = 0;
 activeTriggers = [];
 failCreationFor = 'processDriveEventQueue';
@@ -110,7 +137,7 @@ assert.deepEqual(events, [
   'create:processDriveEventQueue'
 ]);
 assert.deepEqual(activeTriggers.map((trigger) => trigger.getUniqueId()), [
-  'new-runDailyUtilitiesCataloging'
+  'new-runDailyUtilitiesCataloging-5'
 ]);
 
 failCreationFor = '';

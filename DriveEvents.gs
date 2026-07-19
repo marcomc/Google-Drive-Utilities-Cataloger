@@ -16,6 +16,8 @@ function installAutomationTriggers() {
 
 function installAutomationTriggersUnlocked_() {
   assertCatalogConfiguration_();
+  const properties = PropertiesService.getScriptProperties();
+  const storedSchedules = getStoredAutomationTriggerSchedules_(properties);
   const triggersByHandler = getManagedAutomationTriggersByHandler_();
   AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
     triggersByHandler[handler].slice(1).forEach(function (trigger) {
@@ -23,34 +25,69 @@ function installAutomationTriggersUnlocked_() {
     });
   });
   AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
+    const schedule = getAutomationTriggerSchedule_(handler);
     if (triggersByHandler[handler].length === 0) {
-      createManagedAutomationTrigger_(handler);
+      createManagedAutomationTrigger_(handler, schedule);
+    } else if (!sameAutomationTriggerSchedule_(storedSchedules[handler], schedule)) {
+      replaceManagedAutomationTrigger_(triggersByHandler[handler][0], handler, schedule);
     }
+    storedSchedules[handler] = schedule;
+    properties.setProperty(
+      CONFIG.PROPERTY_KEYS.AUTOMATION_TRIGGER_SCHEDULES,
+      JSON.stringify(storedSchedules)
+    );
   });
 
   return Object.assign({}, getSetupStatus(), getAutomationTriggerStatus_());
 }
 
-function createManagedAutomationTrigger_(handler) {
+function getAutomationTriggerSchedule_(handler) {
   switch (handler) {
     case 'runDailyUtilitiesCataloging':
+      return { frequency: 'daily', hour: CONFIG.DAILY_TRIGGER_HOUR };
+    case 'processDriveEventQueue':
+      return { frequency: 'minutes', interval: CONFIG.EVENT_POLL_MINUTES };
+    case 'renewDriveEventSubscription':
+      return { frequency: 'hours', interval: 6 };
+    default:
+      throw new Error('Unknown managed trigger handler: ' + handler);
+  }
+}
+
+function createManagedAutomationTrigger_(handler, schedule) {
+  switch (schedule.frequency) {
+    case 'daily':
       return ScriptApp.newTrigger(handler)
         .timeBased()
         .everyDays(1)
-        .atHour(CONFIG.DAILY_TRIGGER_HOUR)
+        .atHour(schedule.hour)
         .create();
-    case 'processDriveEventQueue':
+    case 'minutes':
       return ScriptApp.newTrigger(handler)
         .timeBased()
-        .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
+        .everyMinutes(schedule.interval)
         .create();
-    case 'renewDriveEventSubscription':
+    case 'hours':
       return ScriptApp.newTrigger(handler)
         .timeBased()
-        .everyHours(6)
+        .everyHours(schedule.interval)
         .create();
     default:
-      throw new Error('Unknown managed trigger handler: ' + handler);
+      throw new Error('Unknown managed trigger schedule for: ' + handler);
+  }
+}
+
+function replaceManagedAutomationTrigger_(existing, handler, schedule) {
+  const replacement = createManagedAutomationTrigger_(handler, schedule);
+  try {
+    ScriptApp.deleteTrigger(existing);
+  } catch (error) {
+    try {
+      ScriptApp.deleteTrigger(replacement);
+    } catch (cleanupError) {
+      error.message += ' Replacement trigger cleanup also failed: ' + cleanupError.message;
+    }
+    throw error;
   }
 }
 
@@ -77,6 +114,25 @@ function getManagedAutomationTriggersByHandler_() {
     triggersByHandler[trigger.getHandlerFunction()].push(trigger);
   });
   return triggersByHandler;
+}
+
+function getStoredAutomationTriggerSchedules_(properties) {
+  const serialized = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.AUTOMATION_TRIGGER_SCHEDULES
+  );
+  if (!serialized) {
+    return {};
+  }
+  try {
+    const schedules = JSON.parse(serialized);
+    return schedules && typeof schedules === 'object' ? schedules : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function sameAutomationTriggerSchedule_(stored, expected) {
+  return JSON.stringify(stored) === JSON.stringify(expected);
 }
 
 function getAutomationTriggerStatus_() {
