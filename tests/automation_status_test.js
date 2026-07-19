@@ -73,20 +73,12 @@ vm.runInContext(fs.readFileSync('DriveEvents.gs', 'utf8'), context);
 context.assertCatalogConfiguration_ = () => {};
 context.getSetupStatus = () => ({ applicationVersion: '0.1.1' });
 
-activeTriggers = [
-  makeTrigger('runDailyUtilitiesCataloging', 'old-daily'),
-  makeTrigger('processDriveEventQueue', 'old-poll'),
-  makeTrigger('renewDriveEventSubscription', 'old-renewal'),
-  makeTrigger('unmanagedHandler', 'unmanaged')
-];
+activeTriggers = [makeTrigger('unmanagedHandler', 'unmanaged')];
 const installed = context.installAutomationTriggers();
 assert.deepEqual(events, [
   'create:runDailyUtilitiesCataloging',
   'create:processDriveEventQueue',
-  'create:renewDriveEventSubscription',
-  'delete:old-daily',
-  'delete:old-poll',
-  'delete:old-renewal'
+  'create:renewDriveEventSubscription'
 ]);
 assert.deepEqual(JSON.parse(JSON.stringify(installed)), {
   applicationVersion: '0.1.1',
@@ -103,11 +95,11 @@ assert.equal(lockReleases, 1);
 assert.ok(activeTriggers.some((trigger) => trigger.getUniqueId() === 'unmanaged'));
 
 events.length = 0;
-activeTriggers = [
-  makeTrigger('runDailyUtilitiesCataloging', 'old-daily'),
-  makeTrigger('processDriveEventQueue', 'old-poll'),
-  makeTrigger('renewDriveEventSubscription', 'old-renewal')
-];
+context.installAutomationTriggers();
+assert.deepEqual(events, []);
+
+events.length = 0;
+activeTriggers = [];
 failCreationFor = 'processDriveEventQueue';
 assert.throws(
   () => context.installAutomationTriggers(),
@@ -115,42 +107,42 @@ assert.throws(
 );
 assert.deepEqual(events, [
   'create:runDailyUtilitiesCataloging',
+  'create:processDriveEventQueue'
+]);
+assert.deepEqual(activeTriggers.map((trigger) => trigger.getUniqueId()), [
+  'new-runDailyUtilitiesCataloging'
+]);
+
+failCreationFor = '';
+events.length = 0;
+context.installAutomationTriggers();
+assert.deepEqual(events, [
   'create:processDriveEventQueue',
-  'delete:new-runDailyUtilitiesCataloging'
+  'create:renewDriveEventSubscription'
 ]);
-assert.deepEqual(activeTriggers.map((trigger) => trigger.getUniqueId()).sort(), [
-  'old-daily',
-  'old-poll',
-  'old-renewal'
-]);
+assert.equal(context.getAutomationTriggerStatus_().missingTriggerHandlers.length, 0);
 
 events.length = 0;
 activeTriggers = [
-  makeTrigger('runDailyUtilitiesCataloging', 'old-daily'),
-  makeTrigger('processDriveEventQueue', 'old-poll'),
-  makeTrigger('renewDriveEventSubscription', 'old-renewal')
+  makeTrigger('runDailyUtilitiesCataloging', 'daily-one'),
+  makeTrigger('runDailyUtilitiesCataloging', 'daily-two'),
+  makeTrigger('processDriveEventQueue', 'poll-one'),
+  makeTrigger('renewDriveEventSubscription', 'renewal-one')
 ];
-failCreationFor = 'renewDriveEventSubscription';
-failDeletionFor = 'new-runDailyUtilitiesCataloging';
+failDeletionFor = 'daily-two';
 assert.throws(
   () => context.installAutomationTriggers(),
-  /cannot create renewDriveEventSubscription.*cannot delete new-runDailyUtilitiesCataloging/
+  /cannot delete daily-two/
 );
-assert.deepEqual(events, [
-  'create:runDailyUtilitiesCataloging',
-  'create:processDriveEventQueue',
-  'create:renewDriveEventSubscription',
-  'delete:new-runDailyUtilitiesCataloging',
-  'delete:new-processDriveEventQueue'
-]);
-assert.equal(
-  activeTriggers.some((trigger) =>
-    trigger.getUniqueId() === 'new-processDriveEventQueue'),
-  false
-);
+assert.deepEqual(events, ['delete:daily-two']);
+assert.equal(activeTriggers.length, 4);
 
-failCreationFor = '';
 failDeletionFor = '';
+events.length = 0;
+context.installAutomationTriggers();
+assert.deepEqual(events, ['delete:daily-two']);
+assert.equal(context.getAutomationTriggerStatus_().duplicateTriggerHandlers.length, 0);
+
 events.length = 0;
 lockTimeouts.length = 0;
 context.removeAutomationTriggers();

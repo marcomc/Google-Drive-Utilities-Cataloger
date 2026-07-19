@@ -16,40 +16,42 @@ function installAutomationTriggers() {
 
 function installAutomationTriggersUnlocked_() {
   assertCatalogConfiguration_();
-  const existing = getManagedAutomationTriggers_();
-  const created = [];
-  try {
-    created.push(ScriptApp.newTrigger('runDailyUtilitiesCataloging')
-      .timeBased()
-      .everyDays(1)
-      .atHour(CONFIG.DAILY_TRIGGER_HOUR)
-      .create());
-    created.push(ScriptApp.newTrigger('processDriveEventQueue')
-      .timeBased()
-      .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
-      .create());
-    created.push(ScriptApp.newTrigger('renewDriveEventSubscription')
-      .timeBased()
-      .everyHours(6)
-      .create());
-  } catch (error) {
-    const cleanupFailures = [];
-    created.forEach(function (trigger) {
-      try {
-        ScriptApp.deleteTrigger(trigger);
-      } catch (cleanupError) {
-        cleanupFailures.push(trigger.getHandlerFunction() + ': ' + cleanupError.message);
-      }
+  const triggersByHandler = getManagedAutomationTriggersByHandler_();
+  AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
+    triggersByHandler[handler].slice(1).forEach(function (trigger) {
+      ScriptApp.deleteTrigger(trigger);
     });
-    if (cleanupFailures.length > 0) {
-      error.message += ' Replacement trigger cleanup also failed: ' +
-        cleanupFailures.join('; ');
+  });
+  AUTOMATION_TRIGGER_HANDLERS.forEach(function (handler) {
+    if (triggersByHandler[handler].length === 0) {
+      createManagedAutomationTrigger_(handler);
     }
-    throw error;
-  }
-  existing.forEach(function (trigger) { ScriptApp.deleteTrigger(trigger); });
+  });
 
   return Object.assign({}, getSetupStatus(), getAutomationTriggerStatus_());
+}
+
+function createManagedAutomationTrigger_(handler) {
+  switch (handler) {
+    case 'runDailyUtilitiesCataloging':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyDays(1)
+        .atHour(CONFIG.DAILY_TRIGGER_HOUR)
+        .create();
+    case 'processDriveEventQueue':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyMinutes(CONFIG.EVENT_POLL_MINUTES)
+        .create();
+    case 'renewDriveEventSubscription':
+      return ScriptApp.newTrigger(handler)
+        .timeBased()
+        .everyHours(6)
+        .create();
+    default:
+      throw new Error('Unknown managed trigger handler: ' + handler);
+  }
 }
 
 function removeAutomationTriggers() {
@@ -64,6 +66,17 @@ function getManagedAutomationTriggers_() {
   return ScriptApp.getProjectTriggers().filter(function (trigger) {
     return AUTOMATION_TRIGGER_HANDLERS.indexOf(trigger.getHandlerFunction()) >= 0;
   });
+}
+
+function getManagedAutomationTriggersByHandler_() {
+  const triggersByHandler = AUTOMATION_TRIGGER_HANDLERS.reduce(function (triggers, handler) {
+    triggers[handler] = [];
+    return triggers;
+  }, {});
+  getManagedAutomationTriggers_().forEach(function (trigger) {
+    triggersByHandler[trigger.getHandlerFunction()].push(trigger);
+  });
+  return triggersByHandler;
 }
 
 function getAutomationTriggerStatus_() {

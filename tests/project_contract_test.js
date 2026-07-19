@@ -245,13 +245,7 @@ function testDeploymentContract() {
   assert.match(deployScript, /remote_time_zone=/);
   assert.match(deployScript, /--json version/);
   assert.match(deployScript, /--json deploy/);
-  assert.match(deployScript, /run_apps_script_function/);
-  assert.match(deployScript, /installAutomationTriggers/);
-  assert.match(deploymentHelper, /devMode: false/);
-  assert.match(
-    deploymentHelper,
-    /script\.googleapis\.com\/v1\/scripts\/.+:run/
-  );
+  assert.doesNotMatch(deployScript, /installAutomationTriggers/);
   assert.ok(
     deployScript.indexOf('read_apps_script_deployment') <
       deployScript.indexOf('push --force'),
@@ -263,7 +257,7 @@ function testDeploymentContract() {
   );
   assert.match(
     deploymentGuide,
-    /installable triggers[\s\S]{0,160}numbered stable version/i
+    /installable triggers[\s\S]{0,160}project HEAD/i
   );
   assert.match(deploymentGuide, /owner-only API executable/);
 }

@@ -100,84 +100,45 @@ set -euo pipefail
 
 authorization=""
 header_source=""
-method="GET"
-payload=""
-write_out=""
-next=""
+expect_header=0
 for argument in "$@"; do
   if [[ "${argument}" == Authorization:* ]]; then
     printf '%s\n' "Authorization header must not be passed through argv." >&2
     exit 7
   fi
-  case "${next}" in
-    header)
-      test "${argument}" = "@-"
-      header_source="stdin"
-      next=""
-      continue
-      ;;
-    method)
-      method="${argument}"
-      next=""
-      continue
-      ;;
-    payload)
-      payload="${argument}"
-      next=""
-      continue
-      ;;
-    write-out)
-      write_out="${argument}"
-      next=""
-      continue
-      ;;
-  esac
-  case "${argument}" in
-    -H | --header) next="header" ;;
-    --request) next="method" ;;
-    --data) next="payload" ;;
-    --write-out) next="write-out" ;;
-    https://*) url="${argument}" ;;
-  esac
 done
-if [[ "${header_source}" != "stdin" ||
-  "${write_out}" != $'\n%{http_code}' || -z "${url:-}" ]]; then
+if [[ "$#" -ne 7 || "$1" != "--silent" || "$2" != "--show-error" ||
+  "$3" != "--header" || "$4" != "@-" || "$5" != "--write-out" ||
+  "$6" != $'\n%{http_code}' ]]; then
   printf '%s\n' "Unexpected curl argument shape." >&2
   exit 8
 fi
-while IFS= read -r header; do
-  if [[ "${header}" == Authorization:* ]]; then
-    authorization="${header}"
+url="$7"
+for argument in "$@"; do
+  if [[ "${expect_header}" -eq 1 ]]; then
+    if [[ "${argument}" == "@-" ]]; then
+      header_source="stdin"
+    elif [[ "${argument}" == Authorization:* ]]; then
+      authorization="${argument}"
+    fi
+    expect_header=0
+    continue
   fi
+  case "${argument}" in
+    -H | --header)
+      expect_header=1
+      ;;
+  esac
 done
+if [[ "${header_source}" == "stdin" ]]; then
+  while IFS= read -r header; do
+    if [[ "${header}" == Authorization:* ]]; then
+      authorization="${header}"
+    fi
+  done
+fi
 if [[ "${authorization}" != "Authorization: Bearer ${TEST_ACCESS_TOKEN}" ]]; then
   exit 3
-fi
-
-execution_url="https://script.googleapis.com/v1/scripts/${TEST_CONFIGURED_DEPLOYMENT_ID}:run"
-if [[ "${url}" == "${execution_url}" ]]; then
-  test "${method}" = "POST"
-  jq -e '
-    .function == "installAutomationTriggers" and
-    .parameters == [] and
-    .devMode == false
-  ' <<<"${payload}" >/dev/null
-  printf '%s\n' "api-run" >>"${TEST_COMMAND_LOG}"
-  if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "trigger-error" ]]; then
-    printf '%s\n200' '{"done":true,"error":{"message":"trigger failure"}}'
-    exit 0
-  fi
-  if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "trigger-wrong-envelope" ]]; then
-    printf '%s\n200' \
-      '{"done":true,"response":{"result":{"triggerCounts":{}}}}'
-    exit 0
-  fi
-  printf '%s\n200' '{"done":true,"response":{"@type":"type.googleapis.com/google.apps.script.v1.ExecutionResponse","result":{"triggerCounts":{"runDailyUtilitiesCataloging":1,"processDriveEventQueue":1,"renewDriveEventSubscription":1},"missingTriggerHandlers":[],"duplicateTriggerHandlers":[]}}}'
-  exit 0
-fi
-
-if [[ "${method}" != "GET" ]]; then
-  exit 8
 fi
 expected_url="https://script.googleapis.com/v1/projects/test-script/deployments/${TEST_CONFIGURED_DEPLOYMENT_ID}"
 if [[ "${url}" != "${expected_url}" ]]; then
@@ -210,7 +171,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | trigger-error | trigger-wrong-envelope)
+  valid)
     ;;
   missing)
     http_status=404
@@ -390,7 +351,7 @@ success_time_zone="$(jq -r '.timeZone' "${success_dir}/appsscript.json")"
 success_commands="$(tr '\n' ' ' <"${success_dir}/commands.log")"
 test "${success_time_zone}" = "Europe/Rome"
 test "${success_commands}" = \
-  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy clasp-deployments api-get-2 clasp-deployments api-run "
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy clasp-deployments api-get-2 "
 if grep -q 'token-do-not' "${success_dir}/output.log"; then
   printf '%s\n' "Deployment logs exposed the clasp access token." >&2
   exit 1
@@ -460,18 +421,6 @@ for scenario in \
   test "${mutation_commands}" -eq 3
   grep -q 'post-update API verification failed' \
     "${failure_dir}/output.log"
-done
-
-for scenario in trigger-error trigger-wrong-envelope; do
-  failure_dir="${TEST_ROOT}/${scenario}"
-  mkdir -p "${failure_dir}"
-  require_fixture_failure \
-    "Invalid trigger reconciliation was accepted: ${scenario}" \
-    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
-    "deployment-1" "deployment-1" "${scenario}"
-  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
-    "${failure_dir}/commands.log")"
-  test "${mutation_commands}" -eq 3
 done
 
 changed_dir="${TEST_ROOT}/changed-after"

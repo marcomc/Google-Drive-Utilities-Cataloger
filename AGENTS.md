@@ -27,6 +27,9 @@
   belongs to the target script, preserve installation-specific manifest values,
   and distinguish project HEAD used by installable triggers from the versioned
   API executable deployment.
+- Do not use Apps Script Execution API calls to create or remove installable
+  triggers: that API cannot manage triggers, and existing installable triggers
+  execute the project HEAD rather than the API executable's pinned version.
 - When an installer must temporarily modify a tracked manifest before a remote
   push, isolate the mutation in a subshell: create and validate the backup
   before mutation, restore it with an `EXIT` and signal trap, and clean up

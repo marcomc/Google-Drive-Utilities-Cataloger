@@ -9,12 +9,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Create all three replacement triggers before deleting the existing managed
-  automation, preserving the previous schedule if replacement fails.
+- Reconcile managed triggers by removing duplicates and adding only missing
+  schedules, without replacing healthy triggers.
 - Report managed trigger counts and wait for active catalog processing before
-  deployment-time trigger reconciliation.
-- Rebind managed triggers through the promoted stable API executable so they
-  cannot remain associated with the preceding source version.
+  trigger reconciliation.
 
 ## [0.1.0] - 2026-07-18
 
