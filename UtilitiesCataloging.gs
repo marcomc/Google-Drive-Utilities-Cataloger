@@ -431,9 +431,9 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     responseMimeType: 'application/json',
     responseJsonSchema: buildExtractionResponseSchema_()
   };
-  if (model === 'gemini-3.5-flash') {
+  if (['gemini-3.5-flash', 'gemini-3.6-flash'].indexOf(model) >= 0) {
     generationConfig.thinkingConfig = {
-      thinkingLevel: CONFIG.GEMINI_35_FLASH_THINKING_LEVEL
+      thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
     };
   }
   const payload = {

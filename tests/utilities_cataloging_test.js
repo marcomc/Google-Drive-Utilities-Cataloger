@@ -239,7 +239,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.5-flash';
+  context.getGeminiModel_ = () => 'gemini-3.6-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -266,7 +266,7 @@ function testDeveloperApiKeyUsesHeader() {
   );
   assert.equal(
     payload.generationConfig.thinkingConfig.thinkingLevel,
-    vm.runInContext('CONFIG.GEMINI_35_FLASH_THINKING_LEVEL', context)
+    vm.runInContext('CONFIG.GEMINI_FLASH_THINKING_LEVEL', context)
   );
   assert.equal(payload.generationConfig.responseMimeType, 'application/json');
   assert.equal(payload.generationConfig.responseJsonSchema.type, 'object');
@@ -322,12 +322,14 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   });
   context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
 
-  const result = context.configureGeminiModel('gemini-3.5-flash');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.6-flash');
 
-  assert.equal(properties.GEMINI_MODEL, 'gemini-3.5-flash');
-  assert.equal(result.geminiModel, 'gemini-3.5-flash');
+  const result = context.configureGeminiModel('gemini-3.6-flash');
+
+  assert.equal(properties.GEMINI_MODEL, 'gemini-3.6-flash');
+  assert.equal(result.geminiModel, 'gemini-3.6-flash');
   assert.throws(
-    () => context.configureGeminiModel('models/gemini-3.5-flash'),
+    () => context.configureGeminiModel('models/gemini-3.6-flash'),
     /must be a Gemini model identifier/
   );
 }
@@ -382,7 +384,7 @@ function testGeminiResponseWithoutFinishReasonFailsClosed() {
       })
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.5-flash';
+  context.getGeminiModel_ = () => 'gemini-3.6-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logGeminiUsage_ = () => {};

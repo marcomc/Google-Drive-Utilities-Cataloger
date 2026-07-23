@@ -51,10 +51,10 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | `SPREADSHEET_ID` | Destination spreadsheet ID. |
 | `AUTOMATION_CONFIG_JSON` | Complete contents of `config.local.json`. |
 | `GOOGLE_CLOUD_PROJECT_ID` | Linked standard Cloud project ID, required for Drive events. |
-| `GEMINI_MODEL` | Optional; defaults to `gemini-3.5-flash` for both Gemini Developer API and Vertex AI fallback. |
+| `GEMINI_MODEL` | Optional; defaults to `gemini-3.6-flash` for both Gemini Developer API and Vertex AI fallback. |
 | `VERTEX_AI_LOCATION` | Optional for `vertex_ai`; defaults to `global`. |
 
-The default `gemini-3.5-flash` request uses `medium` thinking and an
+The default `gemini-3.6-flash` request uses `medium` thinking and an
 8,192-token JSON response budget for both backends. For owner-controlled CLI
 maintenance, run `configureGeminiModel` with the desired model identifier;
 the value is shared by the Developer API primary and Vertex fallback.

@@ -1,6 +1,6 @@
 const CONFIG = Object.freeze({
   APP_VERSION: '0.1.1',
-  DEFAULT_MODEL: 'gemini-3.5-flash',
+  DEFAULT_MODEL: 'gemini-3.6-flash',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -18,9 +18,9 @@ const CONFIG = Object.freeze({
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
   // Keep invoice extraction below the model's response ceiling.
   GEMINI_MAX_OUTPUT_TOKENS: 8192,
-  // Gemini 3.5 Flash defaults to medium thinking. Make it explicit so the
-  // Developer API and Vertex AI fallback use the same runtime behavior.
-  GEMINI_35_FLASH_THINKING_LEVEL: 'medium',
+  // Gemini 3.5 and 3.6 Flash default to medium thinking. Make it explicit so
+  // the Developer API and Vertex AI fallback use the same runtime behavior.
+  GEMINI_FLASH_THINKING_LEVEL: 'medium',
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,
