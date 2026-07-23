@@ -293,7 +293,7 @@ Vertex model has a price table encoded in `Config.gs`, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
-The default `gemini-3.5-flash` runtime uses explicit `medium` thinking and an
+The default `gemini-3.6-flash` runtime uses explicit `medium` thinking and an
 8,192-token JSON response budget. The same model and generation settings are
 sent to the Gemini Developer API and the temporary Vertex AI fallback.
 

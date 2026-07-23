@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
+
+### Changed
+
+- Use the stable `gemini-3.6-flash` model by default for Gemini Developer API
+  and Vertex AI fallback, with explicit medium thinking and the existing
+  8,192-token extraction response budget.
+
 ## [0.1.1] - 2026-07-19
 
 ### Fixed

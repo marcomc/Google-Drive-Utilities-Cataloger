@@ -101,10 +101,9 @@ function testCommittedJsonAndRuntimeConfig() {
   const context = loadConfigContext();
   const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
   assert.match(applicationVersion, /^\d+\.\d+\.\d+$/);
-  assert.match(changelog, new RegExp(
-    '^## \\[' + applicationVersion.replace(/\./g, '\\.') + '\\]',
-    'm'
-  ));
+  const latestReleaseMatch = changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m);
+  assert.ok(latestReleaseMatch, 'CHANGELOG.md must start with a release heading.');
+  assert.equal(applicationVersion, latestReleaseMatch[1]);
   assert.doesNotThrow(() => context.validateAutomationConfig_(automationConfig));
 }
 
