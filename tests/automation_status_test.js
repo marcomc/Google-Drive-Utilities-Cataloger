@@ -79,7 +79,8 @@ const context = vm.createContext({
 vm.runInContext(fs.readFileSync('Config.gs', 'utf8'), context);
 vm.runInContext(fs.readFileSync('DriveEvents.gs', 'utf8'), context);
 context.assertCatalogConfiguration_ = () => {};
-context.getSetupStatus = () => ({ applicationVersion: '0.1.1' });
+const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
+context.getSetupStatus = () => ({ applicationVersion });
 
 activeTriggers = [makeTrigger('unmanagedHandler', 'unmanaged')];
 const installed = context.installAutomationTriggers();
@@ -89,7 +90,7 @@ assert.deepEqual(events, [
   'create:renewDriveEventSubscription'
 ]);
 assert.deepEqual(JSON.parse(JSON.stringify(installed)), {
-  applicationVersion: '0.1.1',
+  applicationVersion,
   triggerCounts: {
     runDailyUtilitiesCataloging: 1,
     processDriveEventQueue: 1,

@@ -323,8 +323,10 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
 
   assert.equal(context.getGeminiModel_(), 'gemini-3.6-flash');
+  properties.GEMINI_MODEL = 'gemini-3.5-flash';
+  assert.equal(context.getGeminiModel_(), 'gemini-3.6-flash');
 
-  const result = context.configureGeminiModel('gemini-3.6-flash');
+  const result = context.configureGeminiModel('gemini-3.5-flash');
 
   assert.equal(properties.GEMINI_MODEL, 'gemini-3.6-flash');
   assert.equal(result.geminiModel, 'gemini-3.6-flash');

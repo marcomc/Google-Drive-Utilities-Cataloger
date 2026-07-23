@@ -433,7 +433,7 @@ function validateInstallerOptions_(options) {
     notificationRecipient: String(options.notificationRecipient).trim(),
     geminiBackend: options.geminiBackend,
     geminiApiKey: String(options.geminiApiKey || '').trim(),
-    geminiModel: String(options.geminiModel).trim(),
+    geminiModel: normalizeGeminiModel_(options.geminiModel),
     autoVertexFallback: options.autoVertexFallback === true,
     vertexLocation: String(options.vertexLocation).trim(),
     automationConfig: config,

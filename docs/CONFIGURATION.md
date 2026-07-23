@@ -55,9 +55,11 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | `VERTEX_AI_LOCATION` | Optional for `vertex_ai`; defaults to `global`. |
 
 The default `gemini-3.6-flash` request uses `medium` thinking and an
-8,192-token JSON response budget for both backends. For owner-controlled CLI
-maintenance, run `configureGeminiModel` with the desired model identifier;
-the value is shared by the Developer API primary and Vertex fallback.
+8,192-token JSON response budget for both backends. A persisted
+`gemini-3.5-flash` value is automatically treated as `gemini-3.6-flash`, so
+source deployment upgrades existing installations without a separate Script
+Properties change. The value is shared by the Developer API primary and Vertex
+fallback.
 
 Do not set `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`,
 `WORKSPACE_EVENT_SUBSCRIPTION`, or `WORKSPACE_EVENT_EXPIRES_AT`. The automation
