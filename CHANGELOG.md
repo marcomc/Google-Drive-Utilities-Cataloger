@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
+
+### Added
+
+- Electricity-consumption dashboards with monthly F1/F2/F3 comparisons by
+  year, annual band totals, localized English and Italian labels, and preserved
+  user-adjusted managed-chart geometry.
+- F1, F2, and F3 consumption and unit-cost columns for electricity sheets.
+
+### Changed
+
+- Preserve the complete F1/F2/F3 consumption detail reported on electricity
+  invoices, including monoraria contracts with the same unit price in each
+  band.
+- Identify customer and contract values from their localized invoice labels
+  instead of relying on the spreadsheet locale or English field names.
+
+### Fixed
+
+- Keep Energygas `CL...` customer codes out of contract-number fields.
+- Validate dashboard source headers and supported capacity before creating
+  derived sheets or charts, avoiding partial presentation state.
+- Protect technical-sheet ownership, retain managed-chart source ranges, and
+  refresh dashboard year series when a newly imported electricity invoice adds
+  a year not already represented in the comparison data.
+
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
 ### Changed

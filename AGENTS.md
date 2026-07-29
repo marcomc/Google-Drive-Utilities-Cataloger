@@ -78,6 +78,12 @@
 - Validate every required source header and capacity limit before creating a
   derived dashboard, helper sheet, chart, or other managed spreadsheet
   artifact. A missing prerequisite must leave no partial presentation state.
+- Before clearing or reusing a derived technical sheet, reject a source-sheet
+  alias and require a managed ownership marker or an exact legacy contract;
+  never infer ownership from the displayed name alone. Derived charts must keep
+  user-adjusted source ranges within their managed data block, and imported
+  data that expands a derived dimension (such as a new year) must refresh the
+  affected formulas and chart series.
 - When inserting template rows, copy formulas with range-level formula paste so
   relative references adjust; do not replay source formula strings verbatim.
 - Journal cross-service mutations before changing Sheets or Drive. Persist the

@@ -3,6 +3,12 @@ const ELECTRICITY_DASHBOARD_KEYS_ = Object.freeze([
 ]);
 const ELECTRICITY_DASHBOARD_MAX_YEARS_ = 25;
 const ELECTRICITY_DASHBOARD_SOURCE_ROWS_ = 10000;
+const ELECTRICITY_DASHBOARD_MAX_SPREADSHEET_CELLS_ = 10000000;
+const ELECTRICITY_DASHBOARD_NEW_SHEET_ROWS_ = 1000;
+const ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_ = 26;
+const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ =
+  'gduc.electricity_dashboard_technical';
+const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_ = 'v1';
 
 function getElectricityDashboardLabels_(locale) {
   const localization = getLocalizationRegistry_()[locale];
@@ -25,16 +31,122 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig) {
   if (!validateElectricityDashboardSource_(electricity, labels)) {
     return;
   }
-  const dashboard = spreadsheet.getSheetByName(labels.sheet) ||
-    spreadsheet.insertSheet(labels.sheet);
-  const technical = spreadsheet.getSheetByName(labels.dataSheet) ||
-    spreadsheet.insertSheet(labels.dataSheet);
-  const chartRanges = writeElectricityDashboardData_(technical, electricity, labels);
-  if (!chartRanges) {
+  const dashboard = spreadsheet.getSheetByName(labels.sheet);
+  const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (dashboard === electricity) {
+    throw new Error('The electricity dashboard sheet name matches the source sheet.');
+  }
+  assertElectricityDashboardTechnicalSheet_(technical, electricity, labels);
+  assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical);
+
+  let managedDashboard = dashboard;
+  let managedTechnical = technical;
+  let dashboardCreated = false;
+  let technicalCreated = false;
+  try {
+    if (!managedDashboard) {
+      managedDashboard = spreadsheet.insertSheet(labels.sheet);
+      dashboardCreated = true;
+    }
+    if (!managedTechnical) {
+      managedTechnical = spreadsheet.insertSheet(labels.dataSheet);
+      technicalCreated = true;
+    }
+    markElectricityDashboardTechnicalSheet_(managedTechnical);
+    const chartRanges = writeElectricityDashboardData_(managedTechnical,
+      electricity, labels);
+    if (!chartRanges) {
+      throw new Error('Electricity dashboard source headers changed during initialization.');
+    }
+    managedTechnical.hideSheet();
+    refreshElectricityDashboardCharts_(managedDashboard, managedTechnical,
+      chartRanges, labels);
+  } catch (error) {
+    if (technicalCreated) {
+      spreadsheet.deleteSheet(managedTechnical);
+    }
+    if (dashboardCreated) {
+      spreadsheet.deleteSheet(managedDashboard);
+    }
+    throw error;
+  }
+}
+
+function assertElectricityDashboardTechnicalSheet_(technical, electricity,
+  labels) {
+  if (!technical) {
     return;
   }
-  technical.hideSheet();
-  refreshElectricityDashboardCharts_(dashboard, chartRanges, labels);
+  if (technical === electricity) {
+    throw new Error('The electricity dashboard technical sheet name matches the source sheet.');
+  }
+  if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
+    throw new Error('Refusing to overwrite an unmanaged electricity dashboard technical sheet: ' +
+      technical.getName());
+  }
+}
+
+function isManagedElectricityDashboardTechnicalSheet_(sheet, labels) {
+  const isMarked = sheet.getDeveloperMetadata().some(function (metadata) {
+    return metadata.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
+      metadata.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
+  });
+  if (isMarked) {
+    return true;
+  }
+  if (!sheet.isSheetHidden()) {
+    return false;
+  }
+  const headers = sheet.getRange(1, 1, 1, 4).getDisplayValues()[0];
+  const expectedHeaders = [labels.dateHeader].concat(labels.bandHeaders);
+  const formulas = sheet.getRange(2, 1, 1, 4).getFormulas()[0];
+  return expectedHeaders.every(function (header, index) {
+    return headers[index] === header;
+  }) && formulas.every(function (formula) {
+    return /^=ARRAYFORMULA\(/.test(formula);
+  });
+}
+
+function markElectricityDashboardTechnicalSheet_(sheet) {
+  const marked = sheet.getDeveloperMetadata().some(function (metadata) {
+    return metadata.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
+      metadata.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
+  });
+  if (!marked) {
+    sheet.addDeveloperMetadata(ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_,
+      ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_);
+  }
+}
+
+function assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical) {
+  const required = getElectricityDashboardTechnicalGrid_();
+  const currentCells = spreadsheet.getSheets().reduce(function (total, sheet) {
+    return total + sheet.getMaxRows() * sheet.getMaxColumns();
+  }, 0);
+  const technicalCells = technical ? technical.getMaxRows() *
+    technical.getMaxColumns() : 0;
+  const finalTechnicalCells = technical ?
+    Math.max(technical.getMaxRows(), required.rows) *
+      Math.max(technical.getMaxColumns(), required.columns) :
+    required.rows * required.columns;
+  const dashboardCells = dashboard ? 0 : ELECTRICITY_DASHBOARD_NEW_SHEET_ROWS_ *
+    ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_;
+  if (currentCells - technicalCells + finalTechnicalCells + dashboardCells >
+    ELECTRICITY_DASHBOARD_MAX_SPREADSHEET_CELLS_) {
+    throw new Error('Electricity dashboard exceeds the Google Sheets cell limit.');
+  }
+}
+
+function getElectricityDashboardTechnicalGrid_() {
+  const blockWidth = ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1;
+  const monthlyStarts = [6, 6 + blockWidth + 1, 6 + (blockWidth + 1) * 2];
+  return {
+    rows: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1,
+    columns: monthlyStarts[2] + blockWidth + 4,
+    monthlyStarts: monthlyStarts,
+    blockWidth: blockWidth,
+    annualStart: monthlyStarts[2] + blockWidth + 1
+  };
 }
 
 function hasElectricityDashboardHeaders_(electricity, labels) {
@@ -107,29 +219,25 @@ function writeElectricityDashboardData_(technical, electricity, labels) {
       ELECTRICITY_DASHBOARD_MAX_YEARS_ + ' years.');
   }
 
-  const blockWidth = ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1;
-  const monthlyStarts = [6, 6 + blockWidth + 1, 6 + (blockWidth + 1) * 2];
-  const annualStart = monthlyStarts[2] + blockWidth + 1;
-  const requiredColumns = annualStart + 3;
-  const requiredRows = ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1;
-  ensureElectricityDashboardGrid_(technical, requiredRows, requiredColumns);
-  technical.getRange(1, 1, requiredRows, requiredColumns).clearContent();
+  const grid = getElectricityDashboardTechnicalGrid_();
+  ensureElectricityDashboardGrid_(technical, grid.rows, grid.columns);
+  technical.getRange(1, 1, grid.rows, grid.columns).clearContent();
 
   writeElectricityMonthlyBandsData_(technical, source, bands, labels);
   bands.forEach(function (band, index) {
-    writeElectricityBandComparisonData_(technical, monthlyStarts[index], source,
+    writeElectricityBandComparisonData_(technical, grid.monthlyStarts[index], source,
       band, years, labels);
   });
-  writeElectricityAnnualData_(technical, annualStart, source, bands, years,
+  writeElectricityAnnualData_(technical, grid.annualStart, source, bands, years,
     labels);
 
   return {
     monthlyBands: technical.getRange(1, 1,
       ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1, 4),
-    monthlyF1: technical.getRange(1, monthlyStarts[0], 13, blockWidth),
-    monthlyF2: technical.getRange(1, monthlyStarts[1], 13, blockWidth),
-    monthlyF3: technical.getRange(1, monthlyStarts[2], 13, blockWidth),
-    annualBands: technical.getRange(1, annualStart,
+    monthlyF1: technical.getRange(1, grid.monthlyStarts[0], 13, grid.blockWidth),
+    monthlyF2: technical.getRange(1, grid.monthlyStarts[1], 13, grid.blockWidth),
+    monthlyF3: technical.getRange(1, grid.monthlyStarts[2], 13, grid.blockWidth),
+    annualBands: technical.getRange(1, grid.annualStart,
       ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, 4)
   };
 }
@@ -209,8 +317,9 @@ function writeElectricityAnnualData_(technical, startColumn, source, bands,
   }
 }
 
-function refreshElectricityDashboardCharts_(dashboard, chartRanges, labels) {
-  const layouts = captureElectricityChartLayouts_(dashboard, labels);
+function refreshElectricityDashboardCharts_(dashboard, technical, chartRanges,
+  labels) {
+  const layouts = captureElectricityChartLayouts_(dashboard, technical, labels);
   const managedTitles = ELECTRICITY_DASHBOARD_KEYS_.map(function (key) {
     return labels.charts[key];
   });
@@ -219,24 +328,24 @@ function refreshElectricityDashboardCharts_(dashboard, chartRanges, labels) {
       dashboard.removeChart(chart);
     }
   });
-  insertElectricityChart_(dashboard, chartRanges.monthlyBands,
+  insertElectricityChart_(dashboard, technical, chartRanges.monthlyBands,
     getElectricityChartLayout_(layouts, 'monthlyBands', 8, 1, 700, 360),
     labels.charts.monthlyBands, 'line');
-  insertElectricityChart_(dashboard, chartRanges.monthlyF1,
+  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF1,
     getElectricityChartLayout_(layouts, 'monthlyF1', 8, 18, 700, 360),
     labels.charts.monthlyF1, 'column');
-  insertElectricityChart_(dashboard, chartRanges.monthlyF2,
+  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF2,
     getElectricityChartLayout_(layouts, 'monthlyF2', 28, 18, 700, 360),
     labels.charts.monthlyF2, 'column');
-  insertElectricityChart_(dashboard, chartRanges.monthlyF3,
+  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF3,
     getElectricityChartLayout_(layouts, 'monthlyF3', 48, 18, 700, 360),
     labels.charts.monthlyF3, 'column');
-  insertElectricityChart_(dashboard, chartRanges.annualBands,
+  insertElectricityChart_(dashboard, technical, chartRanges.annualBands,
     getElectricityChartLayout_(layouts, 'annualBands', 28, 1, 700, 360),
     labels.charts.annualBands, 'column');
 }
 
-function captureElectricityChartLayouts_(dashboard, labels) {
+function captureElectricityChartLayouts_(dashboard, technical, labels) {
   const layouts = {};
   dashboard.getCharts().forEach(function (chart) {
     const title = String(chart.getOptions().get('title') || '');
@@ -255,7 +364,12 @@ function captureElectricityChartLayouts_(dashboard, labels) {
       offsetY: container.getOffsetY(),
       width: Number(options.get('width')) || 700,
       height: Number(options.get('height')) || 360,
-      sourceRanges: chart.getRanges().map(function (range) {
+      sourceRanges: chart.getRanges().filter(function (range) {
+        return range.getSheet().getSheetId() === technical.getSheetId() &&
+          range.getRow() + range.getNumRows() - 1 <= technical.getMaxRows() &&
+          range.getColumn() + range.getNumColumns() - 1 <=
+            technical.getMaxColumns();
+      }).map(function (range) {
         return range.getA1Notation();
       }),
       options: captureElectricityChartOptions_(options)
@@ -288,13 +402,21 @@ function getElectricityChartLayout_(layouts, key, row, column, width, height) {
   };
 }
 
-function insertElectricityChart_(dashboard, sourceRange, layout, title, type) {
+function insertElectricityChart_(dashboard, technical, sourceRange, layout,
+  title, type) {
   const builder = type === 'line' ? dashboard.newChart().asLineChart() :
     dashboard.newChart().asColumnChart();
   Object.keys(layout.options).forEach(function (key) {
     builder.setOption(key, layout.options[key]);
   });
-  dashboard.insertChart(builder.addRange(sourceRange)
+  const ranges = layout.sourceRanges && layout.sourceRanges.length ?
+    layout.sourceRanges.map(function (a1Notation) {
+      return technical.getRange(a1Notation);
+    }) : [sourceRange];
+  ranges.forEach(function (range) {
+    builder.addRange(range);
+  });
+  dashboard.insertChart(builder
     .setNumHeaders(1)
     .setPosition(layout.row, layout.column, layout.offsetX, layout.offsetY)
     .setOption('title', title)
@@ -354,6 +476,51 @@ function getElectricitySupplySheetName_(automationConfig) {
     }
   );
   return supply ? automationConfig.sheet_by_supply[supply] : '';
+}
+
+function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
+  automationConfig, importedSheet, extracted) {
+  if (!importedSheet || importedSheet.getName() !==
+    getElectricitySupplySheetName_(automationConfig)) {
+    return;
+  }
+  const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+  const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (!technical || !isManagedElectricityDashboardTechnicalSheet_(technical,
+    labels)) {
+    return;
+  }
+  const year = electricityDashboardImportedYear_(extracted);
+  if (!year || hasElectricityDashboardYear_(technical, year)) {
+    return;
+  }
+  try {
+    initializeElectricityDashboard_(spreadsheet, automationConfig);
+  } catch (error) {
+    logCatalogEvent_('electricity-dashboard-refresh-failed', {
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+  }
+}
+
+function electricityDashboardImportedYear_(extracted) {
+  const referenceYear = Number(extracted.reference_year);
+  if (Number.isInteger(referenceYear) && referenceYear >= 1900 &&
+    referenceYear <= 9999) {
+    return referenceYear;
+  }
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(extracted.issue_date || '')) ?
+    Number(String(extracted.issue_date).slice(0, 4)) : 0;
+}
+
+function hasElectricityDashboardYear_(technical, year) {
+  const grid = getElectricityDashboardTechnicalGrid_();
+  const years = technical.getRange(1, grid.monthlyStarts[0] + 1, 1,
+    ELECTRICITY_DASHBOARD_MAX_YEARS_).getValues()[0];
+  return years.some(function (candidate) {
+    return Number(candidate) === year;
+  });
 }
 
 function getElectricityDashboardYears_(electricity, yearColumn, dateColumn,

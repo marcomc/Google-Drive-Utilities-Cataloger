@@ -78,6 +78,10 @@ function testCommittedJsonAndRuntimeConfig() {
     path.join(projectRoot, 'ElectricityDashboard.gs'),
     'utf8'
   );
+  const utilitiesSource = fs.readFileSync(
+    path.join(projectRoot, 'UtilitiesCataloging.gs'),
+    'utf8'
+  );
   const englishLocale = fs.readFileSync(
     path.join(projectRoot, 'locales', 'en.gs'),
     'utf8'
@@ -97,7 +101,10 @@ function testCommittedJsonAndRuntimeConfig() {
   assert.equal(manifest.runtimeVersion, 'V8');
   assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
   assert.match(installerSource, /initializeElectricityDashboard_\(spreadsheet, automationConfig\)/);
-  assert.match(dashboardSource, /captureElectricityChartLayouts_\(dashboard, labels\)/);
+  assert.match(utilitiesSource,
+    /refreshElectricityDashboardAfterInvoiceImport_\(spreadsheet, automationConfig,/);
+  assert.match(dashboardSource,
+    /captureElectricityChartLayouts_\(dashboard, technical, labels\)/);
   assert.match(dashboardSource, /getElectricityDashboardLabels_\(locale\)/);
   assert.match(dashboardSource, /getLocalizationRegistry_\(\)\[locale\]/);
   assert.match(dashboardSource, /ELECTRICITY_DASHBOARD_SOURCE_ROWS_ = 10000/);

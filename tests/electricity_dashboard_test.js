@@ -137,6 +137,14 @@ function testDashboardValidationPreventsPartialArtifacts() {
   };
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
 
+  source.getLastRow = () => 2;
+  context.getElectricityDashboardYears_ = () => [2026];
+  assert.throws(() => context.initializeElectricityDashboard_({
+    getSheetByName: (name) => name === 'Electricity' || name === labels.sheet ?
+      source : null
+  }, config), /dashboard sheet name matches the source sheet/);
+
+  source.getLastRow = () => 10002;
   assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, config),
     /supports up to 10000 source rows/);
   assert.deepEqual(inserted, []);
@@ -148,6 +156,18 @@ function testDashboardValidationPreventsPartialArtifacts() {
   assert.deepEqual(inserted, []);
   context.getElectricityDashboardYears_ = () => [2026];
   assert.equal(context.validateElectricityDashboardSource_(source, labels), true);
+
+  const fullSheet = {
+    getMaxRows: () => 100000,
+    getMaxColumns: () => 100
+  };
+  const capacityInserted = [];
+  assert.throws(() => context.initializeElectricityDashboard_({
+    getSheetByName: (name) => name === 'Electricity' ? source : null,
+    getSheets: () => [fullSheet],
+    insertSheet: (name) => capacityInserted.push(name)
+  }, config), /cell limit/);
+  assert.deepEqual(capacityInserted, []);
 }
 
 function testTechnicalFormulaRangesUseReservedCapacity() {
@@ -175,6 +195,64 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
     '=SUMIF(\'Electricity\'!$F$2:$F$10002,2026,\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(context.columnLetter_(90), 'CL');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.getElectricityDashboardTechnicalGrid_())),
+    {
+      rows: 10001,
+      columns: 90,
+      monthlyStarts: [6, 33, 60],
+      blockWidth: 26,
+      annualStart: 87
+    }
+  );
+}
+
+function testTechnicalRangesUseTheReservedGrid() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['issue date'],
+    year: ['reference year'],
+    month: ['reference month']
+  })[key] || [];
+  const lookup = {
+    'issue date': 1,
+    'reference year': 2,
+    'reference month': 3,
+    'consumption quantity f1': 4,
+    'consumption quantity f2': 5,
+    'consumption quantity f3': 6
+  };
+  const requestedRanges = [];
+  const technical = {
+    getMaxRows: () => 10001,
+    getMaxColumns: () => 90,
+    getRange: (...args) => {
+      requestedRanges.push(args);
+      return {
+        clearContent: () => {},
+        setValues: () => {},
+        setFormula: () => {},
+        setNumberFormat: () => {},
+        setFormulas: () => {}
+      };
+    }
+  };
+  const electricity = {
+    getName: () => 'Electricity',
+    getLastRow: () => 2
+  };
+  context.getSheetLayout_ = () => ({ headerRow: 1, lookup });
+  context.getElectricityDashboardYears_ = () => [2026];
+  context.writeElectricityMonthlyBandsData_ = () => {};
+  context.writeElectricityBandComparisonData_ = () => {};
+  context.writeElectricityAnnualData_ = () => {};
+  const ranges = context.writeElectricityDashboardData_(technical, electricity,
+    labels);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(requestedRanges.at(-1))), [1, 87, 26, 4]
+  );
+  assert.ok(ranges.annualBands);
 }
 
 function testYearDiscoveryUsesReferenceYearThenIssueDate() {
@@ -202,6 +280,7 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
   const technical = {
     getMaxRows: () => 10,
     getMaxColumns: () => 5,
+    getSheetId: () => 42,
     insertRowsAfter: (start, count) => calls.push(['rows', start, count]),
     insertColumnsAfter: (start, count) => calls.push(['columns', start, count])
   };
@@ -218,10 +297,23 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
       legend: { position: 'bottom' }
     })[key]
   };
+  const chartTechnical = {
+    getSheetId: () => 42,
+    getMaxRows: () => 10001,
+    getMaxColumns: () => 90
+  };
+  const range = {
+    getA1Notation: () => 'F1:AE13',
+    getSheet: () => chartTechnical,
+    getRow: () => 1,
+    getColumn: () => 6,
+    getNumRows: () => 13,
+    getNumColumns: () => 26
+  };
   const layouts = context.captureElectricityChartLayouts_({
     getCharts: () => [{
       getOptions: () => options,
-      getRanges: () => [{ getA1Notation: () => 'F1:AE13' }],
+      getRanges: () => [range],
       getContainerInfo: () => ({
         getAnchorRow: () => 17,
         getAnchorColumn: () => 9,
@@ -229,7 +321,7 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
         getOffsetY: () => 14
       })
     }]
-  }, labels);
+  }, chartTechnical, labels);
   assert.equal(layouts.monthlyF1.row, 17);
   assert.equal(layouts.monthlyF1.width, 811);
   assert.equal(JSON.stringify(layouts.monthlyF1.sourceRanges),
@@ -238,6 +330,76 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
     JSON.stringify(['#123456']));
   assert.equal(JSON.stringify(layouts.monthlyF1.options.legend),
     JSON.stringify({ position: 'bottom' }));
+
+  const addedRanges = [];
+  const builder = {
+    addRange: (range) => {
+      addedRanges.push(range.a1);
+      return builder;
+    },
+    setNumHeaders: () => builder,
+    setPosition: () => builder,
+    setOption: () => builder,
+    build: () => ({})
+  };
+  context.insertElectricityChart_({
+    newChart: () => ({ asColumnChart: () => builder }),
+    insertChart: () => {}
+  }, {
+    getRange: (a1) => ({ a1 })
+  }, { a1: 'A1:D10001' }, layouts.monthlyF1, labels.charts.monthlyF1,
+  'column');
+  assert.deepEqual(addedRanges, ['F1:AE13']);
+}
+
+function testTechnicalOwnershipAndCapacityPreflight() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const source = { getName: () => 'Electricity' };
+  const unmanaged = {
+    getName: () => labels.dataSheet,
+    getDeveloperMetadata: () => [],
+    isSheetHidden: () => false
+  };
+  assert.throws(() => context.assertElectricityDashboardTechnicalSheet_(
+    unmanaged, source, labels), /unmanaged electricity dashboard technical sheet/);
+  assert.throws(() => context.assertElectricityDashboardTechnicalSheet_(
+    source, source, labels), /matches the source sheet/);
+
+  const fullSheet = {
+    getMaxRows: () => 100000,
+    getMaxColumns: () => 100
+  };
+  assert.throws(() => context.assertElectricityDashboardCapacity_(
+    { getSheets: () => [fullSheet] }, null, null), /cell limit/);
+}
+
+function testDashboardRefreshUsesNewInvoiceYearOnly() {
+  const context = loadDashboard();
+  const technical = {
+    getRange: () => ({ getValues: () => [[2025, 2026].concat(Array(23).fill(''))] })
+  };
+  assert.equal(context.hasElectricityDashboardYear_(technical, 2026), true);
+  assert.equal(context.hasElectricityDashboardYear_(technical, 2027), false);
+  assert.equal(context.electricityDashboardImportedYear_({ reference_year: '2027' }),
+    2027);
+  assert.equal(context.electricityDashboardImportedYear_({ issue_date: '2028-01-03' }),
+    2028);
+
+  const labels = context.getElectricityDashboardLabels_('en');
+  const importedSheet = { getName: () => 'Electricity' };
+  const spreadsheet = {
+    getSheetByName: (name) => name === labels.dataSheet ? technical : null
+  };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  let refreshes = 0;
+  context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
+  context.initializeElectricityDashboard_ = () => { refreshes += 1; };
+  context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
+    importedSheet, { reference_year: 2027 });
+  context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
+    importedSheet, { reference_year: 2026 });
+  assert.equal(refreshes, 1);
 }
 
 testLocalizedDashboardContracts();
@@ -245,6 +407,9 @@ testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardValidationPreventsPartialArtifacts();
 testTechnicalFormulaRangesUseReservedCapacity();
+testTechnicalRangesUseTheReservedGrid();
 testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
+testTechnicalOwnershipAndCapacityPreflight();
+testDashboardRefreshUsesNewInvoiceYearOnly();
 console.log('electricity dashboard tests passed');

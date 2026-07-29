@@ -1320,6 +1320,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     clearImportedLiteralCells_(sheet, existingRow, layout);
     writeInvoiceRow_(sheet, existingRow, layout, file, extracted);
     verifyImportedRow_(sheet, existingRow, layout, file, extracted);
+    refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+      sheet, extracted);
     return {
       link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + existingRow,
       sheet: sheet,
@@ -1357,6 +1359,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     }
     throw error;
   }
+  refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+    sheet, extracted);
   return {
     link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
     sheet: sheet,
