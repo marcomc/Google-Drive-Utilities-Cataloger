@@ -629,7 +629,9 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
   }
   // Keep the technical formula reservation authoritative for every electricity
   // import, including an import whose year is already represented in a chart.
-  validateElectricityDashboardSource_(importedSheet, labels);
+  if (!validateElectricityDashboardSource_(importedSheet, labels)) {
+    throw new Error('Electricity dashboard source headers are missing or invalid.');
+  }
   const year = electricityDashboardImportedYear_(extracted);
   // A replacement can remove a previously represented year, even when its
   // new year is already present. Rebuild on every electricity import so both

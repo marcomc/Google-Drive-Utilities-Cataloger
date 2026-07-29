@@ -50,6 +50,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   dashboard after rolling back a failed newly inserted electricity invoice.
 - Normalize unambiguous repeated-separator F1/F2/F3 quantities without
   rejecting large electricity consumption values.
+- Reject electricity imports when an installed dashboard's required source
+  headers are missing or have been renamed.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

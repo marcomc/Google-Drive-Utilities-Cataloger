@@ -435,6 +435,11 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
     spreadsheet, config, importedSheet, { reference_year: 2026 }
   ), /source capacity exceeded/);
 
+  context.validateElectricityDashboardSource_ = () => false;
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2026 }
+  ), /source headers are missing or invalid/);
+
   let logged = 0;
   context.validateElectricityDashboardSource_ = () => true;
   context.hasElectricityDashboardYear_ = () => false;
