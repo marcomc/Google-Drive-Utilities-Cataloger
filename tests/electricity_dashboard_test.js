@@ -427,6 +427,13 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   const technical = { getRange: () => ({ getValues: () => [[2026]] }) };
   const spreadsheet = { getSheetByName: () => technical };
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+    getSheetByName: (name) => name === labels.sheet ? {} : null
+  }, config, importedSheet, { reference_year: 2026 }),
+  /technical sheet is missing/);
+  assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+    getSheetByName: () => null
+  }, config, importedSheet, { reference_year: 2026 }));
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => {
     throw new Error('source capacity exceeded');

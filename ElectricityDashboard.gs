@@ -622,9 +622,15 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     return;
   }
   const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+  const dashboard = spreadsheet.getSheetByName(labels.sheet);
   const technical = spreadsheet.getSheetByName(labels.dataSheet);
-  if (!technical || !isManagedElectricityDashboardTechnicalSheet_(technical,
-    labels)) {
+  if (!technical) {
+    if (dashboard) {
+      throw new Error('Electricity dashboard technical sheet is missing.');
+    }
+    return;
+  }
+  if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
     return;
   }
   // Keep the technical formula reservation authoritative for every electricity
