@@ -434,6 +434,11 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: () => null
   }, config, importedSheet, { reference_year: 2026 }));
+  context.isManagedElectricityDashboardTechnicalSheet_ = () => false;
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+    getSheetByName: () => ({})
+  }, config, importedSheet, { reference_year: 2026 }),
+  /technical sheet is unmanaged/);
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => {
     throw new Error('source capacity exceeded');
@@ -540,12 +545,21 @@ function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
     getNumRows: () => 13,
     getNumColumns: () => 4
   };
+  const splitSeries = {
+    getSheet: () => sheet,
+    getRow: () => 1,
+    getColumn: () => 7,
+    getNumRows: () => 13,
+    getNumColumns: () => 3
+  };
   assert.equal(context.shouldExtendElectricityChartRange_(currentBoundary,
     canonical, sheet, 'monthlyF1', 4), true);
   assert.equal(context.shouldExtendElectricityChartRange_(intentionallyShortened,
     canonical, sheet, 'monthlyF1', 4), false);
   assert.equal(context.shouldExtendElectricityChartRange_(shifted, canonical,
     sheet, 'monthlyF1', 4), false);
+  assert.equal(context.shouldExtendElectricityChartRange_(splitSeries,
+    canonical, sheet, 'monthlyF1', 4), true);
 }
 
 testLocalizedDashboardContracts();

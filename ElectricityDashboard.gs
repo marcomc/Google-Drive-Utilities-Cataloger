@@ -533,9 +533,7 @@ function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
     typeof sourceRange.getSheet !== 'function') {
     return false;
   }
-  if (preserved.getSheet().getSheetId() !== sourceRange.getSheet().getSheetId() ||
-    preserved.getRow() !== sourceRange.getRow() ||
-    preserved.getColumn() !== sourceRange.getColumn()) {
+  if (preserved.getSheet().getSheetId() !== sourceRange.getSheet().getSheetId()) {
     return false;
   }
   if (!(preserved.getNumRows() <= sourceRange.getNumRows() &&
@@ -547,20 +545,31 @@ function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
   if (!technical || !key || !previousDimension) {
     return false;
   }
-  const selectedDimension = key === 'annualBands' ? preserved.getNumRows() :
-    preserved.getNumColumns();
-  return selectedDimension === previousDimension &&
+  const block = getElectricityChartManagedBlock_(key);
+  if (!block || !isElectricityChartRangeWithinManagedBlock_(preserved,
+    technical, key)) {
+    return false;
+  }
+  const previousBoundary = key === 'annualBands' ? block.row +
+    previousDimension - 1 : block.column + previousDimension - 1;
+  const selectedBoundary = key === 'annualBands' ? preserved.getRow() +
+    preserved.getNumRows() - 1 : preserved.getColumn() +
+    preserved.getNumColumns() - 1;
+  return selectedBoundary === previousBoundary &&
     getElectricityChartDataDimension_(technical, key) > previousDimension;
 }
 
 function extendElectricityChartRange_(preserved, technical, key) {
   const dimension = getElectricityChartDataDimension_(technical, key);
+  const block = getElectricityChartManagedBlock_(key);
   if (key === 'annualBands') {
+    const lastRow = block.row + dimension - 1;
     return technical.getRange(preserved.getRow(), preserved.getColumn(),
-      dimension, preserved.getNumColumns());
+      lastRow - preserved.getRow() + 1, preserved.getNumColumns());
   }
+  const lastColumn = block.column + dimension - 1;
   return technical.getRange(preserved.getRow(), preserved.getColumn(),
-    preserved.getNumRows(), dimension);
+    preserved.getNumRows(), lastColumn - preserved.getColumn() + 1);
 }
 
 function findDashboardHeader_(lookup, aliases) {
@@ -631,6 +640,9 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     return;
   }
   if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
+    if (dashboard) {
+      throw new Error('Electricity dashboard technical sheet is unmanaged.');
+    }
     return;
   }
   // Keep the technical formula reservation authoritative for every electricity

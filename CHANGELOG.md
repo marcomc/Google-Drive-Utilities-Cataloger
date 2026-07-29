@@ -54,6 +54,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   headers are missing or have been renamed.
 - Reject imports when a visible electricity dashboard survives without its
   managed technical sheet, instead of leaving broken charts stale.
+- Reject dashboard pairs with an unmanaged technical sheet and preserve
+  separately selected category and series chart ranges as years expand.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
