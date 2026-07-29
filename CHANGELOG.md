@@ -48,6 +48,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   correct Energygas customer code, and skip dashboard work for other supplies.
 - Reject ambiguous single-separator F1/F2/F3 quantities and rebuild the
   dashboard after rolling back a failed newly inserted electricity invoice.
+- Normalize unambiguous repeated-separator F1/F2/F3 quantities without
+  rejecting large electricity consumption values.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

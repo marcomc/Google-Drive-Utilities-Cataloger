@@ -1023,7 +1023,9 @@ function normalizeElectricityBandConsumption_(value) {
   if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text)) {
     return null;
   }
-  if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
+  if (/^[+]?\d{1,3}(?:[.,]\d{3})+$/.test(text)) {
+    text = text.replace(/[.,]/g, '');
+  } else if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
     const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
       ',' : '.';
     const groupingSeparator = decimalSeparator === ',' ? /\./g : /,/g;

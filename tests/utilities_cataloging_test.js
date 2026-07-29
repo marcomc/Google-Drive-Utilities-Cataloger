@@ -171,6 +171,10 @@ function testExtractionSchemaAndCalendarValidation() {
     1234.56);
   assert.equal(context.normalizeElectricityBandConsumption_('1,234 kWh'), null);
   assert.equal(context.normalizeElectricityBandConsumption_('1.234 kWh'), null);
+  assert.equal(context.normalizeElectricityBandConsumption_('1,234,567 kWh'),
+    1234567);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234.567 kWh'),
+    1234567);
   assert.throws(() => context.normalizeExtraction_({
     ...raw,
     sheet_values: [{ header: 'Quantità consumi F1', value: 'not available' }]
