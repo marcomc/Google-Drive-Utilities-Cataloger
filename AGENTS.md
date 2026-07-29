@@ -5,6 +5,10 @@
 - Treat the repository `AGENTS.md` as development guidance for the coding
   agent, and treat the separate `AGENTS.md` in the configured Google Drive
   intake folder as the runtime policy read by the Apps Script and Vertex AI.
+- Whenever `AGENTS.example.md` is created or updated, apply the corresponding
+  reviewed policy change to the live `AGENTS.md` in the Drive folder that
+  contains the user's configured utilities spreadsheet. The folder name is
+  installation-specific and must not be hard-coded as `Forniture`.
 - Never assume that updating this repository file updates the live Drive policy.
   When testing the application or implementing a change reveals a rule that
   should improve runtime classification, extraction, safety, or import

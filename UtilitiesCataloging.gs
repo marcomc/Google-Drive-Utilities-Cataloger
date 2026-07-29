@@ -803,7 +803,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
-    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. For HERA, "Codice contratto" is contract_number and "Codice cliente" is customer_code.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For ENERGYGAS, a value such as CL317598 is a customer code and must go only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
       String(automationConfig.address_missing_type || 'unknown') + '.',
@@ -900,6 +900,13 @@ function normalizeExtraction_(extracted) {
   normalized.identifier = String(normalized.identifier || '').trim();
   normalized.contract_number = String(normalized.contract_number || '').trim();
   normalized.customer_code = String(normalized.customer_code || '').trim();
+  if (/^ENERGYGAS(?: ITALIA)?$/i.test(normalized.supplier || '') &&
+    /^CL\d+$/i.test(normalized.contract_number) && !normalized.customer_code) {
+    // Energygas uses CL... values for the customer code. Do not let a model
+    // label guess populate the contract column when the customer is empty.
+    normalized.customer_code = normalized.contract_number;
+    normalized.contract_number = '';
+  }
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
   normalized.reference_month = normalized.reference_month ? String(normalized.reference_month).padStart(2, '0') : null;
   normalized.period_start = normalizeIsoDate_(normalized.period_start);

@@ -78,11 +78,35 @@ manual review.
   invent columns, consumption values, costs, or tax rates.
 - Keep a printed contract number and customer/client code in separate destination
   columns. Never substitute one for the other.
+- Treat labels as authoritative in the document's supply-country language:
+  the localized equivalent of `customer code` belongs only in the customer
+  code column, while the localized equivalent of `contract code` or `contract
+  number` belongs only in the contract number column. Search for the relevant
+  labels in the language normally used on utility bills in the country where
+  the supply is delivered; do not rely on the spreadsheet locale or on English
+  labels being printed in the document. For ENERGYGAS, values such as
+  `CL317598` are customer codes; leave the contract number empty unless a
+  contract-labelled value is explicitly printed.
 - Verify that consumption cost + non-consumption cost + VAT equals the total.
   A difference beyond a few cents blocks the import.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
+- For electricity invoices, inspect every consumption and cost table for
+  time-of-use bands. When the document reports F1, F2, and F3 separately,
+  import three separate consumption values and three separate cost values into
+  the matching existing spreadsheet headers, even when the contract is
+  monoraria and the unit price is identical across all bands. Do not collapse
+  those values into F0, a total-only field, or a single summary field.
+- Preserve the document's units and period for each band. Distinguish kWh
+  consumption from euro cost and do not derive a band value from the total
+  when the document does not provide that band value. If a reported band is
+  unreadable or ambiguous, leave that value null and add a problem rather than
+  silently distributing the total.
+- If the sheet contains separate F1/F2/F3 headers for both consumption and
+  cost, populate all matching headers. If only one of the two dimensions is
+  present in the document, import only that dimension. Use exact existing
+  headers and never create columns during invoice processing.
 
 ## Final verification and reporting
 
