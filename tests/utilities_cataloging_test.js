@@ -136,6 +136,14 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
   assert.equal(normalized.reference_month, '07');
 
+  const normalizedSheetValues = context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: '  Unità di misura consumi  ', value: ' mc  ' }]
+  }).sheet_values;
+  assert.equal(JSON.stringify(normalizedSheetValues), JSON.stringify([
+    { header: 'Unità di misura consumi', value: 'mc' }
+  ]));
+
   assert.throws(
     () => context.validateRawExtractionShape_({
       ...raw,
@@ -1008,8 +1016,10 @@ function testFormulaAndStyleCopySources() {
   const context = loadCataloger();
   const sheet = {
     getLastRow: () => 6,
-    getRange: (row) => ({
-      copyTo: (_target, pasteType) => calls.push([row, pasteType])
+    getRange: (row, column, _rows, width) => ({
+      copyTo: (_target, pasteType) => calls.push([row, pasteType]),
+      getFormulas: () => [['', '=A1', '']],
+      clearContent: () => calls.push([row, column, width, 'clear'])
     })
   };
   const layout = { headerRow: 1, headers: ['A', 'B'] };
@@ -1020,8 +1030,12 @@ function testFormulaAndStyleCopySources() {
   assert.deepEqual(calls, [
     [3, 'format'],
     [3, 'formula'],
+    [4, 1, 1, 'clear'],
+    [4, 3, 1, 'clear'],
     [3, 'format'],
-    [3, 'formula']
+    [3, 'formula'],
+    [2, 1, 1, 'clear'],
+    [2, 3, 1, 'clear']
   ]);
 }
 

@@ -1,5 +1,5 @@
 {
-  "timeZone": "Etc/UTC",
+  "timeZone": "Europe/Rome",
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "executionApi": {

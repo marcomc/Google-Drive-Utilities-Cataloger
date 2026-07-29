@@ -802,6 +802,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
+    'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. For HERA, "Codice contratto" is contract_number and "Codice cliente" is customer_code.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
@@ -910,8 +911,30 @@ function normalizeExtraction_(extracted) {
   normalized.total = normalizeMoney_(normalized.total);
   applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ? normalized.problems : [];
-  normalized.sheet_values = Array.isArray(normalized.sheet_values) ? normalized.sheet_values : [];
+  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
+}
+
+function normalizeSheetValues_(sheetValues) {
+  if (!Array.isArray(sheetValues)) {
+    return [];
+  }
+  return sheetValues.map(function (entry) {
+    if (!entry || typeof entry !== 'object') {
+      return entry;
+    }
+    const normalized = Object.assign({}, entry);
+    if (typeof normalized.header === 'string') {
+      normalized.header = normalized.header.trim();
+    }
+    // Sheets trims leading and trailing text input. Normalize the model output
+    // before both writing and verification so a harmless whitespace variant
+    // cannot turn a successfully rolled-back import into an ERROR.
+    if (typeof normalized.value === 'string') {
+      normalized.value = normalized.value.trim();
+    }
+    return normalized;
+  });
 }
 
 function validateExtraction_(extracted) {
@@ -1284,6 +1307,11 @@ function importUtilityInvoiceToSheet_(file, extracted) {
       sheetRowCreated: false,
       sheetRowPreexisting: true
     });
+    // Re-extraction is a replacement of the complete literal payload. This
+    // prevents stale optional values from surviving when a newer extraction
+    // omits or corrects them; formula-backed columns remain untouched.
+    clearImportedLiteralCells_(sheet, existingRow, layout);
+    writeInvoiceRow_(sheet, existingRow, layout, file, extracted);
     verifyImportedRow_(sheet, existingRow, layout, file, extracted);
     return {
       link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + existingRow,
@@ -1328,6 +1356,15 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     row: targetRow,
     created: true
   };
+}
+
+function clearImportedLiteralCells_(sheet, row, layout) {
+  const formulas = sheet.getRange(row, 1, 1, layout.headers.length).getFormulas()[0];
+  layout.headers.forEach(function (header, index) {
+    if (header && !formulas[index]) {
+      sheet.getRange(row, index + 1).clearContent();
+    }
+  });
 }
 
 function refreshImportedSourceLink_(sheet, row, file) {
@@ -1463,9 +1500,31 @@ function copyRowStyleAndFormulas_(sheet, targetRow, layout) {
   }
   const source = sheet.getRange(sourceRow, 1, 1, layout.headers.length);
   const target = sheet.getRange(targetRow, 1, 1, layout.headers.length);
+  const sourceFormulas = source.getFormulas()[0];
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
   // Copying formulas as a range preserves relative references for the new row.
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+  clearCopiedLiteralCells_(sheet, targetRow, sourceFormulas);
+}
+
+function clearCopiedLiteralCells_(sheet, row, formulas) {
+  let startColumn = 0;
+  const clear = function (endColumn) {
+    if (!startColumn) {
+      return;
+    }
+    sheet.getRange(row, startColumn, 1, endColumn - startColumn + 1)
+      .clearContent();
+    startColumn = 0;
+  };
+  formulas.forEach(function (formula, index) {
+    if (formula) {
+      clear(index);
+    } else if (!startColumn) {
+      startColumn = index + 1;
+    }
+  });
+  clear(formulas.length);
 }
 
 function writeInvoiceRow_(sheet, row, layout, file, extracted) {
