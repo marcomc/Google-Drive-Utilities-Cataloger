@@ -67,6 +67,8 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     }
     markElectricityDashboardTechnicalSheet_(managedTechnical);
     if (!technicalCreated) {
+      const grid = getElectricityDashboardTechnicalGrid_();
+      ensureElectricityDashboardGrid_(managedTechnical, grid.rows, grid.columns);
       technicalBackup = createElectricityDashboardTechnicalBackup_(spreadsheet,
         managedTechnical);
     }
