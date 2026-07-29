@@ -169,6 +169,8 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(bandValues[0].value, 368.74);
   assert.equal(context.normalizeElectricityBandConsumption_('1.234,56 kWh'),
     1234.56);
+  assert.equal(context.normalizeElectricityBandConsumption_('1,234 kWh'), null);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234 kWh'), null);
   assert.throws(() => context.normalizeExtraction_({
     ...raw,
     sheet_values: [{ header: 'Quantità consumi F1', value: 'not available' }]
@@ -1262,10 +1264,16 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
     throw new Error('dashboard refresh failed');
   };
+  let rollbackRefreshes = 0;
+  context.refreshElectricityDashboardAfterRollback_ = (state) => {
+    assert.equal(state.sheet, sheet);
+    rollbackRefreshes += 1;
+  };
   assert.throws(() => context.importUtilityInvoiceToSheet_(
     { getId: () => 'file-id' }, validInvoice()
   ), /dashboard refresh failed/);
   assert.deepEqual(deletedRows, [2]);
+  assert.equal(rollbackRefreshes, 1);
 }
 
 function testDashboardRollbackForcesRegeneration() {

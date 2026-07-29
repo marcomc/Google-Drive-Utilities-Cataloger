@@ -1017,6 +1017,12 @@ function normalizeElectricityBandConsumption_(value) {
   if (!/^[+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?$/.test(text)) {
     return null;
   }
+  // With only one separator, a three-digit suffix can be either a grouping
+  // separator or a decimal fraction. Reject it rather than silently changing
+  // an invoice quantity such as 1,234 kWh into 1.234 kWh.
+  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text)) {
+    return null;
+  }
   if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
     const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
       ',' : '.';
@@ -1465,6 +1471,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   } catch (error) {
     try {
       sheet.deleteRow(targetRow);
+      refreshElectricityDashboardAfterRollback_({ sheet: sheet });
     } catch (rollbackError) {
       updateMutationJournal_(file.getId(), { stage: 'sheet-rollback-failed' });
       error.mutationRollbackIncomplete = true;
