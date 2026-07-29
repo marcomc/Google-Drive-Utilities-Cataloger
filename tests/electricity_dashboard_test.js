@@ -423,7 +423,7 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
     importedSheet, { reference_year: 2026 });
   assert.equal(refreshes, 2);
   assert.equal(options[0].extendManagedRanges, true);
-  assert.equal(options[1].extendManagedRanges, false);
+  assert.equal(options[1].extendManagedRanges, true);
 }
 
 function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {

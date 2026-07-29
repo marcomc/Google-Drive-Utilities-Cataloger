@@ -9,6 +9,10 @@ const ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_ = 26;
 const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ =
   'gduc.electricity_dashboard_technical';
 const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_ = 'v1';
+const ELECTRICITY_DASHBOARD_BACKUP_ROWS_ =
+  ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 3 * 13 +
+  ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1;
+const ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ = 26;
 
 function getElectricityDashboardLabels_(locale) {
   const localization = getLocalizationRegistry_()[locale];
@@ -46,6 +50,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   let managedTechnical = technical;
   let dashboardCreated = false;
   let technicalCreated = false;
+  let technicalBackup = null;
   try {
     if (!managedDashboard) {
       managedDashboard = spreadsheet.insertSheet(labels.sheet);
@@ -56,6 +61,10 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       technicalCreated = true;
     }
     markElectricityDashboardTechnicalSheet_(managedTechnical);
+    if (!technicalCreated) {
+      technicalBackup = createElectricityDashboardTechnicalBackup_(spreadsheet,
+        managedTechnical);
+    }
     const chartLayouts = captureElectricityChartLayouts_(managedDashboard,
       managedTechnical, labels);
     const chartRanges = writeElectricityDashboardData_(managedTechnical,
@@ -67,7 +76,28 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     refreshElectricityDashboardCharts_(managedDashboard, managedTechnical,
       chartRanges, labels, Boolean(options && options.extendManagedRanges),
       chartLayouts);
+    if (technicalBackup) {
+      spreadsheet.deleteSheet(technicalBackup.sheet);
+      technicalBackup = null;
+    }
   } catch (error) {
+    if (technicalBackup) {
+      try {
+        restoreElectricityDashboardTechnicalBackup_(technicalBackup,
+          managedTechnical);
+      } catch (restoreError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Technical data rollback also failed: ' +
+          restoreError.message;
+      }
+      try {
+        spreadsheet.deleteSheet(technicalBackup.sheet);
+      } catch (cleanupError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Technical backup cleanup also failed: ' +
+          cleanupError.message;
+      }
+    }
     if (technicalCreated) {
       spreadsheet.deleteSheet(managedTechnical);
     }
@@ -75,6 +105,57 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       spreadsheet.deleteSheet(managedDashboard);
     }
     throw error;
+  }
+}
+
+function getElectricityDashboardTechnicalDataBlocks_(sheet) {
+  const grid = getElectricityDashboardTechnicalGrid_();
+  return [
+    { row: 1, column: 1, rows: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1,
+      columns: 4, backupRow: 1 },
+    { row: 1, column: grid.monthlyStarts[0], rows: 13,
+      columns: grid.blockWidth, backupRow: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 2 },
+    { row: 1, column: grid.monthlyStarts[1], rows: 13,
+      columns: grid.blockWidth, backupRow: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 15 },
+    { row: 1, column: grid.monthlyStarts[2], rows: 13,
+      columns: grid.blockWidth, backupRow: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 28 },
+    { row: 1, column: grid.annualStart,
+      rows: ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, columns: 4,
+      backupRow: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 41 }
+  ];
+}
+
+function createElectricityDashboardTechnicalBackup_(spreadsheet, technical) {
+  assertElectricityDashboardBackupCapacity_(spreadsheet);
+  const backup = spreadsheet.insertSheet('Electricity dashboard backup ' +
+    new Date().getTime());
+  ensureElectricityDashboardGrid_(backup, ELECTRICITY_DASHBOARD_BACKUP_ROWS_,
+    ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_);
+  const blocks = getElectricityDashboardTechnicalDataBlocks_(technical);
+  blocks.forEach(function (block) {
+    technical.getRange(block.row, block.column, block.rows, block.columns)
+      .copyTo(backup.getRange(block.backupRow, 1, block.rows, block.columns));
+  });
+  backup.hideSheet();
+  return { sheet: backup, blocks: blocks };
+}
+
+function restoreElectricityDashboardTechnicalBackup_(backup, technical) {
+  backup.blocks.forEach(function (block) {
+    backup.sheet.getRange(block.backupRow, 1, block.rows, block.columns)
+      .copyTo(technical.getRange(block.row, block.column, block.rows,
+        block.columns));
+  });
+}
+
+function assertElectricityDashboardBackupCapacity_(spreadsheet) {
+  const currentCells = spreadsheet.getSheets().reduce(function (total, sheet) {
+    return total + sheet.getMaxRows() * sheet.getMaxColumns();
+  }, 0);
+  if (currentCells + ELECTRICITY_DASHBOARD_BACKUP_ROWS_ *
+    ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ >
+    ELECTRICITY_DASHBOARD_MAX_SPREADSHEET_CELLS_) {
+    throw new Error('Electricity dashboard backup exceeds the Google Sheets cell limit.');
   }
 }
 
@@ -442,17 +523,17 @@ function getElectricityChartManagedBlock_(key) {
 
 function getElectricityChartDataDimension_(technical, key) {
   const block = getElectricityChartManagedBlock_(key);
-  if (!block || key === 'monthlyBands' || typeof technical.getRange !== 'function') {
+  if (!block || typeof technical.getRange !== 'function') {
     return 0;
   }
-  const range = key === 'annualBands' ? technical.getRange(block.row,
+  const range = key === 'annualBands' || key === 'monthlyBands' ? technical.getRange(block.row,
     block.column, block.rows, 1) : technical.getRange(block.row, block.column,
     1, block.columns);
   if (!range || typeof range.getValues !== 'function') {
     return 0;
   }
   const values = range.getValues();
-  const dimension = key === 'annualBands' ? values.map(function (row) {
+  const dimension = key === 'annualBands' || key === 'monthlyBands' ? values.map(function (row) {
     return row[0];
   }) : values[0];
   let count = 0;
@@ -553,9 +634,10 @@ function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
     technical, key)) {
     return false;
   }
-  const previousBoundary = key === 'annualBands' ? block.row +
+  const rowDimension = key === 'annualBands' || key === 'monthlyBands';
+  const previousBoundary = rowDimension ? block.row +
     previousDimension - 1 : block.column + previousDimension - 1;
-  const selectedBoundary = key === 'annualBands' ? preserved.getRow() +
+  const selectedBoundary = rowDimension ? preserved.getRow() +
     preserved.getNumRows() - 1 : preserved.getColumn() +
     preserved.getNumColumns() - 1;
   return selectedBoundary === previousBoundary &&
@@ -565,7 +647,7 @@ function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
 function extendElectricityChartRange_(preserved, technical, key) {
   const dimension = getElectricityChartDataDimension_(technical, key);
   const block = getElectricityChartManagedBlock_(key);
-  if (key === 'annualBands') {
+  if (key === 'annualBands' || key === 'monthlyBands') {
     const lastRow = block.row + dimension - 1;
     return technical.getRange(preserved.getRow(), preserved.getColumn(),
       lastRow - preserved.getRow() + 1, preserved.getNumColumns());
@@ -653,13 +735,11 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
   if (!validateElectricityDashboardSource_(importedSheet, labels)) {
     throw new Error('Electricity dashboard source headers are missing or invalid.');
   }
-  const year = electricityDashboardImportedYear_(extracted);
   // A replacement can remove a previously represented year, even when its
   // new year is already present. Rebuild on every electricity import so both
-  // additions and removals are reflected; expand a narrowed range only when
-  // this import adds a new year.
-  const extendManagedRanges = Boolean(year) &&
-    !hasElectricityDashboardYear_(technical, year);
+  // additions and removals are reflected, and grow a range only when its
+  // captured boundary has new data beyond it.
+  const extendManagedRanges = true;
   try {
     initializeElectricityDashboard_(spreadsheet, automationConfig, {
       extendManagedRanges: extendManagedRanges

@@ -58,6 +58,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   separately selected category and series chart ranges as years expand.
 - Reject installer reruns against a damaged existing dashboard source and
   refresh electricity statistics after journal recovery deletes an inserted row.
+- Preserve existing technical dashboard data across refresh failures and extend
+  a user-shortened all-bands range as electricity invoice rows are added.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
