@@ -145,6 +145,17 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(energygas.contract_number, '');
   assert.equal(energygas.customer_code, 'CL000001');
 
+  ['CL-000001', 'CL 000001', 'CL/000001'].forEach((contractNumber) => {
+    const formattedEnergygas = context.normalizeExtraction_({
+      ...raw,
+      supplier: 'Energygas Italia',
+      contract_number: contractNumber,
+      customer_code: ''
+    });
+    assert.equal(formattedEnergygas.contract_number, '');
+    assert.equal(formattedEnergygas.customer_code, contractNumber);
+  });
+
   const duplicatedEnergygas = context.normalizeExtraction_({
     ...raw,
     supplier: 'Energygas Italia',
@@ -1263,6 +1274,9 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
     getUrl: () => 'https://sheets.test/spreadsheet-id'
   });
   context.getSheetLayout_ = () => layout;
+  context.captureElectricityDashboardLayoutsForRollback_ = () => ({
+    monthlyF1: { sourceRanges: ['F1:Z13'] }
+  });
   context.findSpreadsheetRowBySourceFile_ = () => 0;
   context.getInsertionRow_ = () => 2;
   context.updateMutationJournal_ = () => {};
@@ -1277,6 +1291,9 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   let rollbackRefreshes = 0;
   context.refreshElectricityDashboardAfterRollback_ = (state) => {
     assert.equal(state.sheet, sheet);
+    assert.equal(JSON.stringify(state.electricityDashboardLayouts), JSON.stringify({
+      monthlyF1: { sourceRanges: ['F1:Z13'] }
+    }));
     rollbackRefreshes += 1;
   };
   assert.throws(() => context.importUtilityInvoiceToSheet_(
@@ -1296,9 +1313,11 @@ function testDashboardRollbackForcesRegeneration() {
   });
   context.getElectricitySupplySheetName_ = (config) =>
     config.sheet_by_supply.electricity;
-  context.initializeElectricityDashboard_ = (target, config) => {
+  const preservedLayouts = { monthlyF1: { sourceRanges: ['F1:Z13'] } };
+  context.initializeElectricityDashboard_ = (target, config, options) => {
     assert.equal(target, spreadsheet);
     assert.equal(config.locale, 'en');
+    assert.equal(options.preservedLayouts, preservedLayouts);
     regenerated += 1;
   };
   context.refreshElectricityDashboardAfterRollback_({
@@ -1306,7 +1325,8 @@ function testDashboardRollbackForcesRegeneration() {
       getName: () => 'Electricity',
       getParent: () => spreadsheet
     },
-    extracted: validInvoice()
+    extracted: validInvoice(),
+    electricityDashboardLayouts: preservedLayouts
   });
   assert.equal(regenerated, 1);
 

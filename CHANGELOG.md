@@ -65,6 +65,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Prevent dashboard aliases to every configured supply tab and clean up a
   temporary technical backup if snapshot creation fails.
 - Expand accepted legacy technical grids before snapshotting them for refresh.
+- Restore each managed chart's pre-import data range when a later invoice
+  mutation rolls back, so a failed import cannot widen a user-shortened view.
+- Continue cleaning up a newly created dashboard when deletion of its technical
+  sheet fails, and report every incomplete cleanup with the original failure.
+- Recognize every Energygas `CL`-prefixed identifier as a customer code,
+  including values with separators after the prefix.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

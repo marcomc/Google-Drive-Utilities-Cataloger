@@ -176,6 +176,39 @@ function testDashboardValidationPreventsPartialArtifacts() {
   assert.deepEqual(capacityInserted, []);
 }
 
+function testDashboardCreationAttemptsBothCleanupsAfterFailure() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const source = {};
+  const dashboard = {};
+  const technical = {};
+  const deleted = [];
+  const spreadsheet = {
+    getSheetByName: (name) => name === 'Electricity' ? source : null,
+    getSheets: () => [],
+    insertSheet: (name) => name === labels.sheet ? dashboard : technical,
+    deleteSheet: (sheet) => {
+      deleted.push(sheet);
+      if (sheet === technical) {
+        throw new Error('technical delete failed');
+      }
+    }
+  };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  context.validateElectricityDashboardSource_ = () => true;
+  context.assertElectricityDashboardTechnicalSheet_ = () => {};
+  context.assertElectricityDashboardCapacity_ = () => {};
+  context.markElectricityDashboardTechnicalSheet_ = () => {};
+  context.captureElectricityChartLayouts_ = () => ({});
+  context.writeElectricityDashboardData_ = () => {
+    throw new Error('write failed');
+  };
+
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, config),
+    /write failed.*Technical sheet cleanup also failed: technical delete failed/);
+  assert.deepEqual(deleted, [technical, dashboard]);
+}
+
 function testTechnicalFormulaRangesUseReservedCapacity() {
   const context = loadDashboard();
   const source = {
@@ -574,6 +607,7 @@ testLocalizedDashboardContracts();
 testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardValidationPreventsPartialArtifacts();
+testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalFormulaRangesUseReservedCapacity();
 testTechnicalRangesUseTheReservedGrid();
 testYearDiscoveryUsesReferenceYearThenIssueDate();

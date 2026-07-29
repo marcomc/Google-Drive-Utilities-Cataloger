@@ -72,8 +72,8 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       technicalBackup = createElectricityDashboardTechnicalBackup_(spreadsheet,
         managedTechnical);
     }
-    const chartLayouts = captureElectricityChartLayouts_(managedDashboard,
-      managedTechnical, labels);
+    const chartLayouts = options && options.preservedLayouts ||
+      captureElectricityChartLayouts_(managedDashboard, managedTechnical, labels);
     const chartRanges = writeElectricityDashboardData_(managedTechnical,
       electricity, labels);
     if (!chartRanges) {
@@ -106,10 +106,22 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       }
     }
     if (technicalCreated) {
-      spreadsheet.deleteSheet(managedTechnical);
+      try {
+        spreadsheet.deleteSheet(managedTechnical);
+      } catch (cleanupError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Technical sheet cleanup also failed: ' +
+          cleanupError.message;
+      }
     }
     if (dashboardCreated) {
-      spreadsheet.deleteSheet(managedDashboard);
+      try {
+        spreadsheet.deleteSheet(managedDashboard);
+      } catch (cleanupError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Dashboard sheet cleanup also failed: ' +
+          cleanupError.message;
+      }
     }
     throw error;
   }

@@ -258,6 +258,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       state.extracted = extracted;
       state.sheet = sheetImport.sheet;
       state.sheetRow = sheetImport.row;
+      state.electricityDashboardLayouts =
+        sheetImport.electricityDashboardLayouts || null;
     }
 
     updateMutationJournal_(file.getId(), { stage: 'renaming' });
@@ -358,7 +360,23 @@ function refreshElectricityDashboardAfterRollback_(state) {
     getElectricitySupplySheetName_(automationConfig)) {
     return;
   }
-  initializeElectricityDashboard_(state.sheet.getParent(), automationConfig);
+  initializeElectricityDashboard_(state.sheet.getParent(), automationConfig, {
+    preservedLayouts: state.electricityDashboardLayouts || null
+  });
+}
+
+function captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig) {
+  if (sheet.getName() !== getElectricitySupplySheetName_(automationConfig)) {
+    return null;
+  }
+  const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+  const spreadsheet = sheet.getParent();
+  const dashboard = spreadsheet.getSheetByName(labels.sheet);
+  const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (!dashboard || !technical) {
+    return null;
+  }
+  return captureElectricityChartLayouts_(dashboard, technical, labels);
 }
 
 function listDirectIntakePdfs_(rootFolder) {
@@ -931,7 +949,7 @@ function normalizeExtraction_(extracted) {
   normalized.contract_number = String(normalized.contract_number || '').trim();
   normalized.customer_code = String(normalized.customer_code || '').trim();
   if (/^ENERGYGAS(?: ITALIA)?$/i.test(normalized.supplier || '') &&
-    /^CL\d+$/i.test(normalized.contract_number)) {
+    /^CL/i.test(normalized.contract_number)) {
     // Energygas uses CL... values for the customer code. Do not let a model
     // label guess populate the contract column. Retain an independently
     // extracted customer code, or use the CL value only when it is absent.
@@ -1397,6 +1415,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   if (!sheet) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
+  const electricityDashboardLayouts =
+    captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
   const layout = getSheetLayout_(sheet);
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
@@ -1431,8 +1451,10 @@ function importUtilityInvoiceToSheet_(file, extracted) {
       try {
         restoreImportedRowPayload_(sheet, correctedRow, existingRow,
           previousRowPayload, file, layout);
-        refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
-          automationConfig, sheet, extracted);
+        refreshElectricityDashboardAfterRollback_({
+          sheet: sheet,
+          electricityDashboardLayouts: electricityDashboardLayouts
+        });
       } catch (rollbackError) {
         error.mutationRollbackIncomplete = true;
         error.message += ' Spreadsheet rollback also failed: ' +
@@ -1446,7 +1468,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
       row: correctedRow,
       created: false,
       originalRow: existingRow,
-      previousRowPayload: previousRowPayload
+      previousRowPayload: previousRowPayload,
+      electricityDashboardLayouts: electricityDashboardLayouts
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
@@ -1473,7 +1496,10 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   } catch (error) {
     try {
       sheet.deleteRow(targetRow);
-      refreshElectricityDashboardAfterRollback_({ sheet: sheet });
+      refreshElectricityDashboardAfterRollback_({
+        sheet: sheet,
+        electricityDashboardLayouts: electricityDashboardLayouts
+      });
     } catch (rollbackError) {
       updateMutationJournal_(file.getId(), { stage: 'sheet-rollback-failed' });
       error.mutationRollbackIncomplete = true;
@@ -1486,7 +1512,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
     sheet: sheet,
     row: targetRow,
-    created: true
+    created: true,
+    electricityDashboardLayouts: electricityDashboardLayouts
   };
 }
 
