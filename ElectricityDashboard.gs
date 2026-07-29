@@ -28,11 +28,14 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   if (!electricity) {
     return;
   }
-  if (!validateElectricityDashboardSource_(electricity, labels)) {
-    return;
-  }
   const dashboard = spreadsheet.getSheetByName(labels.sheet);
   const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (!validateElectricityDashboardSource_(electricity, labels)) {
+    if (dashboard || technical) {
+      throw new Error('Electricity dashboard source headers are missing or invalid.');
+    }
+    return;
+  }
   if (dashboard === electricity) {
     throw new Error('The electricity dashboard sheet name matches the source sheet.');
   }

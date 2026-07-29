@@ -2440,6 +2440,7 @@ function rollbackJournalSheetRow_(journal, file) {
     return { unmarkedRowMayRemain: true };
   }
   sheet.deleteRow(matches[0]);
+  refreshElectricityDashboardAfterRollback_({ sheet: sheet });
   return { unmarkedRowMayRemain: false };
 }
 

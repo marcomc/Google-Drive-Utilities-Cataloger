@@ -157,6 +157,12 @@ function testDashboardValidationPreventsPartialArtifacts() {
   context.getElectricityDashboardYears_ = () => [2026];
   assert.equal(context.validateElectricityDashboardSource_(source, labels), true);
 
+  delete lookup['consumption quantity f2'];
+  assert.throws(() => context.initializeElectricityDashboard_({
+    getSheetByName: (name) => name === 'Electricity' ? source : {}
+  }, config), /source headers are missing or invalid/);
+  lookup['consumption quantity f2'] = 5;
+
   const fullSheet = {
     getMaxRows: () => 100000,
     getMaxColumns: () => 100

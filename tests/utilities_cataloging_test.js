@@ -833,6 +833,7 @@ function testMutationRecoveryStages() {
   function scenario(journal, markedRows) {
     const deletedRows = [];
     const refreshedRows = [];
+    const dashboardRefreshes = [];
     const context = loadCataloger();
     const file = { getId: () => 'source-file-id' };
     const sheet = {
@@ -855,9 +856,13 @@ function testMutationRecoveryStages() {
     context.refreshImportedSourceLink_ = (_sheet, row) => {
       refreshedRows.push(row);
     };
+    context.refreshElectricityDashboardAfterRollback_ = (state) => {
+      dashboardRefreshes.push(state.sheet);
+    };
     return {
       deletedRows,
       refreshedRows,
+      dashboardRefreshes,
       result: () => context.rollbackJournalSheetRow_(journal, file)
     };
   }
@@ -881,6 +886,7 @@ function testMutationRecoveryStages() {
   }, [2]);
   assert.equal(markerWrittenBeforeJournal.result().unmarkedRowMayRemain, false);
   assert.deepEqual(markerWrittenBeforeJournal.deletedRows, [2]);
+  assert.equal(markerWrittenBeforeJournal.dashboardRefreshes.length, 1);
 
   const markerLostAfterJournal = scenario({
     stage: 'sheet-marker-written',
