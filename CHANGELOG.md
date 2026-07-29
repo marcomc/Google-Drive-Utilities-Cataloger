@@ -40,6 +40,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   data block.
 - Apply and read back the corresponding installation-specific Drive runtime
   policy, preserving its local routing rules.
+- Force dashboard regeneration after a restored invoice row, preserve advanced
+  managed-chart formatting, and expand a custom chart range only on a new-year
+  refresh.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

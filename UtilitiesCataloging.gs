@@ -353,8 +353,7 @@ function refreshElectricityDashboardAfterRollback_(state) {
   if (!state.sheet || !state.extracted) {
     return;
   }
-  refreshElectricityDashboardAfterInvoiceImport_(state.sheet.getParent(),
-    getAutomationConfig_(), state.sheet, state.extracted);
+  initializeElectricityDashboard_(state.sheet.getParent(), getAutomationConfig_());
 }
 
 function listDirectIntakePdfs_(rootFolder) {

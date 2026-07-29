@@ -294,7 +294,8 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
       width: 811,
       height: 377,
       colors: ['#123456'],
-      legend: { position: 'bottom' }
+      legend: { position: 'bottom' },
+      series: { 0: { lineWidth: 4, pointSize: 7 } }
     })[key]
   };
   const chartTechnical = {
@@ -338,6 +339,8 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
     JSON.stringify(['#123456']));
   assert.equal(JSON.stringify(layouts.monthlyF1.options.legend),
     JSON.stringify({ position: 'bottom' }));
+  assert.equal(JSON.stringify(layouts.monthlyF1.options.series),
+    JSON.stringify({ 0: { lineWidth: 4, pointSize: 7 } }));
 
   const addedRanges = [];
   const builder = {
@@ -403,12 +406,17 @@ function testDashboardRefreshUsesNewInvoiceYearOnly() {
   let refreshes = 0;
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => true;
-  context.initializeElectricityDashboard_ = () => { refreshes += 1; };
+  let options;
+  context.initializeElectricityDashboard_ = (_spreadsheet, _config, value) => {
+    refreshes += 1;
+    options = value;
+  };
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2027 });
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2026 });
   assert.equal(refreshes, 1);
+  assert.equal(options.extendManagedRanges, true);
 }
 
 function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
@@ -487,7 +495,10 @@ function testManagedChartsSurviveReplacementFailure() {
 
 function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
   const context = loadDashboard();
-  const sheet = { getSheetId: () => 42 };
+  const sheet = {
+    getSheetId: () => 42,
+    getRange: () => ({ getValues: () => [['Month', 2024, 2025, 2026, 2027]] })
+  };
   const canonical = {
     getSheet: () => sheet,
     getRow: () => 1,
@@ -495,12 +506,19 @@ function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
     getNumRows: () => 13,
     getNumColumns: () => 26
   };
-  const shortened = {
+  const currentBoundary = {
     getSheet: () => sheet,
     getRow: () => 1,
     getColumn: () => 6,
     getNumRows: () => 13,
     getNumColumns: () => 4
+  };
+  const intentionallyShortened = {
+    getSheet: () => sheet,
+    getRow: () => 1,
+    getColumn: () => 6,
+    getNumRows: () => 13,
+    getNumColumns: () => 3
   };
   const shifted = {
     getSheet: () => sheet,
@@ -509,10 +527,12 @@ function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
     getNumRows: () => 13,
     getNumColumns: () => 4
   };
-  assert.equal(context.shouldExtendElectricityChartRange_(shortened, canonical),
-    true);
-  assert.equal(context.shouldExtendElectricityChartRange_(shifted, canonical),
-    false);
+  assert.equal(context.shouldExtendElectricityChartRange_(currentBoundary,
+    canonical, sheet, 'monthlyF1', 4), true);
+  assert.equal(context.shouldExtendElectricityChartRange_(intentionallyShortened,
+    canonical, sheet, 'monthlyF1', 4), false);
+  assert.equal(context.shouldExtendElectricityChartRange_(shifted, canonical,
+    sheet, 'monthlyF1', 4), false);
 }
 
 testLocalizedDashboardContracts();

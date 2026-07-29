@@ -18,7 +18,7 @@ function getElectricityDashboardLabels_(locale) {
   return localization.electricityDashboard;
 }
 
-function initializeElectricityDashboard_(spreadsheet, automationConfig) {
+function initializeElectricityDashboard_(spreadsheet, automationConfig, options) {
   const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
   const electricitySheetName = getElectricitySupplySheetName_(automationConfig);
   if (!electricitySheetName) {
@@ -53,6 +53,8 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig) {
       technicalCreated = true;
     }
     markElectricityDashboardTechnicalSheet_(managedTechnical);
+    const chartLayouts = captureElectricityChartLayouts_(managedDashboard,
+      managedTechnical, labels);
     const chartRanges = writeElectricityDashboardData_(managedTechnical,
       electricity, labels);
     if (!chartRanges) {
@@ -60,7 +62,8 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig) {
     }
     managedTechnical.hideSheet();
     refreshElectricityDashboardCharts_(managedDashboard, managedTechnical,
-      chartRanges, labels);
+      chartRanges, labels, Boolean(options && options.extendManagedRanges),
+      chartLayouts);
   } catch (error) {
     if (technicalCreated) {
       spreadsheet.deleteSheet(managedTechnical);
@@ -318,8 +321,9 @@ function writeElectricityAnnualData_(technical, startColumn, source, bands,
 }
 
 function refreshElectricityDashboardCharts_(dashboard, technical, chartRanges,
-  labels) {
-  const layouts = captureElectricityChartLayouts_(dashboard, technical, labels);
+  labels, extendManagedRanges, preservedLayouts) {
+  const layouts = preservedLayouts || captureElectricityChartLayouts_(dashboard,
+    technical, labels);
   const managedTitles = ELECTRICITY_DASHBOARD_KEYS_.map(function (key) {
     return labels.charts[key];
   });
@@ -340,7 +344,7 @@ function refreshElectricityDashboardCharts_(dashboard, technical, chartRanges,
       const key = definition[0];
       const chart = buildElectricityChart_(dashboard, technical, definition[1],
         getElectricityChartLayout_(layouts, key, definition[2], definition[3],
-          700, 360), labels.charts[key], definition[4]);
+          700, 360), labels.charts[key], definition[4], extendManagedRanges);
       dashboard.insertChart(chart);
       replacements.push(chart);
     });
@@ -382,6 +386,7 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
     const container = chart.getContainerInfo();
     const options = chart.getOptions();
     layouts[key] = {
+      key: key,
       row: container.getAnchorRow(),
       column: container.getAnchorColumn(),
       offsetX: container.getOffsetX(),
@@ -393,6 +398,7 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
       }).map(function (range) {
         return range.getA1Notation();
       }),
+      dataDimension: getElectricityChartDataDimension_(technical, key),
       options: captureElectricityChartOptions_(options)
     };
   });
@@ -403,21 +409,9 @@ function isElectricityChartRangeWithinManagedBlock_(range, technical, key) {
   if (range.getSheet().getSheetId() !== technical.getSheetId()) {
     return false;
   }
-  const grid = getElectricityDashboardTechnicalGrid_();
-  let block;
-  if (key === 'monthlyBands') {
-    block = { row: 1, column: 1, rows: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1,
-      columns: 4 };
-  } else if (key === 'annualBands') {
-    block = { row: 1, column: grid.annualStart,
-      rows: ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, columns: 4 };
-  } else {
-    const bandIndex = ELECTRICITY_DASHBOARD_KEYS_.indexOf(key) - 1;
-    if (bandIndex < 0 || bandIndex >= grid.monthlyStarts.length) {
-      return false;
-    }
-    block = { row: 1, column: grid.monthlyStarts[bandIndex], rows: 13,
-      columns: grid.blockWidth };
+  const block = getElectricityChartManagedBlock_(key);
+  if (!block) {
+    return false;
   }
   return range.getRow() >= block.row && range.getColumn() >= block.column &&
     range.getRow() + range.getNumRows() - 1 <= block.row + block.rows - 1 &&
@@ -425,10 +419,59 @@ function isElectricityChartRangeWithinManagedBlock_(range, technical, key) {
       block.column + block.columns - 1;
 }
 
+function getElectricityChartManagedBlock_(key) {
+  const grid = getElectricityDashboardTechnicalGrid_();
+  if (key === 'monthlyBands') {
+    return { row: 1, column: 1, rows: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1,
+      columns: 4 };
+  }
+  if (key === 'annualBands') {
+    return { row: 1, column: grid.annualStart,
+      rows: ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, columns: 4 };
+  }
+  const bandIndex = ELECTRICITY_DASHBOARD_KEYS_.indexOf(key) - 1;
+  if (bandIndex < 0 || bandIndex >= grid.monthlyStarts.length) {
+    return null;
+  }
+  return { row: 1, column: grid.monthlyStarts[bandIndex], rows: 13,
+    columns: grid.blockWidth };
+}
+
+function getElectricityChartDataDimension_(technical, key) {
+  const block = getElectricityChartManagedBlock_(key);
+  if (!block || key === 'monthlyBands' || typeof technical.getRange !== 'function') {
+    return 0;
+  }
+  const range = key === 'annualBands' ? technical.getRange(block.row,
+    block.column, block.rows, 1) : technical.getRange(block.row, block.column,
+    1, block.columns);
+  if (!range || typeof range.getValues !== 'function') {
+    return 0;
+  }
+  const values = range.getValues();
+  const dimension = key === 'annualBands' ? values.map(function (row) {
+    return row[0];
+  }) : values[0];
+  let count = 0;
+  for (let index = 0; index < dimension.length; index += 1) {
+    if (dimension[index] === '' || dimension[index] === null) {
+      return count;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 function captureElectricityChartOptions_(options) {
   const preserved = {};
-  ['colors', 'legend', 'backgroundColor', 'chartArea', 'fontName',
-    'hAxis', 'vAxis', 'titleTextStyle'].forEach(function (key) {
+  ['annotations', 'areaOpacity', 'backgroundColor', 'bar', 'chartArea',
+    'colors', 'curveType', 'dataOpacity', 'enableInteractivity', 'explorer',
+    'fontName', 'hAxis', 'height', 'is3D', 'isStacked', 'legend', 'lineWidth',
+    'orientation', 'pieHole', 'pieSliceText', 'pointShape', 'pointSize',
+    'reverseCategories', 'series', 'theme', 'tooltip', 'trendlines', 'vAxes',
+    'vAxis', 'width', 'titleTextStyle', 'animation', 'axisTitlesPosition',
+    'crosshair', 'focusTarget', 'histogram', 'intervals', 'selectionMode',
+    'slices', 'targetAxisIndex', 'viewWindowMode'].forEach(function (key) {
     const value = options.get(key);
     if (value !== null && value !== undefined) {
       preserved[key] = value;
@@ -439,6 +482,7 @@ function captureElectricityChartOptions_(options) {
 
 function getElectricityChartLayout_(layouts, key, row, column, width, height) {
   return layouts[key] || {
+    key: key,
     row: row,
     column: column,
     offsetX: 0,
@@ -452,11 +496,11 @@ function getElectricityChartLayout_(layouts, key, row, column, width, height) {
 function insertElectricityChart_(dashboard, technical, sourceRange, layout,
   title, type) {
   dashboard.insertChart(buildElectricityChart_(dashboard, technical, sourceRange,
-    layout, title, type));
+    layout, title, type, false));
 }
 
 function buildElectricityChart_(dashboard, technical, sourceRange, layout,
-  title, type) {
+  title, type, extendManagedRanges) {
   const builder = type === 'line' ? dashboard.newChart().asLineChart() :
     dashboard.newChart().asColumnChart();
   Object.keys(layout.options).forEach(function (key) {
@@ -465,8 +509,10 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
   const ranges = layout.sourceRanges && layout.sourceRanges.length ?
     layout.sourceRanges.map(function (a1Notation) {
       const preserved = technical.getRange(a1Notation);
-      return shouldExtendElectricityChartRange_(preserved, sourceRange) ?
-        sourceRange : preserved;
+      return extendManagedRanges &&
+        shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
+          layout.key, layout.dataDimension) ?
+        extendElectricityChartRange_(preserved, technical, layout.key) : preserved;
     }) : [sourceRange];
   ranges.forEach(function (range) {
     builder.addRange(range);
@@ -481,7 +527,8 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
     .build();
 }
 
-function shouldExtendElectricityChartRange_(preserved, sourceRange) {
+function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,
+  key, previousDimension) {
   if (!preserved || !sourceRange || typeof preserved.getSheet !== 'function' ||
     typeof sourceRange.getSheet !== 'function') {
     return false;
@@ -491,10 +538,29 @@ function shouldExtendElectricityChartRange_(preserved, sourceRange) {
     preserved.getColumn() !== sourceRange.getColumn()) {
     return false;
   }
-  return preserved.getNumRows() <= sourceRange.getNumRows() &&
+  if (!(preserved.getNumRows() <= sourceRange.getNumRows() &&
     preserved.getNumColumns() <= sourceRange.getNumColumns() &&
     (preserved.getNumRows() < sourceRange.getNumRows() ||
-      preserved.getNumColumns() < sourceRange.getNumColumns());
+      preserved.getNumColumns() < sourceRange.getNumColumns()))) {
+    return false;
+  }
+  if (!technical || !key || !previousDimension) {
+    return false;
+  }
+  const selectedDimension = key === 'annualBands' ? preserved.getNumRows() :
+    preserved.getNumColumns();
+  return selectedDimension === previousDimension &&
+    getElectricityChartDataDimension_(technical, key) > previousDimension;
+}
+
+function extendElectricityChartRange_(preserved, technical, key) {
+  const dimension = getElectricityChartDataDimension_(technical, key);
+  if (key === 'annualBands') {
+    return technical.getRange(preserved.getRow(), preserved.getColumn(),
+      dimension, preserved.getNumColumns());
+  }
+  return technical.getRange(preserved.getRow(), preserved.getColumn(),
+    preserved.getNumRows(), dimension);
 }
 
 function findDashboardHeader_(lookup, aliases) {
@@ -569,7 +635,9 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     return;
   }
   try {
-    initializeElectricityDashboard_(spreadsheet, automationConfig);
+    initializeElectricityDashboard_(spreadsheet, automationConfig, {
+      extendManagedRanges: true
+    });
   } catch (error) {
     logCatalogEvent_('electricity-dashboard-refresh-failed', {
       errorType: error.name || 'Error',

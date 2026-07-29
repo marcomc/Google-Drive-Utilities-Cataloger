@@ -1242,6 +1242,23 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   assert.deepEqual(deletedRows, [2]);
 }
 
+function testDashboardRollbackForcesRegeneration() {
+  const context = loadCataloger();
+  const spreadsheet = {};
+  let regenerated = 0;
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.initializeElectricityDashboard_ = (target, config) => {
+    assert.equal(target, spreadsheet);
+    assert.equal(config.locale, 'en');
+    regenerated += 1;
+  };
+  context.refreshElectricityDashboardAfterRollback_({
+    sheet: { getParent: () => spreadsheet },
+    extracted: validInvoice()
+  });
+  assert.equal(regenerated, 1);
+}
+
 function testMutationJournalPayloadUsesSeparateChunks() {
   const context = loadCataloger();
   const store = {};
@@ -1718,6 +1735,7 @@ testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
+testDashboardRollbackForcesRegeneration();
 testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
