@@ -43,6 +43,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Force dashboard regeneration after a restored invoice row, preserve advanced
   managed-chart formatting, and expand a custom chart range only on a new-year
   refresh.
+- Rebuild electricity statistics after replacement imports and journal recovery,
+  normalize reported F1/F2/F3 quantities to numeric kWh values, retain the
+  correct Energygas customer code, and skip dashboard work for other supplies.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

@@ -385,7 +385,7 @@ function testTechnicalOwnershipAndCapacityPreflight() {
     { getSheets: () => [fullSheet] }, null, null), /cell limit/);
 }
 
-function testDashboardRefreshUsesNewInvoiceYearOnly() {
+function testDashboardRefreshRebuildsEveryElectricityImport() {
   const context = loadDashboard();
   const technical = {
     getRange: () => ({ getValues: () => [[2025, 2026].concat(Array(23).fill(''))] })
@@ -406,17 +406,18 @@ function testDashboardRefreshUsesNewInvoiceYearOnly() {
   let refreshes = 0;
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => true;
-  let options;
+  const options = [];
   context.initializeElectricityDashboard_ = (_spreadsheet, _config, value) => {
     refreshes += 1;
-    options = value;
+    options.push(value);
   };
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2027 });
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2026 });
-  assert.equal(refreshes, 1);
-  assert.equal(options.extendManagedRanges, true);
+  assert.equal(refreshes, 2);
+  assert.equal(options[0].extendManagedRanges, true);
+  assert.equal(options[1].extendManagedRanges, false);
 }
 
 function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
@@ -544,7 +545,7 @@ testTechnicalRangesUseTheReservedGrid();
 testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
-testDashboardRefreshUsesNewInvoiceYearOnly();
+testDashboardRefreshRebuildsEveryElectricityImport();
 testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
 testManagedChartsSurviveReplacementFailure();
 testPreservedChartRangesExtendOnlyFromTheirManagedOrigin();

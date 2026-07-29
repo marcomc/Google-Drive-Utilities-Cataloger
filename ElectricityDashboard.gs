@@ -631,12 +631,15 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
   // import, including an import whose year is already represented in a chart.
   validateElectricityDashboardSource_(importedSheet, labels);
   const year = electricityDashboardImportedYear_(extracted);
-  if (!year || hasElectricityDashboardYear_(technical, year)) {
-    return;
-  }
+  // A replacement can remove a previously represented year, even when its
+  // new year is already present. Rebuild on every electricity import so both
+  // additions and removals are reflected; expand a narrowed range only when
+  // this import adds a new year.
+  const extendManagedRanges = Boolean(year) &&
+    !hasElectricityDashboardYear_(technical, year);
   try {
     initializeElectricityDashboard_(spreadsheet, automationConfig, {
-      extendManagedRanges: true
+      extendManagedRanges: extendManagedRanges
     });
   } catch (error) {
     logCatalogEvent_('electricity-dashboard-refresh-failed', {

@@ -145,6 +145,15 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(energygas.contract_number, '');
   assert.equal(energygas.customer_code, 'CL000001');
 
+  const duplicatedEnergygas = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'Energygas Italia',
+    contract_number: 'CL000001',
+    customer_code: 'CL000001'
+  });
+  assert.equal(duplicatedEnergygas.contract_number, '');
+  assert.equal(duplicatedEnergygas.customer_code, 'CL000001');
+
   const normalizedSheetValues = context.normalizeExtraction_({
     ...raw,
     sheet_values: [{ header: '  Unità di misura consumi  ', value: ' mc  ' }]
@@ -152,6 +161,18 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(JSON.stringify(normalizedSheetValues), JSON.stringify([
     { header: 'Unità di misura consumi', value: 'mc' }
   ]));
+
+  const bandValues = context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: 'Quantità consumi F1', value: '368,74 kWh' }]
+  }).sheet_values;
+  assert.equal(bandValues[0].value, 368.74);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234,56 kWh'),
+    1234.56);
+  assert.throws(() => context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: 'Quantità consumi F1', value: 'not available' }]
+  }), /nonnumeric electricity band consumption/);
 
   assert.throws(
     () => context.validateRawExtractionShape_({
@@ -895,6 +916,10 @@ function testMutationRecoveryStages() {
   payloadContext.restoreImportedRowPayload_ = (_sheet, row, originalRow, payload) => {
     restoredRows.push([row, originalRow, payload]);
   };
+  const recoveredDashboardSheets = [];
+  payloadContext.refreshElectricityDashboardAfterRollback_ = (state) => {
+    recoveredDashboardSheets.push(state.sheet);
+  };
   assert.equal(payloadContext.rollbackJournalSheetRow_({
     stage: 'sheet-existing-written',
     sheetName: 'Water',
@@ -905,6 +930,7 @@ function testMutationRecoveryStages() {
     sheetRowPayload: { cells: [] }
   }, payloadFile).unmarkedRowMayRemain, false);
   assert.deepEqual(restoredRows, [[3, 2, { cells: [] }]]);
+  assert.equal(recoveredDashboardSheets.length, 1);
 
   const existingRowAfterRename = scenario({
     stage: 'renamed',
@@ -1246,15 +1272,31 @@ function testDashboardRollbackForcesRegeneration() {
   const context = loadCataloger();
   const spreadsheet = {};
   let regenerated = 0;
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { electricity: 'Electricity' }
+  });
+  context.getElectricitySupplySheetName_ = (config) =>
+    config.sheet_by_supply.electricity;
   context.initializeElectricityDashboard_ = (target, config) => {
     assert.equal(target, spreadsheet);
     assert.equal(config.locale, 'en');
     regenerated += 1;
   };
   context.refreshElectricityDashboardAfterRollback_({
-    sheet: { getParent: () => spreadsheet },
+    sheet: {
+      getName: () => 'Electricity',
+      getParent: () => spreadsheet
+    },
     extracted: validInvoice()
+  });
+  assert.equal(regenerated, 1);
+
+  context.refreshElectricityDashboardAfterRollback_({
+    sheet: {
+      getName: () => 'Water',
+      getParent: () => spreadsheet
+    }
   });
   assert.equal(regenerated, 1);
 }

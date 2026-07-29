@@ -350,10 +350,15 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
 }
 
 function refreshElectricityDashboardAfterRollback_(state) {
-  if (!state.sheet || !state.extracted) {
+  if (!state.sheet) {
     return;
   }
-  initializeElectricityDashboard_(state.sheet.getParent(), getAutomationConfig_());
+  const automationConfig = getAutomationConfig_();
+  if (state.sheet.getName() !==
+    getElectricitySupplySheetName_(automationConfig)) {
+    return;
+  }
+  initializeElectricityDashboard_(state.sheet.getParent(), automationConfig);
 }
 
 function listDirectIntakePdfs_(rootFolder) {
@@ -926,10 +931,13 @@ function normalizeExtraction_(extracted) {
   normalized.contract_number = String(normalized.contract_number || '').trim();
   normalized.customer_code = String(normalized.customer_code || '').trim();
   if (/^ENERGYGAS(?: ITALIA)?$/i.test(normalized.supplier || '') &&
-    /^CL\d+$/i.test(normalized.contract_number) && !normalized.customer_code) {
+    /^CL\d+$/i.test(normalized.contract_number)) {
     // Energygas uses CL... values for the customer code. Do not let a model
-    // label guess populate the contract column when the customer is empty.
-    normalized.customer_code = normalized.contract_number;
+    // label guess populate the contract column. Retain an independently
+    // extracted customer code, or use the CL value only when it is absent.
+    if (!normalized.customer_code) {
+      normalized.customer_code = normalized.contract_number;
+    }
     normalized.contract_number = '';
   }
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
@@ -965,8 +973,60 @@ function normalizeSheetValues_(sheetValues) {
     if (typeof normalized.value === 'string') {
       normalized.value = normalized.value.trim();
     }
+    if (isElectricityBandConsumptionHeader_(normalized.header) &&
+      normalized.value !== null && normalized.value !== undefined) {
+      const quantity = normalizeElectricityBandConsumption_(normalized.value);
+      if (quantity === null) {
+        throw new Error('Gemini extraction has a nonnumeric electricity band consumption value.');
+      }
+      normalized.value = quantity;
+    }
     return normalized;
   });
+}
+
+function isElectricityBandConsumptionHeader_(header) {
+  const normalizedHeader = normalizeHeader_(header);
+  const registry = typeof getLocalizationRegistry_ === 'function' ?
+    getLocalizationRegistry_() : {};
+  const isLocalizedAlias = Object.keys(registry).some(function (locale) {
+    const dashboard = registry[locale].electricityDashboard;
+    return dashboard && dashboard.bandAliases.some(function (aliases) {
+      return aliases.map(normalizeHeader_).indexOf(normalizedHeader) >= 0;
+    });
+  });
+  return isLocalizedAlias || [
+    'consumption quantity f1', 'consumption quantity f2',
+    'consumption quantity f3', 'consumption f1 quantity',
+    'consumption f2 quantity', 'consumption f3 quantity',
+    'quantity consumption f1', 'quantity consumption f2',
+    'quantity consumption f3', 'quantita consumi f1',
+    'quantita consumi f2', 'quantita consumi f3'
+  ].indexOf(normalizedHeader) >= 0;
+}
+
+function normalizeElectricityBandConsumption_(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  let text = value.trim().replace(/\s+/g, '');
+  text = text.replace(/kwh$/i, '');
+  if (!/^[+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?$/.test(text)) {
+    return null;
+  }
+  if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
+    const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
+      ',' : '.';
+    const groupingSeparator = decimalSeparator === ',' ? /\./g : /,/g;
+    text = text.replace(groupingSeparator, '').replace(decimalSeparator, '.');
+  } else if (text.indexOf(',') >= 0) {
+    text = text.replace(',', '.');
+  }
+  const quantity = Number(text);
+  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
 }
 
 function validateExtraction_(extracted) {
@@ -2357,6 +2417,7 @@ function rollbackJournalSheetRow_(journal, file) {
     if (journal.sheetRowPayload) {
       restoreImportedRowPayload_(sheet, matches[0], journal.sheetOriginalRow ||
         journal.sheetRow, journal.sheetRowPayload, file, layout);
+      refreshElectricityDashboardAfterRollback_({ sheet: sheet });
     } else {
       // Journals written before row-payload snapshots remain recoverable.
       refreshImportedSourceLink_(sheet, matches[0], file);
