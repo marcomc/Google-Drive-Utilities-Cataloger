@@ -1388,6 +1388,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
     verifyImportedRow_(sheet, targetRow, layout, file, extracted);
     updateMutationJournal_(file.getId(), { stage: 'sheet-written' });
+    refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+      sheet, extracted);
   } catch (error) {
     try {
       sheet.deleteRow(targetRow);
@@ -1399,8 +1401,6 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     }
     throw error;
   }
-  refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
-    sheet, extracted);
   return {
     link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
     sheet: sheet,
@@ -1465,7 +1465,12 @@ function restoreImportedRowPayload_(sheet, row, originalRow, payload, file,
     if (cell.formula) {
       range.setFormula(cell.formula);
     } else {
-      range.setValue(deserializeImportedCellValue_(cell.value));
+      const value = deserializeImportedCellValue_(cell.value);
+      if (typeof value === 'string') {
+        setLiteralSheetValue_(range, value);
+      } else {
+        range.setValue(value);
+      }
     }
   });
   return restoredRow;

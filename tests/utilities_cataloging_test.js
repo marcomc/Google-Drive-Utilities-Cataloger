@@ -1158,26 +1158,27 @@ function testSourceHyperlinkFormulaIsPreserved() {
 
 function testExistingInvoicePayloadRestoresAndRepositions() {
   const context = loadCataloger();
-  const layout = { headers: ['Date', 'Source', 'Total'], lookup: {} };
+  const layout = { headers: ['Date', 'Source', 'Total', 'Notes'], lookup: {} };
   const originalDate = new Date('2026-04-09T00:00:00Z');
   const writes = [];
   const moves = [];
-  const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 3 };
+  const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 4 };
   const sheet = {
     getRange: (row, column, numRows, numColumns) => {
       if (numRows && numColumns) {
         if (row === 9) {
           return {
             ...sourceRow,
-            getValues: () => [[originalDate, 'ignored', 14.64]],
-            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '']]
+            getValues: () => [[originalDate, 'ignored', 14.64, '=untrusted']],
+            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']]
           };
         }
         return { row, column, numRows, numColumns };
       }
       return {
         setFormula: (value) => writes.push(['formula', row, column, value]),
-        setValue: (value) => writes.push(['value', row, column, value])
+        setValue: (value) => writes.push(['value', row, column, value]),
+        setRichTextValue: (value) => writes.push(['rich', row, column, value])
       };
     },
     moveRows: (range, destination) => moves.push([range, destination])
@@ -1196,12 +1197,49 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
   assert.equal(Object.prototype.toString.call(writes[0][3]), '[object Date]');
   assert.deepEqual(writes[1], ['formula', 4, 2, '=HYPERLINK("url";"invoice")']);
   assert.deepEqual(writes[2], ['value', 4, 3, 14.64]);
+  assert.equal(writes[3][0], 'rich');
+  assert.equal(writes[3][3].text, '=untrusted');
 
   context.getInsertionRow_ = () => 12;
   context.findSpreadsheetRowBySourceFile_ = () => 12;
   assert.equal(context.repositionImportedRow_(sheet, 9, layout,
     '2026-05-08', { getId: () => 'file-id' }), 12);
   assert.equal(moves[1][1], 13);
+}
+
+function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
+  const context = loadCataloger();
+  const deletedRows = [];
+  const sheet = {
+    getName: () => 'Electricity',
+    getSheetId: () => 7,
+    deleteRow: (row) => deletedRows.push(row)
+  };
+  const layout = { headerRow: 1, headers: ['Issue date'], lookup: {} };
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Electricity: 'Electricity' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.getSheetLayout_ = () => layout;
+  context.findSpreadsheetRowBySourceFile_ = () => 0;
+  context.getInsertionRow_ = () => 2;
+  context.updateMutationJournal_ = () => {};
+  context.insertBlankRowAt_ = () => {};
+  context.copyRowStyleAndFormulas_ = () => {};
+  context.refreshImportedSourceLink_ = () => {};
+  context.writeInvoiceRow_ = () => {};
+  context.verifyImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+  assert.throws(() => context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice()
+  ), /dashboard refresh failed/);
+  assert.deepEqual(deletedRows, [2]);
 }
 
 function testBuildSpreadsheetHyperlinkFormulaEscapesValues() {
@@ -1659,6 +1697,7 @@ testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
+testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();

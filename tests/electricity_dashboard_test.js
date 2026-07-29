@@ -310,10 +310,18 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
     getNumRows: () => 13,
     getNumColumns: () => 26
   };
+  const wrongRange = {
+    getA1Notation: () => 'AF1:AI26',
+    getSheet: () => chartTechnical,
+    getRow: () => 1,
+    getColumn: () => 32,
+    getNumRows: () => 26,
+    getNumColumns: () => 4
+  };
   const layouts = context.captureElectricityChartLayouts_({
     getCharts: () => [{
       getOptions: () => options,
-      getRanges: () => [range],
+      getRanges: () => [range, wrongRange],
       getContainerInfo: () => ({
         getAnchorRow: () => 17,
         getAnchorColumn: () => 9,

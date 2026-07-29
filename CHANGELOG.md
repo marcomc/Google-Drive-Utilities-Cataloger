@@ -34,6 +34,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   source link, and original position, when a later import mutation fails.
 - Reject dashboard refreshes that exceed source or year capacity, and preserve
   existing managed charts if replacement chart insertion fails.
+- Roll back a newly inserted invoice row if its dashboard refresh fails, and
+  restore reimported strings as literal text during rollback.
+- Restrict preserved custom chart ranges to each chart's reserved technical
+  data block.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

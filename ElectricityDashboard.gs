@@ -389,10 +389,7 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
       width: Number(options.get('width')) || 700,
       height: Number(options.get('height')) || 360,
       sourceRanges: chart.getRanges().filter(function (range) {
-        return range.getSheet().getSheetId() === technical.getSheetId() &&
-          range.getRow() + range.getNumRows() - 1 <= technical.getMaxRows() &&
-          range.getColumn() + range.getNumColumns() - 1 <=
-            technical.getMaxColumns();
+        return isElectricityChartRangeWithinManagedBlock_(range, technical, key);
       }).map(function (range) {
         return range.getA1Notation();
       }),
@@ -400,6 +397,32 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
     };
   });
   return layouts;
+}
+
+function isElectricityChartRangeWithinManagedBlock_(range, technical, key) {
+  if (range.getSheet().getSheetId() !== technical.getSheetId()) {
+    return false;
+  }
+  const grid = getElectricityDashboardTechnicalGrid_();
+  let block;
+  if (key === 'monthlyBands') {
+    block = { row: 1, column: 1, rows: ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 1,
+      columns: 4 };
+  } else if (key === 'annualBands') {
+    block = { row: 1, column: grid.annualStart,
+      rows: ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, columns: 4 };
+  } else {
+    const bandIndex = ELECTRICITY_DASHBOARD_KEYS_.indexOf(key) - 1;
+    if (bandIndex < 0 || bandIndex >= grid.monthlyStarts.length) {
+      return false;
+    }
+    block = { row: 1, column: grid.monthlyStarts[bandIndex], rows: 13,
+      columns: grid.blockWidth };
+  }
+  return range.getRow() >= block.row && range.getColumn() >= block.column &&
+    range.getRow() + range.getNumRows() - 1 <= block.row + block.rows - 1 &&
+    range.getColumn() + range.getNumColumns() - 1 <=
+      block.column + block.columns - 1;
 }
 
 function captureElectricityChartOptions_(options) {
