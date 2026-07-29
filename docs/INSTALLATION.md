@@ -219,6 +219,14 @@ For the spreadsheet:
   validation uses the same bounded header-row detection as runtime imports.
 - Unrelated existing tabs are not deleted.
 
+For an installation with the `Electricity` supply, the installer also manages
+an electricity statistics dashboard and a hidden technical-data sheet. The
+dashboard is generated in the selected installation locale (English by
+default; Italian is supported) and its managed charts are rebuilt from live
+sheet formulas. Before a rebuild, the installer captures each managed chart's
+position, offsets, dimensions, and title; existing user-adjusted geometry is
+preserved, while default geometry is used only for a new chart.
+
 If no intake `AGENTS.md` exists, the installer creates one from the public
 `AGENTS.example.md` template. It preserves one existing non-empty policy and
 fails if the folder contains duplicates or a policy larger than 40 KiB.

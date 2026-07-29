@@ -711,6 +711,7 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
       validateInstallerSheetHeaders_(sheet, automationConfig.locale || 'en');
     }
   });
+  initializeElectricityDashboard_(spreadsheet, automationConfig);
 
 }
 

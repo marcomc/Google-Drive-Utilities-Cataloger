@@ -74,6 +74,10 @@ function testCommittedJsonAndRuntimeConfig() {
     path.join(projectRoot, 'Installer.gs'),
     'utf8'
   );
+  const dashboardSource = fs.readFileSync(
+    path.join(projectRoot, 'ElectricityDashboard.gs'),
+    'utf8'
+  );
   const installerShell = fs.readFileSync(
     path.join(projectRoot, 'scripts/install.sh'),
     'utf8'
@@ -84,6 +88,11 @@ function testCommittedJsonAndRuntimeConfig() {
   );
   assert.equal(manifest.runtimeVersion, 'V8');
   assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
+  assert.match(installerSource, /initializeElectricityDashboard_\(spreadsheet, automationConfig\)/);
+  assert.match(dashboardSource, /captureElectricityChartLayouts_\(dashboard, labels\)/);
+  assert.match(dashboardSource, /getElectricityDashboardLabels_\(locale\)/);
+  assert.match(dashboardSource, /Electricity Statistics/);
+  assert.match(dashboardSource, /Statistiche Luce/);
   assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
   assert.match(installerShell, /\.ackDeadlineSeconds == 300/);
   assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);
