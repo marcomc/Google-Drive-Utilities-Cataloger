@@ -299,6 +299,7 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
       title: labels.charts.monthlyF1,
       width: 811,
       height: 377,
+      fontSize: 17,
       colors: ['#123456'],
       legend: { position: 'bottom' },
       series: { 0: { lineWidth: 4, pointSize: 7 } }
@@ -345,6 +346,7 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
     JSON.stringify(['#123456']));
   assert.equal(JSON.stringify(layouts.monthlyF1.options.legend),
     JSON.stringify({ position: 'bottom' }));
+  assert.equal(layouts.monthlyF1.options.fontSize, 17);
   assert.equal(JSON.stringify(layouts.monthlyF1.options.series),
     JSON.stringify({ 0: { lineWidth: 4, pointSize: 7 } }));
 

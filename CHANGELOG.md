@@ -60,6 +60,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   refresh electricity statistics after journal recovery deletes an inserted row.
 - Preserve existing technical dashboard data across refresh failures and extend
   a user-shortened all-bands range as electricity invoice rows are added.
+- Allocate the complete temporary technical-data backup and retain managed
+  chart font-size customization during refresh.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

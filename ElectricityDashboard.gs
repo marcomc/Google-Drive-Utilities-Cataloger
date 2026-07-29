@@ -11,7 +11,7 @@ const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ =
 const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_ = 'v1';
 const ELECTRICITY_DASHBOARD_BACKUP_ROWS_ =
   ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 3 * 13 +
-  ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1;
+  ELECTRICITY_DASHBOARD_MAX_YEARS_ + 2;
 const ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ = 26;
 
 function getElectricityDashboardLabels_(locale) {
@@ -550,7 +550,7 @@ function captureElectricityChartOptions_(options) {
   const preserved = {};
   ['annotations', 'areaOpacity', 'backgroundColor', 'bar', 'chartArea',
     'colors', 'curveType', 'dataOpacity', 'enableInteractivity', 'explorer',
-    'fontName', 'hAxis', 'height', 'is3D', 'isStacked', 'legend', 'lineWidth',
+    'fontName', 'fontSize', 'hAxis', 'height', 'is3D', 'isStacked', 'legend', 'lineWidth',
     'orientation', 'pieHole', 'pieSliceText', 'pointShape', 'pointSize',
     'reverseCategories', 'series', 'theme', 'tooltip', 'trendlines', 'vAxes',
     'vAxis', 'width', 'titleTextStyle', 'animation', 'axisTitlesPosition',
