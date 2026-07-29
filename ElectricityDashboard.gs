@@ -464,7 +464,9 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
   });
   const ranges = layout.sourceRanges && layout.sourceRanges.length ?
     layout.sourceRanges.map(function (a1Notation) {
-      return technical.getRange(a1Notation);
+      const preserved = technical.getRange(a1Notation);
+      return shouldExtendElectricityChartRange_(preserved, sourceRange) ?
+        sourceRange : preserved;
     }) : [sourceRange];
   ranges.forEach(function (range) {
     builder.addRange(range);
@@ -477,6 +479,22 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
     .setOption('height', layout.height)
     .setOption('legend', layout.options.legend || { position: 'right' })
     .build();
+}
+
+function shouldExtendElectricityChartRange_(preserved, sourceRange) {
+  if (!preserved || !sourceRange || typeof preserved.getSheet !== 'function' ||
+    typeof sourceRange.getSheet !== 'function') {
+    return false;
+  }
+  if (preserved.getSheet().getSheetId() !== sourceRange.getSheet().getSheetId() ||
+    preserved.getRow() !== sourceRange.getRow() ||
+    preserved.getColumn() !== sourceRange.getColumn()) {
+    return false;
+  }
+  return preserved.getNumRows() <= sourceRange.getNumRows() &&
+    preserved.getNumColumns() <= sourceRange.getNumColumns() &&
+    (preserved.getNumRows() < sourceRange.getNumRows() ||
+      preserved.getNumColumns() < sourceRange.getNumColumns());
 }
 
 function findDashboardHeader_(lookup, aliases) {

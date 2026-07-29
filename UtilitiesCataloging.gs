@@ -255,6 +255,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       state.sheetRowPreexisting = !sheetImport.created;
       state.sheetRowPayload = sheetImport.previousRowPayload || null;
       state.sheetOriginalRow = sheetImport.originalRow || sheetImport.row;
+      state.extracted = extracted;
       state.sheet = sheetImport.sheet;
       state.sheetRow = sheetImport.row;
     }
@@ -331,6 +332,7 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
       state.imported = false;
       state.sheetRowCreated = false;
       state.sheetLink = '';
+      refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
     }
@@ -340,10 +342,19 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
         state.sheetOriginalRow, state.sheetRowPayload, file);
       state.imported = false;
       state.sheetLink = '';
+      refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
     }
   }
+}
+
+function refreshElectricityDashboardAfterRollback_(state) {
+  if (!state.sheet || !state.extracted) {
+    return;
+  }
+  refreshElectricityDashboardAfterInvoiceImport_(state.sheet.getParent(),
+    getAutomationConfig_(), state.sheet, state.extracted);
 }
 
 function listDirectIntakePdfs_(rootFolder) {
@@ -1353,6 +1364,8 @@ function importUtilityInvoiceToSheet_(file, extracted) {
       try {
         restoreImportedRowPayload_(sheet, correctedRow, existingRow,
           previousRowPayload, file, layout);
+        refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
+          automationConfig, sheet, extracted);
       } catch (rollbackError) {
         error.mutationRollbackIncomplete = true;
         error.message += ' Spreadsheet rollback also failed: ' +
@@ -2090,10 +2103,7 @@ function attachMutationJournal_(result, fileId) {
 }
 
 function saveMutationJournal_(fileId, journal) {
-  PropertiesService.getScriptProperties().setProperty(
-    CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId,
-    JSON.stringify(journal)
-  );
+  writeMutationJournal_(PropertiesService.getScriptProperties(), fileId, journal);
 }
 
 function updateMutationJournal_(fileId, changes) {
@@ -2112,7 +2122,53 @@ function updateMutationJournal_(fileId, changes) {
     journal[property] = changes[property];
   });
   journal.updatedAt = Date.now();
-  properties.setProperty(key, JSON.stringify(journal));
+  writeMutationJournal_(properties, fileId, journal);
+}
+
+function writeMutationJournal_(properties, fileId, journal) {
+  const stored = Object.assign({}, journal);
+  if (stored.sheetRowPayload) {
+    stored.sheetRowPayloadChunks = writeMutationJournalPayload_(properties,
+      fileId, stored.sheetRowPayload);
+    delete stored.sheetRowPayload;
+  }
+  properties.setProperty(CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId,
+    JSON.stringify(stored));
+}
+
+function writeMutationJournalPayload_(properties, fileId, payload) {
+  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  Object.keys(properties.getProperties()).forEach(function (key) {
+    if (key.indexOf(prefix) === 0) {
+      properties.deleteProperty(key);
+    }
+  });
+  const raw = JSON.stringify(payload);
+  const size = CONFIG.MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS;
+  const values = {};
+  let count = 0;
+  for (let offset = 0; offset < raw.length; offset += size) {
+    values[prefix + count] = raw.slice(offset, offset + size);
+    count += 1;
+  }
+  properties.setProperties(values, false);
+  return count;
+}
+
+function hydrateMutationJournalPayload_(properties, fileId, journal) {
+  if (!journal.sheetRowPayloadChunks) {
+    return journal;
+  }
+  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  const raw = Array.from({ length: journal.sheetRowPayloadChunks }, function (_, index) {
+    const chunk = properties.getProperty(prefix + index);
+    if (chunk === null || chunk === '') {
+      throw new Error('Mutation journal payload is incomplete for file ID ' + fileId + '.');
+    }
+    return chunk;
+  }).join('');
+  journal.sheetRowPayload = JSON.parse(raw);
+  return journal;
 }
 
 function clearMutationJournal_(fileId) {
@@ -2123,6 +2179,12 @@ function clearMutationJournal_(fileId) {
   properties.deleteProperty(
     CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId
   );
+  const payloadPrefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  Object.keys(properties.getProperties()).forEach(function (key) {
+    if (key.indexOf(payloadPrefix) === 0) {
+      properties.deleteProperty(key);
+    }
+  });
 }
 
 function hasMutationJournal_(fileId) {
@@ -2169,6 +2231,7 @@ function recoverMutationJournalForFile_(
   }
   try {
     journal = JSON.parse(raw);
+    hydrateMutationJournalPayload_(properties, fileId, journal);
     if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
       throw new Error('The mutation journal is not a JSON object.');
     }

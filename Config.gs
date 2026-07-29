@@ -13,6 +13,7 @@ const CONFIG = Object.freeze({
   // Apps Script limits one PropertiesService value to 9 KB. Keep margin for
   // platform accounting and reject oversized configuration before bootstrap.
   MAX_AUTOMATION_CONFIG_BYTES: 8 * 1024,
+  MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS: 2048,
   // Script Properties have a 500 KB total limit. Reserve most of that space
   // for configuration, per-file state, mutation journals, and transport data.
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
@@ -48,6 +49,7 @@ const CONFIG = Object.freeze({
     INTAKE_FILE_STATE_PREFIX: 'INTAKE_FILE_STATE_',
     PENDING_REPORT_PREFIX: 'PENDING_REPORT_',
     MUTATION_JOURNAL_PREFIX: 'MUTATION_JOURNAL_',
+    MUTATION_PAYLOAD_PREFIX: 'MUTATION_PAYLOAD_',
     MUTATION_RECOVERY_ALERT_PREFIX: 'MUTATION_RECOVERY_ALERT_',
     GOOGLE_CLOUD_PROJECT_ID: 'GOOGLE_CLOUD_PROJECT_ID',
     PUBSUB_TOPIC: 'PUBSUB_TOPIC',

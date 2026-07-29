@@ -38,6 +38,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   restore reimported strings as literal text during rollback.
 - Restrict preserved custom chart ranges to each chart's reserved technical
   data block.
+- Apply and read back the corresponding installation-specific Drive runtime
+  policy, preserving its local routing rules.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

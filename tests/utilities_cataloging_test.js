@@ -1242,6 +1242,26 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   assert.deepEqual(deletedRows, [2]);
 }
 
+function testMutationJournalPayloadUsesSeparateChunks() {
+  const context = loadCataloger();
+  const store = {};
+  const properties = {
+    getProperties: () => ({ ...store }),
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => { store[key] = value; },
+    setProperties: (values) => Object.assign(store, values),
+    deleteProperty: (key) => { delete store[key]; }
+  };
+  const payload = { cells: [{ value: { type: 'value', value: 'x'.repeat(5000) } }] };
+  const count = context.writeMutationJournalPayload_(properties, 'file-id', payload);
+  assert.equal(count > 1, true);
+  const journal = context.hydrateMutationJournalPayload_(properties, 'file-id', {
+    sheetRowPayloadChunks: count
+  });
+  assert.equal(journal.sheetRowPayload.cells[0].value.value.length, 5000);
+}
+
 function testBuildSpreadsheetHyperlinkFormulaEscapesValues() {
   const context = loadCataloger();
   assert.equal(
@@ -1698,6 +1718,7 @@ testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
+testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();

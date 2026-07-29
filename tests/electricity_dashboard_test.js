@@ -485,6 +485,36 @@ function testManagedChartsSurviveReplacementFailure() {
   assert.equal(removed[0].kind, 'replacement-1');
 }
 
+function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
+  const context = loadDashboard();
+  const sheet = { getSheetId: () => 42 };
+  const canonical = {
+    getSheet: () => sheet,
+    getRow: () => 1,
+    getColumn: () => 6,
+    getNumRows: () => 13,
+    getNumColumns: () => 26
+  };
+  const shortened = {
+    getSheet: () => sheet,
+    getRow: () => 1,
+    getColumn: () => 6,
+    getNumRows: () => 13,
+    getNumColumns: () => 4
+  };
+  const shifted = {
+    getSheet: () => sheet,
+    getRow: () => 1,
+    getColumn: () => 7,
+    getNumRows: () => 13,
+    getNumColumns: () => 4
+  };
+  assert.equal(context.shouldExtendElectricityChartRange_(shortened, canonical),
+    true);
+  assert.equal(context.shouldExtendElectricityChartRange_(shifted, canonical),
+    false);
+}
+
 testLocalizedDashboardContracts();
 testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
@@ -497,4 +527,5 @@ testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshUsesNewInvoiceYearOnly();
 testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
 testManagedChartsSurviveReplacementFailure();
+testPreservedChartRangesExtendOnlyFromTheirManagedOrigin();
 console.log('electricity dashboard tests passed');
