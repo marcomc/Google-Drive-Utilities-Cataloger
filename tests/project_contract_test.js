@@ -78,6 +78,14 @@ function testCommittedJsonAndRuntimeConfig() {
     path.join(projectRoot, 'ElectricityDashboard.gs'),
     'utf8'
   );
+  const englishLocale = fs.readFileSync(
+    path.join(projectRoot, 'locales', 'en.gs'),
+    'utf8'
+  );
+  const italianLocale = fs.readFileSync(
+    path.join(projectRoot, 'locales', 'it.gs'),
+    'utf8'
+  );
   const installerShell = fs.readFileSync(
     path.join(projectRoot, 'scripts/install.sh'),
     'utf8'
@@ -91,8 +99,11 @@ function testCommittedJsonAndRuntimeConfig() {
   assert.match(installerSource, /initializeElectricityDashboard_\(spreadsheet, automationConfig\)/);
   assert.match(dashboardSource, /captureElectricityChartLayouts_\(dashboard, labels\)/);
   assert.match(dashboardSource, /getElectricityDashboardLabels_\(locale\)/);
-  assert.match(dashboardSource, /Electricity Statistics/);
-  assert.match(dashboardSource, /Statistiche Luce/);
+  assert.match(dashboardSource, /getLocalizationRegistry_\(\)\[locale\]/);
+  assert.match(dashboardSource, /ELECTRICITY_DASHBOARD_SOURCE_ROWS_ = 10000/);
+  assert.doesNotMatch(dashboardSource, /\$1002(?:[^0-9]|$)/);
+  assert.match(englishLocale, /Electricity Statistics/);
+  assert.match(italianLocale, /Statistiche Luce/);
   assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
   assert.match(installerShell, /\.ackDeadlineSeconds == 300/);
   assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);

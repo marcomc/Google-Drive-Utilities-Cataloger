@@ -84,8 +84,8 @@ manual review.
   number` belongs only in the contract number column. Search for the relevant
   labels in the language normally used on utility bills in the country where
   the supply is delivered; do not rely on the spreadsheet locale or on English
-  labels being printed in the document. For ENERGYGAS, values such as
-  `CL317598` are customer codes; leave the contract number empty unless a
+  labels being printed in the document. For ENERGYGAS, `CL`-prefixed values
+  are customer codes; leave the contract number empty unless a
   contract-labelled value is explicitly printed.
 - Verify that consumption cost + non-consumption cost + VAT equals the total.
   A difference beyond a few cents blocks the import.

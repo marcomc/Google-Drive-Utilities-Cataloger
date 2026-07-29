@@ -136,6 +136,15 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
   assert.equal(normalized.reference_month, '07');
 
+  const energygas = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'Energygas Italia',
+    contract_number: 'CL000001',
+    customer_code: ''
+  });
+  assert.equal(energygas.contract_number, '');
+  assert.equal(energygas.customer_code, 'CL000001');
+
   const normalizedSheetValues = context.normalizeExtraction_({
     ...raw,
     sheet_values: [{ header: '  Unità di misura consumi  ', value: ' mc  ' }]
@@ -1039,6 +1048,58 @@ function testFormulaAndStyleCopySources() {
   ]);
 }
 
+function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier'],
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    year: ['Reference year'],
+    month: ['Reference month'],
+    frequency: ['Frequency'],
+    consumptionCost: ['Total consumption costs'],
+    nonConsumptionCosts: ['Total non-consumption costs'],
+    vat: ['VAT'],
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file', 'Calculated value'],
+    lookup: {
+      'issue date': 1,
+      'source file': 2,
+      'calculated value': 3
+    }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 3) {
+        return { getFormulas: () => [['', '=HYPERLINK("url","text")', '=A3*2']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, validInvoice());
+
+  assert.equal(writes.some((entry) => entry[1] === 3), false);
+  assert.equal(writes.some((entry) => entry[1] === 1), true);
+  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+    true);
+}
+
 function testSourceHyperlinkFormulaIsPreserved() {
   const context = loadCataloger();
   context.getHeaderAliases_ = (key) => key === 'sourceFile' ? ['Source file'] : [];
@@ -1515,6 +1576,7 @@ testMutationRecoveryStages();
 testMutationRecoveryReportsUnavailableFileOnce();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();
+testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testSourceHyperlinkFormulaIsPreserved();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();

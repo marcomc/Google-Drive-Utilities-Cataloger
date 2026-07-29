@@ -803,7 +803,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
-    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For ENERGYGAS, a value such as CL317598 is a customer code and must go only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
       String(automationConfig.address_missing_type || 'unknown') + '.',
@@ -1550,12 +1550,8 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('total'), extracted.total);
 
   const allowedHeaders = Object.create(null);
-  const firstDataRow = layout.headerRow + 1;
-  const referenceRow = row > firstDataRow ? row - 1 :
-    (row + 1 <= sheet.getLastRow() ? row + 1 : 0);
-  const formulaColumns = referenceRow ?
-    sheet.getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0] :
-    layout.headers.map(function () { return ''; });
+  const formulaColumns = sheet.getRange(row, 1, 1, layout.headers.length)
+    .getFormulas()[0];
   layout.headers.forEach(function (header) {
     allowedHeaders[normalizeHeader_(header)] = header;
   });

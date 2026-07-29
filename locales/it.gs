@@ -20,6 +20,38 @@ function getItalianLocalization_() {
       'Costo totale',
       'File sorgente'
     ]),
+    electricityBandHeaders: Object.freeze([
+      'Quantità consumi F1',
+      'Costo unitario F1',
+      'Quantità consumi F2',
+      'Costo unitario F2',
+      'Quantità consumi F3',
+      'Costo unitario F3'
+    ]),
+    electricityDashboard: Object.freeze({
+      sheet: 'Statistiche Luce',
+      dataSheet: 'Statistiche Luce - Dati',
+      dateHeader: 'Data di emissione',
+      monthHeader: 'Mese',
+      yearHeader: 'Anno',
+      months: Object.freeze(['gennaio', 'febbraio', 'marzo', 'aprile',
+        'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre',
+        'novembre', 'dicembre']),
+      bandHeaders: Object.freeze(['Quantità consumi F1',
+        'Quantità consumi F2', 'Quantità consumi F3']),
+      bandAliases: Object.freeze([
+        Object.freeze(['quantità consumi f1']),
+        Object.freeze(['quantità consumi f2']),
+        Object.freeze(['quantità consumi f3'])
+      ]),
+      charts: Object.freeze({
+        monthlyBands: 'Consumi mensili per fascia (F1/F2/F3)',
+        monthlyF1: 'Confronto mensile consumi F1 per anno',
+        monthlyF2: 'Confronto mensile consumi F2 per anno',
+        monthlyF3: 'Confronto mensile consumi F3 per anno',
+        annualBands: 'Consumo annuale per fascia'
+      })
+    }),
     documentLabels: Object.freeze({ Invoice: 'Fattura', Contract: 'Contratto', Report: 'Report' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTATO',

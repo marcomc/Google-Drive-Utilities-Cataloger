@@ -70,10 +70,11 @@
   changes, and replacement cleanup failure.
 - Write untrusted spreadsheet text as literal rich text. Reject normalized
   duplicate headers and never overwrite formula-backed columns.
-- Treat spreadsheet charts as user-owned presentation state. Do not recreate,
-  move, resize, or reset existing charts from code. If chart automation is
-  introduced, first read each existing chart's position, dimensions, title,
-  source ranges, and formatting, then preserve that layout when updating it.
+- Treat spreadsheet charts as user-owned presentation state. Never recreate,
+  move, resize, or reset unmanaged charts from code. When automation must
+  regenerate one of its own title-identified charts, first record its position,
+  dimensions, title, source range, and formatting; keep the chart bound to its
+  reserved technical-data block and restore its user-adjusted presentation.
 - When inserting template rows, copy formulas with range-level formula paste so
   relative references adjust; do not replay source formula strings verbatim.
 - Journal cross-service mutations before changing Sheets or Drive. Persist the

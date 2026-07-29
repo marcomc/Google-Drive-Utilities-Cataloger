@@ -673,6 +673,7 @@ function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,
 
 function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
   const sheetNames = [];
+  const electricitySheetNames = Object.create(null);
   automationConfig.canonical_supplies.forEach(function (supply) {
     const sheetName = automationConfig.sheet_by_supply[supply];
     if (!sheetName) {
@@ -680,6 +681,9 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     }
     if (sheetNames.indexOf(sheetName) === -1) {
       sheetNames.push(sheetName);
+    }
+    if (/^(electricity|luce)$/i.test(String(supply))) {
+      electricitySheetNames[sheetName] = true;
     }
   });
   if (sheetNames.length === 0) {
@@ -692,8 +696,9 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     initialSheets[0].setName(sheetNames[0]);
   }
 
-  const headers = getInstallerSheetHeaders_(automationConfig.locale || 'en');
   sheetNames.forEach(function (sheetName) {
+    const headers = getInstallerSheetHeaders_(automationConfig.locale || 'en',
+      Boolean(electricitySheetNames[sheetName]));
     const sheet = spreadsheet.getSheetByName(sheetName) ||
       spreadsheet.insertSheet(sheetName);
     if (sheet.getLastRow() === 0) {
@@ -715,8 +720,11 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
 
 }
 
-function getInstallerSheetHeaders_(locale) {
-  return getInstallerLocalization_(locale).installerSheetHeaders.slice();
+function getInstallerSheetHeaders_(locale, isElectricity) {
+  const localization = getInstallerLocalization_(locale);
+  const headers = localization.installerSheetHeaders.slice();
+  return isElectricity ? headers.concat(localization.electricityBandHeaders) :
+    headers;
 }
 
 function getInstallerLocalization_(locale) {

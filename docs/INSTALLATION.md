@@ -219,13 +219,18 @@ For the spreadsheet:
   validation uses the same bounded header-row detection as runtime imports.
 - Unrelated existing tabs are not deleted.
 
-For an installation with the `Electricity` supply, the installer also manages
-an electricity statistics dashboard and a hidden technical-data sheet. The
-dashboard is generated in the selected installation locale (English by
-default; Italian is supported) and its managed charts are rebuilt from live
-sheet formulas. Before a rebuild, the installer captures each managed chart's
-position, offsets, dimensions, and title; existing user-adjusted geometry is
-preserved, while default geometry is used only for a new chart.
+For an installation with the `Electricity` supply, a newly created Electricity
+tab includes F1/F2/F3 consumption and unit-cost headers. The installer also
+creates an electricity statistics dashboard and a hidden technical-data sheet
+when that tab contains the three consumption headers. The dashboard is
+generated in the selected installation locale (English by default; Italian is
+supported) from live sheet formulas. It includes one time-series chart for all
+bands, one monthly comparison chart for each band across years, and one annual
+band-total chart. Before an automation-managed chart is regenerated, the
+installer captures its position, offsets, dimensions, title, source range, and
+visual options so user-adjusted placement and formatting are preserved. The
+technical block supports 10,000 invoice rows and 25 distinct years; a larger
+dataset fails explicitly rather than silently omitting history.
 
 If no intake `AGENTS.md` exists, the installer creates one from the public
 `AGENTS.example.md` template. It preserves one existing non-empty policy and
