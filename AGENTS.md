@@ -75,6 +75,9 @@
   regenerate one of its own title-identified charts, first record its position,
   dimensions, title, source range, and formatting; keep the chart bound to its
   reserved technical-data block and restore its user-adjusted presentation.
+- Validate every required source header and capacity limit before creating a
+  derived dashboard, helper sheet, chart, or other managed spreadsheet
+  artifact. A missing prerequisite must leave no partial presentation state.
 - When inserting template rows, copy formulas with range-level formula paste so
   relative references adjust; do not replay source formula strings verbatim.
 - Journal cross-service mutations before changing Sheets or Drive. Persist the

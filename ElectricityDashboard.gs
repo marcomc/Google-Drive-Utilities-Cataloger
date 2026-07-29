@@ -22,6 +22,9 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig) {
   if (!electricity) {
     return;
   }
+  if (!validateElectricityDashboardSource_(electricity, labels)) {
+    return;
+  }
   const dashboard = spreadsheet.getSheetByName(labels.sheet) ||
     spreadsheet.insertSheet(labels.sheet);
   const technical = spreadsheet.getSheetByName(labels.dataSheet) ||
@@ -32,6 +35,40 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig) {
   }
   technical.hideSheet();
   refreshElectricityDashboardCharts_(dashboard, chartRanges, labels);
+}
+
+function hasElectricityDashboardHeaders_(electricity, labels) {
+  const lookup = getSheetLayout_(electricity).lookup;
+  const requiredColumns = [
+    findHeaderIndex_(lookup, getHeaderAliases_('issueDate')),
+    findHeaderIndex_(lookup, getHeaderAliases_('year')),
+    findHeaderIndex_(lookup, getHeaderAliases_('month'))
+  ];
+  labels.bandAliases.forEach(function (aliases) {
+    requiredColumns.push(findDashboardHeader_(lookup, aliases));
+  });
+  return requiredColumns.every(Boolean);
+}
+
+function validateElectricityDashboardSource_(electricity, labels) {
+  if (!hasElectricityDashboardHeaders_(electricity, labels)) {
+    return false;
+  }
+  const layout = getSheetLayout_(electricity);
+  const lookup = layout.lookup;
+  const dateColumn = findHeaderIndex_(lookup, getHeaderAliases_('issueDate'));
+  const yearColumn = findHeaderIndex_(lookup, getHeaderAliases_('year'));
+  if (electricity.getLastRow() > ELECTRICITY_DASHBOARD_SOURCE_ROWS_ +
+    layout.headerRow) {
+    throw new Error('Electricity dashboard supports up to ' +
+      ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + ' source rows.');
+  }
+  if (getElectricityDashboardYears_(electricity, yearColumn, dateColumn,
+    layout.headerRow).length > ELECTRICITY_DASHBOARD_MAX_YEARS_) {
+    throw new Error('Electricity dashboard supports up to ' +
+      ELECTRICITY_DASHBOARD_MAX_YEARS_ + ' years.');
+  }
+  return true;
 }
 
 function writeElectricityDashboardData_(technical, electricity, labels) {

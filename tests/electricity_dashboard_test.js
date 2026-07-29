@@ -89,6 +89,67 @@ function testElectricityInstallerHeadersStaySupplySpecific() {
   assert.equal(italianHeaders.includes('Costo unitario F3'), true);
 }
 
+function testDashboardSkipsSheetsWithoutAllRequiredHeaders() {
+  const context = loadDashboard();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['issue date'],
+    year: ['reference year'],
+    month: ['reference month']
+  })[key] || [];
+  const labels = context.getElectricityDashboardLabels_('en');
+  const complete = {
+    'issue date': 1,
+    'reference year': 2,
+    'reference month': 3,
+    'consumption quantity f1': 4,
+    'consumption quantity f2': 5,
+    'consumption quantity f3': 6
+  };
+  context.getSheetLayout_ = () => ({ lookup: complete });
+  assert.equal(context.hasElectricityDashboardHeaders_({}, labels), true);
+
+  delete complete['consumption quantity f2'];
+  assert.equal(context.hasElectricityDashboardHeaders_({}, labels), false);
+}
+
+function testDashboardValidationPreventsPartialArtifacts() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['issue date'],
+    year: ['reference year'],
+    month: ['reference month']
+  })[key] || [];
+  const lookup = {
+    'issue date': 1,
+    'reference year': 2,
+    'reference month': 3,
+    'consumption quantity f1': 4,
+    'consumption quantity f2': 5,
+    'consumption quantity f3': 6
+  };
+  const source = { getLastRow: () => 10002 };
+  const inserted = [];
+  context.getSheetLayout_ = () => ({ headerRow: 1, lookup });
+  const spreadsheet = {
+    getSheetByName: (name) => name === 'Electricity' ? source : null,
+    insertSheet: (name) => inserted.push(name)
+  };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, config),
+    /supports up to 10000 source rows/);
+  assert.deepEqual(inserted, []);
+
+  source.getLastRow = () => 2;
+  context.getElectricityDashboardYears_ = () => Array(26).fill(2026);
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, config),
+    /supports up to 25 years/);
+  assert.deepEqual(inserted, []);
+  context.getElectricityDashboardYears_ = () => [2026];
+  assert.equal(context.validateElectricityDashboardSource_(source, labels), true);
+}
+
 function testTechnicalFormulaRangesUseReservedCapacity() {
   const context = loadDashboard();
   const source = {
@@ -181,6 +242,8 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
 
 testLocalizedDashboardContracts();
 testElectricityInstallerHeadersStaySupplySpecific();
+testDashboardSkipsSheetsWithoutAllRequiredHeaders();
+testDashboardValidationPreventsPartialArtifacts();
 testTechnicalFormulaRangesUseReservedCapacity();
 testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
