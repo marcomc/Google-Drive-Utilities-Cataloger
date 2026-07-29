@@ -62,6 +62,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   a user-shortened all-bands range as electricity invoice rows are added.
 - Allocate the complete temporary technical-data backup and retain managed
   chart font-size customization during refresh.
+- Prevent dashboard aliases to every configured supply tab and clean up a
+  temporary technical backup if snapshot creation fails.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

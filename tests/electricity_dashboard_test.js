@@ -142,7 +142,7 @@ function testDashboardValidationPreventsPartialArtifacts() {
   assert.throws(() => context.initializeElectricityDashboard_({
     getSheetByName: (name) => name === 'Electricity' || name === labels.sheet ?
       source : null
-  }, config), /dashboard sheet name matches the source sheet/);
+  }, config), /dashboard sheet name matches a source sheet/);
 
   source.getLastRow = () => 10002;
   assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, config),

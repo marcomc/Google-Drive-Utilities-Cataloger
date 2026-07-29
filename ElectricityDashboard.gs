@@ -40,8 +40,13 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     }
     return;
   }
-  if (dashboard === electricity) {
-    throw new Error('The electricity dashboard sheet name matches the source sheet.');
+  if (dashboard && Object.keys(automationConfig.sheet_by_supply || {}).some(
+    function (supply) {
+      return spreadsheet.getSheetByName(
+        automationConfig.sheet_by_supply[supply]
+      ) === dashboard;
+    })) {
+    throw new Error('The electricity dashboard sheet name matches a source sheet.');
   }
   assertElectricityDashboardTechnicalSheet_(technical, electricity, labels);
   assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical);
@@ -129,15 +134,26 @@ function createElectricityDashboardTechnicalBackup_(spreadsheet, technical) {
   assertElectricityDashboardBackupCapacity_(spreadsheet);
   const backup = spreadsheet.insertSheet('Electricity dashboard backup ' +
     new Date().getTime());
-  ensureElectricityDashboardGrid_(backup, ELECTRICITY_DASHBOARD_BACKUP_ROWS_,
-    ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_);
-  const blocks = getElectricityDashboardTechnicalDataBlocks_(technical);
-  blocks.forEach(function (block) {
-    technical.getRange(block.row, block.column, block.rows, block.columns)
-      .copyTo(backup.getRange(block.backupRow, 1, block.rows, block.columns));
-  });
-  backup.hideSheet();
-  return { sheet: backup, blocks: blocks };
+  try {
+    ensureElectricityDashboardGrid_(backup, ELECTRICITY_DASHBOARD_BACKUP_ROWS_,
+      ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_);
+    const blocks = getElectricityDashboardTechnicalDataBlocks_(technical);
+    blocks.forEach(function (block) {
+      technical.getRange(block.row, block.column, block.rows, block.columns)
+        .copyTo(backup.getRange(block.backupRow, 1, block.rows, block.columns));
+    });
+    backup.hideSheet();
+    return { sheet: backup, blocks: blocks };
+  } catch (error) {
+    try {
+      spreadsheet.deleteSheet(backup);
+    } catch (cleanupError) {
+      error.mutationRollbackIncomplete = true;
+      error.message += ' Technical backup cleanup also failed: ' +
+        cleanupError.message;
+    }
+    throw error;
+  }
 }
 
 function restoreElectricityDashboardTechnicalBackup_(backup, technical) {
