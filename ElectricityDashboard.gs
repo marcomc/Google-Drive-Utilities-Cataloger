@@ -323,26 +323,50 @@ function refreshElectricityDashboardCharts_(dashboard, technical, chartRanges,
   const managedTitles = ELECTRICITY_DASHBOARD_KEYS_.map(function (key) {
     return labels.charts[key];
   });
-  dashboard.getCharts().forEach(function (chart) {
-    if (managedTitles.indexOf(String(chart.getOptions().get('title') || '')) >= 0) {
-      dashboard.removeChart(chart);
-    }
+  const managedCharts = dashboard.getCharts().filter(function (chart) {
+    return managedTitles.indexOf(String(chart.getOptions().get('title') || '')) >= 0;
   });
-  insertElectricityChart_(dashboard, technical, chartRanges.monthlyBands,
-    getElectricityChartLayout_(layouts, 'monthlyBands', 8, 1, 700, 360),
-    labels.charts.monthlyBands, 'line');
-  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF1,
-    getElectricityChartLayout_(layouts, 'monthlyF1', 8, 18, 700, 360),
-    labels.charts.monthlyF1, 'column');
-  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF2,
-    getElectricityChartLayout_(layouts, 'monthlyF2', 28, 18, 700, 360),
-    labels.charts.monthlyF2, 'column');
-  insertElectricityChart_(dashboard, technical, chartRanges.monthlyF3,
-    getElectricityChartLayout_(layouts, 'monthlyF3', 48, 18, 700, 360),
-    labels.charts.monthlyF3, 'column');
-  insertElectricityChart_(dashboard, technical, chartRanges.annualBands,
-    getElectricityChartLayout_(layouts, 'annualBands', 28, 1, 700, 360),
-    labels.charts.annualBands, 'column');
+  const definitions = [
+    ['monthlyBands', chartRanges.monthlyBands, 8, 1, 'line'],
+    ['monthlyF1', chartRanges.monthlyF1, 8, 18, 'column'],
+    ['monthlyF2', chartRanges.monthlyF2, 28, 18, 'column'],
+    ['monthlyF3', chartRanges.monthlyF3, 48, 18, 'column'],
+    ['annualBands', chartRanges.annualBands, 28, 1, 'column']
+  ];
+  const replacements = [];
+  const removed = [];
+  try {
+    definitions.forEach(function (definition) {
+      const key = definition[0];
+      const chart = buildElectricityChart_(dashboard, technical, definition[1],
+        getElectricityChartLayout_(layouts, key, definition[2], definition[3],
+          700, 360), labels.charts[key], definition[4]);
+      dashboard.insertChart(chart);
+      replacements.push(chart);
+    });
+    managedCharts.forEach(function (chart) {
+      dashboard.removeChart(chart);
+      removed.push(chart);
+    });
+  } catch (error) {
+    replacements.forEach(function (chart) {
+      try {
+        dashboard.removeChart(chart);
+      } catch (cleanupError) {
+        console.error('Unable to remove incomplete electricity dashboard chart: ' +
+          cleanupError.message);
+      }
+    });
+    removed.forEach(function (chart) {
+      try {
+        dashboard.insertChart(chart);
+      } catch (restoreError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Chart rollback also failed: ' + restoreError.message;
+      }
+    });
+    throw error;
+  }
 }
 
 function captureElectricityChartLayouts_(dashboard, technical, labels) {
@@ -404,6 +428,12 @@ function getElectricityChartLayout_(layouts, key, row, column, width, height) {
 
 function insertElectricityChart_(dashboard, technical, sourceRange, layout,
   title, type) {
+  dashboard.insertChart(buildElectricityChart_(dashboard, technical, sourceRange,
+    layout, title, type));
+}
+
+function buildElectricityChart_(dashboard, technical, sourceRange, layout,
+  title, type) {
   const builder = type === 'line' ? dashboard.newChart().asLineChart() :
     dashboard.newChart().asColumnChart();
   Object.keys(layout.options).forEach(function (key) {
@@ -416,14 +446,14 @@ function insertElectricityChart_(dashboard, technical, sourceRange, layout,
   ranges.forEach(function (range) {
     builder.addRange(range);
   });
-  dashboard.insertChart(builder
+  return builder
     .setNumHeaders(1)
     .setPosition(layout.row, layout.column, layout.offsetX, layout.offsetY)
     .setOption('title', title)
     .setOption('width', layout.width)
     .setOption('height', layout.height)
     .setOption('legend', layout.options.legend || { position: 'right' })
-    .build());
+    .build();
 }
 
 function findDashboardHeader_(lookup, aliases) {
@@ -490,6 +520,9 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     labels)) {
     return;
   }
+  // Keep the technical formula reservation authoritative for every electricity
+  // import, including an import whose year is already represented in a chart.
+  validateElectricityDashboardSource_(importedSheet, labels);
   const year = electricityDashboardImportedYear_(extracted);
   if (!year || hasElectricityDashboardYear_(technical, year)) {
     return;
@@ -501,6 +534,7 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
+    throw error;
   }
 }
 

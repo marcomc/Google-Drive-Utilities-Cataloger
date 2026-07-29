@@ -874,6 +874,38 @@ function testMutationRecoveryStages() {
   assert.deepEqual(existingRow.deletedRows, []);
   assert.deepEqual(existingRow.refreshedRows, [2]);
 
+  const restoredRows = [];
+  const payloadFile = { getId: () => 'source-file-id' };
+  const payloadContext = loadCataloger();
+  payloadContext.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => ({
+      getLastRow: () => 3,
+      getRange: (row) => ({ row })
+    })
+  });
+  payloadContext.getSpreadsheetId_ = () => 'spreadsheet-id';
+  payloadContext.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Source file'],
+    lookup: { 'source file': 1 }
+  });
+  payloadContext.getHeaderAliases_ = () => ['Source file'];
+  payloadContext.findHeaderIndex_ = () => 1;
+  payloadContext.getFileFromSourceCell_ = (cell) => cell.row === 3 ? payloadFile : null;
+  payloadContext.restoreImportedRowPayload_ = (_sheet, row, originalRow, payload) => {
+    restoredRows.push([row, originalRow, payload]);
+  };
+  assert.equal(payloadContext.rollbackJournalSheetRow_({
+    stage: 'sheet-existing-written',
+    sheetName: 'Water',
+    sheetRow: 3,
+    sheetOriginalRow: 2,
+    sheetRowCreated: false,
+    sheetRowPreexisting: true,
+    sheetRowPayload: { cells: [] }
+  }, payloadFile).unmarkedRowMayRemain, false);
+  assert.deepEqual(restoredRows, [[3, 2, { cells: [] }]]);
+
   const existingRowAfterRename = scenario({
     stage: 'renamed',
     sheetName: 'Water',
@@ -1122,6 +1154,54 @@ function testSourceHyperlinkFormulaIsPreserved() {
     { getUrl: () => 'https://drive.test/file-id' },
     extracted
   );
+}
+
+function testExistingInvoicePayloadRestoresAndRepositions() {
+  const context = loadCataloger();
+  const layout = { headers: ['Date', 'Source', 'Total'], lookup: {} };
+  const originalDate = new Date('2026-04-09T00:00:00Z');
+  const writes = [];
+  const moves = [];
+  const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 3 };
+  const sheet = {
+    getRange: (row, column, numRows, numColumns) => {
+      if (numRows && numColumns) {
+        if (row === 9) {
+          return {
+            ...sourceRow,
+            getValues: () => [[originalDate, 'ignored', 14.64]],
+            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '']]
+          };
+        }
+        return { row, column, numRows, numColumns };
+      }
+      return {
+        setFormula: (value) => writes.push(['formula', row, column, value]),
+        setValue: (value) => writes.push(['value', row, column, value])
+      };
+    },
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const payload = context.captureImportedRowPayload_(sheet, 9, layout);
+  let findCalls = 0;
+  context.findSpreadsheetRowBySourceFile_ = () => {
+    findCalls += 1;
+    return findCalls === 1 ? 9 : 4;
+  };
+  context.restoreImportedRowPayload_(sheet, 9, 4, payload,
+    { getId: () => 'file-id' }, layout);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 4);
+  assert.equal(writes[0][0], 'value');
+  assert.equal(Object.prototype.toString.call(writes[0][3]), '[object Date]');
+  assert.deepEqual(writes[1], ['formula', 4, 2, '=HYPERLINK("url";"invoice")']);
+  assert.deepEqual(writes[2], ['value', 4, 3, 14.64]);
+
+  context.getInsertionRow_ = () => 12;
+  context.findSpreadsheetRowBySourceFile_ = () => 12;
+  assert.equal(context.repositionImportedRow_(sheet, 9, layout,
+    '2026-05-08', { getId: () => 'file-id' }), 12);
+  assert.equal(moves[1][1], 13);
 }
 
 function testBuildSpreadsheetHyperlinkFormulaEscapesValues() {
@@ -1578,6 +1658,7 @@ testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testSourceHyperlinkFormulaIsPreserved();
+testExistingInvoicePayloadRestoresAndRepositions();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();

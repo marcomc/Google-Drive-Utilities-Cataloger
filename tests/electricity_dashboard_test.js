@@ -394,12 +394,87 @@ function testDashboardRefreshUsesNewInvoiceYearOnly() {
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
   let refreshes = 0;
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
+  context.validateElectricityDashboardSource_ = () => true;
   context.initializeElectricityDashboard_ = () => { refreshes += 1; };
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2027 });
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2026 });
   assert.equal(refreshes, 1);
+}
+
+function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const importedSheet = { getName: () => 'Electricity' };
+  const technical = { getRange: () => ({ getValues: () => [[2026]] }) };
+  const spreadsheet = { getSheetByName: () => technical };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
+  context.validateElectricityDashboardSource_ = () => {
+    throw new Error('source capacity exceeded');
+  };
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2026 }
+  ), /source capacity exceeded/);
+
+  let logged = 0;
+  context.validateElectricityDashboardSource_ = () => true;
+  context.hasElectricityDashboardYear_ = () => false;
+  context.initializeElectricityDashboard_ = () => {
+    throw new Error('year capacity exceeded');
+  };
+  context.logCatalogEvent_ = () => { logged += 1; };
+  context.classifyCatalogErrorForLog_ = () => 'validation';
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2027 }
+  ), /year capacity exceeded/);
+  assert.equal(logged, 1);
+  assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
+}
+
+function testManagedChartsSurviveReplacementFailure() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  let builds = 0;
+  const inserted = [];
+  const removed = [];
+  const original = {
+    kind: 'original',
+    getOptions: () => ({ get: (key) => key === 'title' ?
+      labels.charts.monthlyBands : null })
+  };
+  const dashboard = {
+    getCharts: () => [original],
+    newChart: () => {
+      const builder = {
+        addRange: () => builder,
+        setNumHeaders: () => builder,
+        setPosition: () => builder,
+        setOption: () => builder,
+        build: () => {
+          builds += 1;
+          return { kind: 'replacement-' + builds };
+        }
+      };
+      return { asLineChart: () => builder, asColumnChart: () => builder };
+    },
+    insertChart: (chart) => {
+      if (chart.kind === 'replacement-2') {
+        throw new Error('transient chart failure');
+      }
+      inserted.push(chart);
+    },
+    removeChart: (chart) => removed.push(chart)
+  };
+  context.captureElectricityChartLayouts_ = () => ({});
+  assert.throws(() => context.refreshElectricityDashboardCharts_(dashboard,
+    { getRange: () => ({}) }, {
+      monthlyBands: {}, monthlyF1: {}, monthlyF2: {}, monthlyF3: {}, annualBands: {}
+    }, labels), /transient chart failure/);
+  assert.equal(inserted.length, 1);
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0].kind, 'replacement-1');
 }
 
 testLocalizedDashboardContracts();
@@ -412,4 +487,6 @@ testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshUsesNewInvoiceYearOnly();
+testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
+testManagedChartsSurviveReplacementFailure();
 console.log('electricity dashboard tests passed');

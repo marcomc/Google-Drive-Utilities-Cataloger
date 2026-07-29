@@ -169,6 +169,9 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     moved: false,
     imported: false,
     sheetRowCreated: false,
+    sheetRowPreexisting: false,
+    sheetRowPayload: null,
+    sheetOriginalRow: 0,
     sheetLink: '',
     mutationJournalStarted: false,
     createdFolderPath: ''
@@ -249,6 +252,9 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       state.sheetLink = sheetImport.link;
       state.imported = true;
       state.sheetRowCreated = sheetImport.created;
+      state.sheetRowPreexisting = !sheetImport.created;
+      state.sheetRowPayload = sheetImport.previousRowPayload || null;
+      state.sheetOriginalRow = sheetImport.originalRow || sheetImport.row;
       state.sheet = sheetImport.sheet;
       state.sheetRow = sheetImport.row;
     }
@@ -324,6 +330,15 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
       rollbackImportedRow_(state.sheet, state.sheetRow, file);
       state.imported = false;
       state.sheetRowCreated = false;
+      state.sheetLink = '';
+    } catch (error) {
+      state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
+    }
+  } else if (state.sheetRowPreexisting && state.sheetRowPayload) {
+    try {
+      restoreImportedRowPayload_(state.sheet, state.sheetRow,
+        state.sheetOriginalRow, state.sheetRowPayload, file);
+      state.imported = false;
       state.sheetLink = '';
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
@@ -1307,26 +1322,51 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   const layout = getSheetLayout_(sheet);
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
+    const previousRowPayload = captureImportedRowPayload_(sheet, existingRow,
+      layout);
     updateMutationJournal_(file.getId(), {
       stage: 'sheet-existing',
       sheetName: sheetName,
       sheetRow: existingRow,
       sheetRowCreated: false,
-      sheetRowPreexisting: true
+      sheetRowPreexisting: true,
+      sheetOriginalRow: existingRow,
+      sheetRowPayload: previousRowPayload
     });
-    // Re-extraction is a replacement of the complete literal payload. This
-    // prevents stale optional values from surviving when a newer extraction
-    // omits or corrects them; formula-backed columns remain untouched.
-    clearImportedLiteralCells_(sheet, existingRow, layout);
-    writeInvoiceRow_(sheet, existingRow, layout, file, extracted);
-    verifyImportedRow_(sheet, existingRow, layout, file, extracted);
-    refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
-      sheet, extracted);
+    let correctedRow = existingRow;
+    try {
+      // Re-extraction is a replacement of the complete literal payload. This
+      // prevents stale optional values from surviving when a newer extraction
+      // omits or corrects them; formula-backed columns remain untouched.
+      clearImportedLiteralCells_(sheet, existingRow, layout);
+      writeInvoiceRow_(sheet, existingRow, layout, file, extracted);
+      verifyImportedRow_(sheet, existingRow, layout, file, extracted);
+      correctedRow = repositionImportedRow_(sheet, existingRow, layout,
+        extracted.issue_date, file);
+      updateMutationJournal_(file.getId(), {
+        stage: 'sheet-existing-written',
+        sheetRow: correctedRow
+      });
+      refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+        sheet, extracted);
+    } catch (error) {
+      try {
+        restoreImportedRowPayload_(sheet, correctedRow, existingRow,
+          previousRowPayload, file, layout);
+      } catch (rollbackError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Spreadsheet rollback also failed: ' +
+          describeError_(rollbackError);
+      }
+      throw error;
+    }
     return {
-      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + existingRow,
+      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + correctedRow,
       sheet: sheet,
-      row: existingRow,
-      created: false
+      row: correctedRow,
+      created: false,
+      originalRow: existingRow,
+      previousRowPayload: previousRowPayload
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
@@ -1376,6 +1416,73 @@ function clearImportedLiteralCells_(sheet, row, layout) {
       sheet.getRange(row, index + 1).clearContent();
     }
   });
+}
+
+function captureImportedRowPayload_(sheet, row, layout) {
+  const range = sheet.getRange(row, 1, 1, layout.headers.length);
+  const values = range.getValues()[0];
+  const formulas = range.getFormulas()[0];
+  return {
+    cells: values.map(function (value, index) {
+      return {
+        formula: formulas[index] || '',
+        value: serializeImportedCellValue_(value)
+      };
+    })
+  };
+}
+
+function serializeImportedCellValue_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return { type: 'date', value: value.getTime() };
+  }
+  return { type: 'value', value: value };
+}
+
+function deserializeImportedCellValue_(value) {
+  if (value && value.type === 'date') {
+    return new Date(value.value);
+  }
+  return value ? value.value : '';
+}
+
+function restoreImportedRowPayload_(sheet, row, originalRow, payload, file,
+  suppliedLayout) {
+  const layout = suppliedLayout || getSheetLayout_(sheet);
+  let restoredRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) || row;
+  if (originalRow && restoredRow !== originalRow) {
+    moveImportedRowToIndex_(sheet, restoredRow, originalRow,
+      layout.headers.length);
+    restoredRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) ||
+      originalRow;
+  }
+  if (!payload || !Array.isArray(payload.cells) ||
+    payload.cells.length !== layout.headers.length) {
+    throw new Error('The previous spreadsheet row payload is invalid.');
+  }
+  payload.cells.forEach(function (cell, index) {
+    const range = sheet.getRange(restoredRow, index + 1);
+    if (cell.formula) {
+      range.setFormula(cell.formula);
+    } else {
+      range.setValue(deserializeImportedCellValue_(cell.value));
+    }
+  });
+  return restoredRow;
+}
+
+function repositionImportedRow_(sheet, row, layout, issueDate, file) {
+  const targetRow = getInsertionRow_(sheet, layout, issueDate);
+  if (targetRow === row || targetRow === row + 1) {
+    return row;
+  }
+  moveImportedRowToIndex_(sheet, row, targetRow, layout.headers.length);
+  return findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) || row;
+}
+
+function moveImportedRowToIndex_(sheet, row, targetRow, columnCount) {
+  const destination = targetRow > row ? targetRow + 1 : targetRow;
+  sheet.moveRows(sheet.getRange(row, 1, 1, columnCount), destination);
 }
 
 function refreshImportedSourceLink_(sheet, row, file) {
@@ -2180,7 +2287,13 @@ function rollbackJournalSheetRow_(journal, file) {
     if (matches.length === 0) {
       throw new Error('The pre-existing spreadsheet source row is missing.');
     }
-    refreshImportedSourceLink_(sheet, matches[0], file);
+    if (journal.sheetRowPayload) {
+      restoreImportedRowPayload_(sheet, matches[0], journal.sheetOriginalRow ||
+        journal.sheetRow, journal.sheetRowPayload, file, layout);
+    } else {
+      // Journals written before row-payload snapshots remain recoverable.
+      refreshImportedSourceLink_(sheet, matches[0], file);
+    }
     return { unmarkedRowMayRemain: false };
   }
   if (matches.length === 0) {

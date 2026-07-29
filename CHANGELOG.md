@@ -30,6 +30,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Protect technical-sheet ownership, retain managed-chart source ranges, and
   refresh dashboard year series when a newly imported electricity invoice adds
   a year not already represented in the comparison data.
+- Roll back corrected pre-existing invoice rows, including their formulas,
+  source link, and original position, when a later import mutation fails.
+- Reject dashboard refreshes that exceed source or year capacity, and preserve
+  existing managed charts if replacement chart insertion fails.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
