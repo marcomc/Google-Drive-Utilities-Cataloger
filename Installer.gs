@@ -22,13 +22,17 @@ function bootstrapCatalogerInstallation(options) {
     properties.getProperty(CONFIG.PROPERTY_KEYS.SPREADSHEET_ID) : '';
   const rootFolder = DriveApp.getFolderById(validated.rootFolderId);
   const policyFile = ensureInstallerPolicyFile_(rootFolder, validated.agentsPolicy);
-  const spreadsheet = ensureInstallerSpreadsheet_(
-    rootFolder,
-    validated.spreadsheetId || resumableSpreadsheetId,
-    validated.spreadsheetTitle,
-    validated.automationConfig,
-    validated.timeZone,
-    !validated.spreadsheetId
+  const spreadsheet = withCatalogLifecycleLock_(
+    'installation-spreadsheet-initialization', function () {
+      return ensureInstallerSpreadsheet_(
+        rootFolder,
+        validated.spreadsheetId || resumableSpreadsheetId,
+        validated.spreadsheetTitle,
+        validated.automationConfig,
+        validated.timeZone,
+        !validated.spreadsheetId
+      );
+    }
   );
   ensureInstallerDestinationFolders_(rootFolder, validated.automationConfig);
 

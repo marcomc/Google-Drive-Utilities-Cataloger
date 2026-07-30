@@ -84,6 +84,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   falling back to the issue date.
 - Require a dedicated ownership marker before deleting an interrupted
   technical-data snapshot, protecting similarly named user sheets.
+- Run installer spreadsheet and dashboard initialization under the shared
+  catalog lifecycle lock to avoid races with active processing runs.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
