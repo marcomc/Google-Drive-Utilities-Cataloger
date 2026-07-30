@@ -10,6 +10,8 @@ const vm = require('node:vm');
 const projectRoot = path.resolve(__dirname, '..');
 const technicalCreationProperty =
   'ELECTRICITY_DASHBOARD_TECHNICAL_CREATION';
+const technicalBackupCreationProperty =
+  'ELECTRICITY_DASHBOARD_TECHNICAL_BACKUP_CREATION';
 
 function createScriptProperties(initialValues = {}) {
   const values = { ...initialValues };
@@ -159,6 +161,49 @@ function createTechnicalSpreadsheet(initialSheets = []) {
   };
   sheets.forEach((sheet) => sheet.setParent(spreadsheet));
   return spreadsheet;
+}
+
+function makeBackupSheetOperational(sheet) {
+  let rows = 1000;
+  let columns = 26;
+  let hidden = false;
+  const state = { copies: 0 };
+  sheet.getMaxRows = () => rows;
+  sheet.getMaxColumns = () => columns;
+  sheet.isSheetHidden = () => hidden;
+  sheet.insertRowsAfter = (_after, count) => {
+    rows += count;
+  };
+  sheet.insertColumnsAfter = (_after, count) => {
+    columns += count;
+  };
+  sheet.getRange = (...args) => ({
+    args,
+    receiveCopy: () => {
+      state.copies += 1;
+    }
+  });
+  sheet.hideSheet = () => {
+    hidden = true;
+  };
+  sheet.backupState = state;
+  return sheet;
+}
+
+function createTechnicalBackupFixture() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const technical = createPristineTechnicalSheet(labels.dataSheet, 1);
+  const spreadsheet = createTechnicalSpreadsheet([technical]);
+  context.markElectricityDashboardTechnicalSheet_(technical);
+  technical.getRange = () => ({
+    copyTo: (target) => target.receiveCopy()
+  });
+  const insertSheet = spreadsheet.insertSheet;
+  spreadsheet.insertSheet = (name) =>
+    makeBackupSheetOperational(insertSheet(name));
+  return { properties, context, labels, technical, spreadsheet };
 }
 
 function testLocalizedDashboardContracts() {
@@ -370,6 +415,318 @@ function testDashboardInitializationReconcilesInterruptedBackups() {
   assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, {
     locale: 'en', sheet_by_supply: { electricity: 'Electricity' }
   }), /stop after preflight/);
+}
+
+function testTechnicalBackupJournalsFreshCreation() {
+  const fixture = createTechnicalBackupFixture();
+  const { properties, context, technical, spreadsheet } = fixture;
+  const insertSheet = spreadsheet.insertSheet;
+  spreadsheet.insertSheet = (name) => {
+    const planned = JSON.parse(
+      properties.values[technicalBackupCreationProperty]
+    );
+    assert.equal(planned.state, 'planned');
+    assert.equal(planned.technicalSheetId, technical.getSheetId());
+    const backup = insertSheet(name);
+    const addDeveloperMetadata = backup.addDeveloperMetadata;
+    backup.addDeveloperMetadata = (key, value) => {
+      const created = JSON.parse(
+        properties.values[technicalBackupCreationProperty]
+      );
+      assert.equal(created.state, 'created');
+      assert.equal(created.sheetId, backup.getSheetId());
+      return addDeveloperMetadata(key, value);
+    };
+    return backup;
+  };
+  const copyTo = technical.getRange().copyTo;
+  technical.getRange = () => ({
+    copyTo: (target) => {
+      const created = JSON.parse(
+        properties.values[technicalBackupCreationProperty]
+      );
+      assert.equal(created.state, 'created');
+      assert.equal(created.sheetId, spreadsheet.sheets.at(-1).getSheetId());
+      assert.equal(context.isElectricityDashboardTechnicalBackup_(
+        spreadsheet.sheets.at(-1)
+      ), true);
+      copyTo(target);
+    }
+  });
+
+  const backup = context.createElectricityDashboardTechnicalBackup_(
+    spreadsheet, technical, null
+  );
+
+  assert.match(backup.sheet.getName(),
+    /^Electricity dashboard backup pending /);
+  assert.equal(backup.sheet.isSheetHidden(), true);
+  assert.equal(backup.sheet.backupState.copies, 5);
+  assert.equal(JSON.parse(
+    properties.values[technicalBackupCreationProperty]
+  ).sheetId, backup.sheet.getSheetId());
+  assert.deepEqual(properties.history.filter((entry) => entry.action === 'set')
+    .map((entry) => JSON.parse(entry.value).state), ['planned', 'created']);
+
+  spreadsheet.deleteSheet(backup.sheet);
+  context.clearElectricityDashboardTechnicalBackupCreation_();
+  assert.equal(properties.values[technicalBackupCreationProperty], undefined);
+}
+
+function testTechnicalBackupRecoversInterruptionBeforeAndAfterInsert() {
+  const beforeInsert = createTechnicalBackupFixture();
+  const beforeJournal =
+    beforeInsert.context.planElectricityDashboardTechnicalBackupCreation_(
+      beforeInsert.properties.api, beforeInsert.spreadsheet,
+      beforeInsert.technical
+    );
+  const pending =
+    beforeInsert.context.reconcileElectricityDashboardTechnicalBackups_(
+      beforeInsert.spreadsheet, beforeInsert.technical
+    );
+  assert.equal(pending.journal.stagingName, beforeJournal.stagingName);
+  assert.ok(beforeInsert.properties.values[technicalBackupCreationProperty]);
+  assert.equal(beforeInsert.spreadsheet.sheets.length, 1);
+
+  const afterInsert = createTechnicalBackupFixture();
+  const afterJournal =
+    afterInsert.context.planElectricityDashboardTechnicalBackupCreation_(
+      afterInsert.properties.api, afterInsert.spreadsheet,
+      afterInsert.technical
+    );
+  const staged = afterInsert.spreadsheet.insertSheet(afterJournal.stagingName);
+  afterInsert.context.reconcileElectricityDashboardTechnicalBackups_(
+    afterInsert.spreadsheet, afterInsert.technical
+  );
+  assert.equal(afterInsert.spreadsheet.sheets.includes(staged), false);
+  assert.equal(
+    afterInsert.properties.values[technicalBackupCreationProperty], undefined
+  );
+  const createdCheckpoint = afterInsert.properties.history.find((entry) =>
+    entry.action === 'set' && JSON.parse(entry.value).state === 'created'
+  );
+  assert.equal(JSON.parse(createdCheckpoint.value).sheetId, staged.getSheetId());
+}
+
+function testTechnicalBackupRecoversExactIdBeforeAndAfterMarker() {
+  const beforeMarker = createTechnicalBackupFixture();
+  const beforeJournal =
+    beforeMarker.context.planElectricityDashboardTechnicalBackupCreation_(
+      beforeMarker.properties.api, beforeMarker.spreadsheet,
+      beforeMarker.technical
+    );
+  const unmarked = beforeMarker.spreadsheet.insertSheet(
+    beforeJournal.stagingName
+  );
+  beforeJournal.state = 'created';
+  beforeJournal.sheetId = unmarked.getSheetId();
+  beforeMarker.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(beforeJournal));
+  beforeMarker.context.reconcileElectricityDashboardTechnicalBackups_(
+    beforeMarker.spreadsheet, beforeMarker.technical
+  );
+  assert.equal(beforeMarker.spreadsheet.sheets.includes(unmarked), false);
+
+  const afterMarker = createTechnicalBackupFixture();
+  const afterJournal =
+    afterMarker.context.planElectricityDashboardTechnicalBackupCreation_(
+      afterMarker.properties.api, afterMarker.spreadsheet,
+      afterMarker.technical
+    );
+  const marked = afterMarker.spreadsheet.insertSheet(afterJournal.stagingName);
+  afterJournal.state = 'created';
+  afterJournal.sheetId = marked.getSheetId();
+  afterMarker.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(afterJournal));
+  afterMarker.context.markElectricityDashboardTechnicalBackup_(marked);
+  afterMarker.context.reconcileElectricityDashboardTechnicalBackups_(
+    afterMarker.spreadsheet, afterMarker.technical
+  );
+  assert.equal(afterMarker.spreadsheet.sheets.includes(marked), false);
+  assert.equal(
+    afterMarker.properties.values[technicalBackupCreationProperty], undefined
+  );
+}
+
+function testTechnicalBackupRecoversDuringExpansionAndCopy() {
+  const fixture = createTechnicalBackupFixture();
+  const { properties, context, technical, spreadsheet } = fixture;
+  const journal = context.planElectricityDashboardTechnicalBackupCreation_(
+    properties.api, spreadsheet, technical
+  );
+  const partial = spreadsheet.insertSheet(journal.stagingName);
+  journal.state = 'created';
+  journal.sheetId = partial.getSheetId();
+  properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(journal));
+  context.markElectricityDashboardTechnicalBackup_(partial);
+  partial.insertRowsAfter(1000, 9042);
+  partial.getLastRow = () => 5000;
+  partial.getLastColumn = () => 4;
+  partial.hideSheet();
+
+  context.reconcileElectricityDashboardTechnicalBackups_(spreadsheet,
+    technical);
+
+  assert.equal(spreadsheet.sheets.includes(partial), false);
+  assert.equal(properties.values[technicalBackupCreationProperty], undefined);
+}
+
+function testTechnicalBackupCopyFailureCleansUp() {
+  const fixture = createTechnicalBackupFixture();
+  const { properties, context, technical, spreadsheet } = fixture;
+  let copies = 0;
+  technical.getRange = () => ({
+    copyTo: (target) => {
+      copies += 1;
+      target.receiveCopy();
+      if (copies === 3) {
+        throw new Error('copy interrupted');
+      }
+    }
+  });
+
+  assert.throws(() => context.createElectricityDashboardTechnicalBackup_(
+    spreadsheet, technical, null
+  ), /copy interrupted/);
+  assert.equal(spreadsheet.sheets.length, 1);
+  assert.equal(properties.values[technicalBackupCreationProperty], undefined);
+}
+
+function testTechnicalBackupDeleteFailureRetriesFromExactId() {
+  const fixture = createTechnicalBackupFixture();
+  const { properties, context, technical, spreadsheet } = fixture;
+  const journal = context.planElectricityDashboardTechnicalBackupCreation_(
+    properties.api, spreadsheet, technical
+  );
+  const backup = spreadsheet.insertSheet(journal.stagingName);
+  journal.state = 'created';
+  journal.sheetId = backup.getSheetId();
+  properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(journal));
+  const deleteSheet = spreadsheet.deleteSheet;
+  spreadsheet.deleteSheet = () => {
+    throw new Error('delete unavailable');
+  };
+
+  assert.throws(() => context.reconcileElectricityDashboardTechnicalBackups_(
+    spreadsheet, technical
+  ), /delete unavailable/);
+  assert.equal(spreadsheet.sheets.includes(backup), true);
+  assert.ok(properties.values[technicalBackupCreationProperty]);
+
+  spreadsheet.deleteSheet = deleteSheet;
+  context.reconcileElectricityDashboardTechnicalBackups_(spreadsheet,
+    technical);
+  assert.equal(spreadsheet.sheets.includes(backup), false);
+  assert.equal(properties.values[technicalBackupCreationProperty], undefined);
+}
+
+function testTechnicalBackupFailsClosedForUnsafeRecordsAndCandidates() {
+  const stale = createTechnicalBackupFixture();
+  const staleJournal =
+    stale.context.planElectricityDashboardTechnicalBackupCreation_(
+      stale.properties.api, stale.spreadsheet, stale.technical
+    );
+  staleJournal.plannedAt = Date.now() - 25 * 60 * 60 * 1000;
+  stale.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(staleJournal));
+  assert.throws(() =>
+    stale.context.reconcileElectricityDashboardTechnicalBackups_(
+      stale.spreadsheet, stale.technical
+    ), /creation record is stale/);
+  assert.ok(stale.properties.values[technicalBackupCreationProperty]);
+
+  const malformed = createTechnicalBackupFixture();
+  malformed.properties.api.setProperty(technicalBackupCreationProperty,
+    '{not-json');
+  assert.throws(() =>
+    malformed.context.reconcileElectricityDashboardTechnicalBackups_(
+      malformed.spreadsheet, malformed.technical
+    ), /creation record is malformed/);
+
+  const mismatch = createTechnicalBackupFixture();
+  const mismatchJournal =
+    mismatch.context.planElectricityDashboardTechnicalBackupCreation_(
+      mismatch.properties.api, mismatch.spreadsheet, mismatch.technical
+    );
+  mismatchJournal.spreadsheetId = 'another-spreadsheet';
+  mismatch.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(mismatchJournal));
+  assert.throws(() =>
+    mismatch.context.reconcileElectricityDashboardTechnicalBackups_(
+      mismatch.spreadsheet, mismatch.technical
+    ), /does not match this spreadsheet and technical sheet/);
+
+  const technicalMismatch = createTechnicalBackupFixture();
+  const technicalMismatchJournal =
+    technicalMismatch.context.planElectricityDashboardTechnicalBackupCreation_(
+      technicalMismatch.properties.api, technicalMismatch.spreadsheet,
+      technicalMismatch.technical
+    );
+  technicalMismatchJournal.technicalSheetId = 999;
+  technicalMismatchJournal.existingSheetIds.push(999);
+  technicalMismatch.properties.api.setProperty(
+    technicalBackupCreationProperty,
+    JSON.stringify(technicalMismatchJournal)
+  );
+  assert.throws(() =>
+    technicalMismatch.context.reconcileElectricityDashboardTechnicalBackups_(
+      technicalMismatch.spreadsheet, technicalMismatch.technical
+    ), /does not match this spreadsheet and technical sheet/);
+
+  const preExisting = createTechnicalBackupFixture();
+  const preExistingJournal =
+    preExisting.context.planElectricityDashboardTechnicalBackupCreation_(
+      preExisting.properties.api, preExisting.spreadsheet,
+      preExisting.technical
+    );
+  const userNamed = preExisting.spreadsheet.insertSheet(
+    preExistingJournal.stagingName
+  );
+  preExistingJournal.existingSheetIds.push(userNamed.getSheetId());
+  preExisting.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(preExistingJournal));
+  assert.throws(() =>
+    preExisting.context.reconcileElectricityDashboardTechnicalBackups_(
+      preExisting.spreadsheet, preExisting.technical
+    ), /does not match the created sheet/);
+  assert.equal(preExisting.spreadsheet.sheets.includes(userNamed), true);
+
+  const modified = createTechnicalBackupFixture();
+  const modifiedJournal =
+    modified.context.planElectricityDashboardTechnicalBackupCreation_(
+      modified.properties.api, modified.spreadsheet, modified.technical
+    );
+  const modifiedCandidate = modified.spreadsheet.insertSheet(
+    modifiedJournal.stagingName
+  );
+  modifiedCandidate.addDeveloperMetadata('user.metadata', 'keep');
+  assert.throws(() =>
+    modified.context.reconcileElectricityDashboardTechnicalBackups_(
+      modified.spreadsheet, modified.technical
+    ), /does not identify a safe created sheet/);
+  assert.equal(modified.spreadsheet.sheets.includes(modifiedCandidate), true);
+
+  const createdMismatch = createTechnicalBackupFixture();
+  const createdJournal =
+    createdMismatch.context.planElectricityDashboardTechnicalBackupCreation_(
+      createdMismatch.properties.api, createdMismatch.spreadsheet,
+      createdMismatch.technical
+    );
+  const renamed = createdMismatch.spreadsheet.insertSheet(
+    createdJournal.stagingName
+  );
+  createdJournal.state = 'created';
+  createdJournal.sheetId = renamed.getSheetId();
+  createdMismatch.properties.api.setProperty(technicalBackupCreationProperty,
+    JSON.stringify(createdJournal));
+  renamed.setName('User-owned backup');
+  assert.throws(() =>
+    createdMismatch.context.reconcileElectricityDashboardTechnicalBackups_(
+      createdMismatch.spreadsheet, createdMismatch.technical
+    ), /does not match the created sheet/);
+  assert.equal(createdMismatch.spreadsheet.sheets.includes(renamed), true);
 }
 
 function testTechnicalCreationJournalsNormalFreshCreation() {
@@ -1259,6 +1616,13 @@ testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalSheetCannotAliasAnyConfiguredSource();
 testDashboardInitializationReconcilesInterruptedBackups();
+testTechnicalBackupJournalsFreshCreation();
+testTechnicalBackupRecoversInterruptionBeforeAndAfterInsert();
+testTechnicalBackupRecoversExactIdBeforeAndAfterMarker();
+testTechnicalBackupRecoversDuringExpansionAndCopy();
+testTechnicalBackupCopyFailureCleansUp();
+testTechnicalBackupDeleteFailureRetriesFromExactId();
+testTechnicalBackupFailsClosedForUnsafeRecordsAndCandidates();
 testTechnicalCreationJournalsNormalFreshCreation();
 testInitializationReconcilesCreationBeforeOwnershipPreflight();
 testTechnicalCreationRecoversInterruptionBeforeInsert();

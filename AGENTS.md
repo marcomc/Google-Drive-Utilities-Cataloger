@@ -112,6 +112,8 @@
   so an interruption cannot strand or duplicate it. On resume, adopt a
   planned-only resource only through an exact pristine staging contract, and
   fail closed for stale, malformed, mismatched, or user-owned candidates.
+  Apply the same contract to temporary and backup resources; a generated
+  unique name is not an ownership marker.
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.
