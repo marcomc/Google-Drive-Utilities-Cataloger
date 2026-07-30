@@ -554,6 +554,8 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
         return range.getA1Notation();
       }),
       dataDimension: getElectricityChartDataDimension_(technical, key),
+      transposeRowsAndColumns: typeof chart.getTransposeRowsAndColumns ===
+        'function' && chart.getTransposeRowsAndColumns(),
       options: captureElectricityChartOptions_(options)
     };
   });
@@ -684,14 +686,17 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
   ranges.forEach(function (range) {
     builder.addRange(range);
   });
-  return builder
+  builder
     .setNumHeaders(1)
     .setPosition(layout.row, layout.column, layout.offsetX, layout.offsetY)
     .setOption('title', title)
     .setOption('width', layout.width)
     .setOption('height', layout.height)
-    .setOption('legend', layout.options.legend || { position: 'right' })
-    .build();
+    .setOption('legend', layout.options.legend || { position: 'right' });
+  if (typeof builder.setTransposeRowsAndColumns === 'function') {
+    builder.setTransposeRowsAndColumns(Boolean(layout.transposeRowsAndColumns));
+  }
+  return builder.build();
 }
 
 function shouldExtendElectricityChartRange_(preserved, sourceRange, technical,

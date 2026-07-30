@@ -1525,7 +1525,11 @@ function importUtilityInvoiceToSheet_(file, extracted) {
         electricityDashboardLayouts: electricityDashboardLayouts
       });
     } catch (rollbackError) {
-      updateMutationJournal_(file.getId(), { stage: 'sheet-rollback-failed' });
+      updateMutationJournal_(file.getId(), {
+        stage: 'sheet-rollback-failed',
+        sheetRowCreated: false,
+        sheetRowDeleted: true
+      });
       error.mutationRollbackIncomplete = true;
       error.message += ' Spreadsheet rollback also failed: ' +
         describeError_(rollbackError);
