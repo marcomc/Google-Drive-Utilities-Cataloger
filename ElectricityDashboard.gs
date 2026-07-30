@@ -540,7 +540,26 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
     }
     const container = chart.getContainerInfo();
     const options = chart.getOptions();
-    layouts[key] = {
+    const builder = typeof chart.modify === 'function' ? chart.modify() : null;
+    const builderState = {};
+    if (builder && typeof builder.getChartType === 'function') {
+      builderState.chartType = builder.getChartType();
+    }
+    if (typeof chart.getHiddenDimensionStrategy === 'function') {
+      builderState.hiddenDimensionStrategy =
+        chart.getHiddenDimensionStrategy();
+    }
+    if (typeof chart.getMergeStrategy === 'function') {
+      builderState.mergeStrategy = chart.getMergeStrategy();
+    }
+    if (typeof chart.getNumHeaders === 'function') {
+      builderState.numHeaders = chart.getNumHeaders();
+    }
+    if (typeof chart.getTransposeRowsAndColumns === 'function') {
+      builderState.transposeRowsAndColumns =
+        chart.getTransposeRowsAndColumns();
+    }
+    layouts[key] = Object.assign({
       key: key,
       row: container.getAnchorRow(),
       column: container.getAnchorColumn(),
@@ -554,10 +573,8 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
         return range.getA1Notation();
       }),
       dataDimension: getElectricityChartDataDimension_(technical, key),
-      transposeRowsAndColumns: typeof chart.getTransposeRowsAndColumns ===
-        'function' && chart.getTransposeRowsAndColumns(),
       options: captureElectricityChartOptions_(options)
-    };
+    }, builderState);
   });
   return layouts;
 }
@@ -658,6 +675,11 @@ function getElectricityChartLayout_(layouts, key, row, column, width, height) {
     offsetY: 0,
     width: width,
     height: height,
+    hiddenDimensionStrategy:
+      Charts.ChartHiddenDimensionStrategy.IGNORE_ROWS,
+    mergeStrategy: Charts.ChartMergeStrategy.MERGE_COLUMNS,
+    numHeaders: 1,
+    transposeRowsAndColumns: false,
     options: {}
   }, layouts[key] || {});
 }
@@ -672,6 +694,10 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
   title, type, extendManagedRanges) {
   const builder = type === 'line' ? dashboard.newChart().asLineChart() :
     dashboard.newChart().asColumnChart();
+  if (layout.chartType !== null && layout.chartType !== undefined &&
+    typeof builder.setChartType === 'function') {
+    builder.setChartType(layout.chartType);
+  }
   Object.keys(layout.options).forEach(function (key) {
     builder.setOption(key, layout.options[key]);
   });
@@ -687,12 +713,24 @@ function buildElectricityChart_(dashboard, technical, sourceRange, layout,
     builder.addRange(range);
   });
   builder
-    .setNumHeaders(1)
     .setPosition(layout.row, layout.column, layout.offsetX, layout.offsetY)
     .setOption('title', title)
     .setOption('width', layout.width)
     .setOption('height', layout.height)
     .setOption('legend', layout.options.legend || { position: 'right' });
+  if (layout.hiddenDimensionStrategy !== null &&
+    layout.hiddenDimensionStrategy !== undefined &&
+    typeof builder.setHiddenDimensionStrategy === 'function') {
+    builder.setHiddenDimensionStrategy(layout.hiddenDimensionStrategy);
+  }
+  if (layout.mergeStrategy !== null && layout.mergeStrategy !== undefined &&
+    typeof builder.setMergeStrategy === 'function') {
+    builder.setMergeStrategy(layout.mergeStrategy);
+  }
+  if (layout.numHeaders !== null && layout.numHeaders !== undefined &&
+    typeof builder.setNumHeaders === 'function') {
+    builder.setNumHeaders(layout.numHeaders);
+  }
   if (typeof builder.setTransposeRowsAndColumns === 'function') {
     builder.setTransposeRowsAndColumns(Boolean(layout.transposeRowsAndColumns));
   }

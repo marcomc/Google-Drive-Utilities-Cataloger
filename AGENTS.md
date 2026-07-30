@@ -95,7 +95,8 @@
   the completed-state fields, and recovery must resume from that checkpoint
   without requiring the old resource to still exist.
 - When rebuilding managed charts, preserve public state beyond the chart
-  options map, including source ranges, geometry, null interpolation, and
+  options map, including source ranges, geometry, chart type, range merge
+  strategy, header count, hidden-dimension strategy, null interpolation, and
   row/column transposition. Cover refresh, rollback, and journal-recovery paths
   with customized-chart regressions.
 - Keep installer-owned `clasp` authorization isolated from the global profile.

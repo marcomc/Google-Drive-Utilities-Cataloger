@@ -18,6 +18,14 @@ function loadDashboard() {
     Object,
     String,
     Array,
+    Charts: {
+      ChartHiddenDimensionStrategy: {
+        IGNORE_ROWS: 'IGNORE_ROWS'
+      },
+      ChartMergeStrategy: {
+        MERGE_COLUMNS: 'MERGE_COLUMNS'
+      }
+    },
     getHeaderAliases_: (key) => ({
       issueDate: ['issue date'],
       year: ['reference year'],
@@ -454,12 +462,24 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
     JSON.stringify({ 0: { lineWidth: 4, pointSize: 7 } }));
 
   const addedRanges = [];
+  const unexpectedBuilderStateCalls = [];
   const builder = {
     addRange: (range) => {
       addedRanges.push(range.a1);
       return builder;
     },
-    setNumHeaders: () => builder,
+    setHiddenDimensionStrategy: (value) => {
+      unexpectedBuilderStateCalls.push(['hidden', value]);
+      return builder;
+    },
+    setMergeStrategy: (value) => {
+      unexpectedBuilderStateCalls.push(['merge', value]);
+      return builder;
+    },
+    setNumHeaders: (value) => {
+      unexpectedBuilderStateCalls.push(['headers', value]);
+      return builder;
+    },
     setPosition: () => builder,
     setOption: () => builder,
     build: () => ({})
@@ -472,6 +492,7 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
   }, { a1: 'A1:D10001' }, layouts.monthlyF1, labels.charts.monthlyF1,
   'column');
   assert.deepEqual(addedRanges, ['F1:AE13']);
+  assert.deepEqual(unexpectedBuilderStateCalls, []);
 }
 
 function testTechnicalOwnershipAndCapacityPreflight() {
@@ -578,6 +599,133 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 
+function testCustomizedChartBuilderStateSurvivesRefresh() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const chartTechnical = { getSheetId: () => 42 };
+  const chartRange = (a1, column, columns) => ({
+    getA1Notation: () => a1,
+    getSheet: () => chartTechnical,
+    getRow: () => 1,
+    getColumn: () => column,
+    getNumRows: () => 13,
+    getNumColumns: () => columns
+  });
+  const options = {
+    get: (key) => ({
+      title: labels.charts.monthlyF1,
+      width: 811,
+      height: 377,
+      legend: { position: 'bottom' }
+    })[key]
+  };
+  let modifyCalls = 0;
+  const original = {
+    getOptions: () => options,
+    getRanges: () => [
+      chartRange('F1:F13', 6, 1),
+      chartRange('G1:I13', 7, 3)
+    ],
+    getContainerInfo: () => ({
+      getAnchorRow: () => 17,
+      getAnchorColumn: () => 9,
+      getOffsetX: () => 12,
+      getOffsetY: () => 14
+    }),
+    getHiddenDimensionStrategy: () => 'IGNORE_COLUMNS',
+    getMergeStrategy: () => 'MERGE_ROWS',
+    getNumHeaders: () => 2,
+    getTransposeRowsAndColumns: () => true,
+    modify: () => {
+      modifyCalls += 1;
+      return { getChartType: () => 'AREA' };
+    }
+  };
+  const inserted = [];
+  const removed = [];
+  const dashboard = {
+    getCharts: () => [original],
+    newChart: () => {
+      const state = { options: {}, ranges: [] };
+      const builder = {
+        addRange: (range) => {
+          state.ranges.push(range.a1);
+          return builder;
+        },
+        setChartType: (chartType) => {
+          state.chartType = chartType;
+          return builder;
+        },
+        setHiddenDimensionStrategy: (strategy) => {
+          state.hiddenDimensionStrategy = strategy;
+          return builder;
+        },
+        setMergeStrategy: (strategy) => {
+          state.mergeStrategy = strategy;
+          return builder;
+        },
+        setNumHeaders: (headers) => {
+          state.numHeaders = headers;
+          return builder;
+        },
+        setPosition: (...position) => {
+          state.position = position;
+          return builder;
+        },
+        setOption: (key, value) => {
+          state.options[key] = value;
+          return builder;
+        },
+        setTransposeRowsAndColumns: (transpose) => {
+          state.transposeRowsAndColumns = transpose;
+          return builder;
+        },
+        build: () => ({ state })
+      };
+      return {
+        asLineChart: () => {
+          state.chartType = 'LINE';
+          return builder;
+        },
+        asColumnChart: () => {
+          state.chartType = 'COLUMN';
+          return builder;
+        }
+      };
+    },
+    insertChart: (chart) => inserted.push(chart),
+    removeChart: (chart) => removed.push(chart)
+  };
+  const technical = {
+    getSheetId: () => 42,
+    getRange: (a1) => ({ a1 })
+  };
+  context.getElectricityChartDataDimension_ = () => 4;
+
+  context.refreshElectricityDashboardCharts_(dashboard, technical, {
+    monthlyBands: { a1: 'A1:D10001' },
+    monthlyF1: { a1: 'F1:AE13' },
+    monthlyF2: { a1: 'AG1:BJ13' },
+    monthlyF3: { a1: 'BK1:CK13' },
+    annualBands: { a1: 'CI1:CL26' }
+  }, labels, false);
+
+  assert.equal(modifyCalls, 1);
+  assert.equal(typeof original.getChartType, 'undefined');
+  assert.deepEqual(removed, [original]);
+  const refreshed = inserted.find((chart) =>
+    chart.state.options.title === labels.charts.monthlyF1
+  );
+  assert.ok(refreshed);
+  assert.equal(refreshed.state.chartType, 'AREA');
+  assert.equal(refreshed.state.hiddenDimensionStrategy, 'IGNORE_COLUMNS');
+  assert.equal(refreshed.state.mergeStrategy, 'MERGE_ROWS');
+  assert.equal(refreshed.state.numHeaders, 2);
+  assert.equal(refreshed.state.transposeRowsAndColumns, true);
+  assert.deepEqual(refreshed.state.ranges, ['F1:F13', 'G1:I13']);
+  assert.deepEqual(refreshed.state.position, [17, 9, 12, 14]);
+}
+
 function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
@@ -592,7 +740,18 @@ function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
           state.ranges.push(range.a1);
           return builder;
         },
-        setNumHeaders: () => builder,
+        setHiddenDimensionStrategy: (strategy) => {
+          state.hiddenDimensionStrategy = strategy;
+          return builder;
+        },
+        setMergeStrategy: (strategy) => {
+          state.mergeStrategy = strategy;
+          return builder;
+        },
+        setNumHeaders: (headers) => {
+          state.numHeaders = headers;
+          return builder;
+        },
         setPosition: (...position) => {
           state.position = position;
           return builder;
@@ -601,12 +760,21 @@ function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
           state.options[key] = value;
           return builder;
         },
-        setTransposeRowsAndColumns: () => builder,
+        setTransposeRowsAndColumns: (transpose) => {
+          state.transposeRowsAndColumns = transpose;
+          return builder;
+        },
         build: () => ({ state })
       };
       return {
-        asLineChart: () => builder,
-        asColumnChart: () => builder
+        asLineChart: () => {
+          state.chartType = 'LINE';
+          return builder;
+        },
+        asColumnChart: () => {
+          state.chartType = 'COLUMN';
+          return builder;
+        }
       };
     },
     insertChart: (chart) => inserted.push(chart),
@@ -661,6 +829,11 @@ function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
   assert.equal(monthlyF1.state.options.height, 360);
   assert.equal(JSON.stringify(monthlyF1.state.options.legend),
     JSON.stringify({ position: 'right' }));
+  assert.equal(monthlyF1.state.chartType, 'COLUMN');
+  assert.equal(monthlyF1.state.hiddenDimensionStrategy, 'IGNORE_ROWS');
+  assert.equal(monthlyF1.state.mergeStrategy, 'MERGE_COLUMNS');
+  assert.equal(monthlyF1.state.numHeaders, 1);
+  assert.equal(monthlyF1.state.transposeRowsAndColumns, false);
 }
 
 function testManagedChartsSurviveReplacementFailure() {
@@ -773,6 +946,7 @@ testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshRebuildsEveryElectricityImport();
 testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
+testCustomizedChartBuilderStateSurvivesRefresh();
 testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();
 testPreservedChartRangesExtendOnlyFromTheirManagedOrigin();
