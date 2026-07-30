@@ -90,6 +90,26 @@ function validInvoice() {
   };
 }
 
+function installScriptPropertyStore(context, initialValues = {}) {
+  const store = { ...initialValues };
+  const properties = {
+    getProperties: () => ({ ...store }),
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => {
+      store[key] = value;
+    },
+    setProperties: (values) => Object.assign(store, values),
+    deleteProperty: (key) => {
+      delete store[key];
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => properties
+  };
+  return { properties, store };
+}
+
 function testFormulaLikeTextIsWrittenLiterally() {
   const context = loadCataloger();
   [
@@ -135,6 +155,61 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(normalized.contract_number, 'CONTRACT-2');
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
   assert.equal(normalized.reference_month, '07');
+
+  const energygas = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'Energygas Italia',
+    contract_number: 'CL000001',
+    customer_code: ''
+  });
+  assert.equal(energygas.contract_number, '');
+  assert.equal(energygas.customer_code, 'CL000001');
+
+  ['CL-000001', 'CL 000001', 'CL/000001'].forEach((contractNumber) => {
+    const formattedEnergygas = context.normalizeExtraction_({
+      ...raw,
+      supplier: 'Energygas Italia',
+      contract_number: contractNumber,
+      customer_code: ''
+    });
+    assert.equal(formattedEnergygas.contract_number, '');
+    assert.equal(formattedEnergygas.customer_code, contractNumber);
+  });
+
+  const duplicatedEnergygas = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'Energygas Italia',
+    contract_number: 'CL000001',
+    customer_code: 'CL000001'
+  });
+  assert.equal(duplicatedEnergygas.contract_number, '');
+  assert.equal(duplicatedEnergygas.customer_code, 'CL000001');
+
+  const normalizedSheetValues = context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: '  Unità di misura consumi  ', value: ' mc  ' }]
+  }).sheet_values;
+  assert.equal(JSON.stringify(normalizedSheetValues), JSON.stringify([
+    { header: 'Unità di misura consumi', value: 'mc' }
+  ]));
+
+  const bandValues = context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: 'Quantità consumi F1', value: '368,74 kWh' }]
+  }).sheet_values;
+  assert.equal(bandValues[0].value, 368.74);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234,56 kWh'),
+    1234.56);
+  assert.equal(context.normalizeElectricityBandConsumption_('1,234 kWh'), null);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234 kWh'), null);
+  assert.equal(context.normalizeElectricityBandConsumption_('1,234,567 kWh'),
+    1234567);
+  assert.equal(context.normalizeElectricityBandConsumption_('1.234.567 kWh'),
+    1234567);
+  assert.throws(() => context.normalizeExtraction_({
+    ...raw,
+    sheet_values: [{ header: 'Quantità consumi F1', value: 'not available' }]
+  }), /nonnumeric electricity band consumption/);
 
   assert.throws(
     () => context.validateRawExtractionShape_({
@@ -785,10 +860,38 @@ function testDuplicateNormalizedSheetHeadersAreRejected() {
   );
 }
 
+function testSheetLayoutAcceptsPendingLocaleAliases() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = () => {
+    throw new Error('persisted automation configuration is unavailable');
+  };
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 1,
+    getName: () => 'Luce',
+    getRange: () => ({
+      getDisplayValues: () => [[
+        'Data di emissione',
+        'Fornitore'
+      ]]
+    })
+  };
+
+  const layout = context.getSheetLayout_(sheet, {
+    issueDate: ['data di emissione'],
+    supplier: ['fornitore']
+  });
+
+  assert.equal(layout.headerRow, 1);
+  assert.equal(layout.lookup['data di emissione'], 1);
+  assert.equal(layout.lookup.fornitore, 2);
+}
+
 function testMutationRecoveryStages() {
   function scenario(journal, markedRows) {
     const deletedRows = [];
     const refreshedRows = [];
+    const dashboardRefreshes = [];
     const context = loadCataloger();
     const file = { getId: () => 'source-file-id' };
     const sheet = {
@@ -811,9 +914,14 @@ function testMutationRecoveryStages() {
     context.refreshImportedSourceLink_ = (_sheet, row) => {
       refreshedRows.push(row);
     };
+    context.refreshElectricityDashboardAfterRollback_ = (state) => {
+      dashboardRefreshes.push(state.sheet);
+    };
+    context.updateMutationJournal_ = () => {};
     return {
       deletedRows,
       refreshedRows,
+      dashboardRefreshes,
       result: () => context.rollbackJournalSheetRow_(journal, file)
     };
   }
@@ -837,6 +945,7 @@ function testMutationRecoveryStages() {
   }, [2]);
   assert.equal(markerWrittenBeforeJournal.result().unmarkedRowMayRemain, false);
   assert.deepEqual(markerWrittenBeforeJournal.deletedRows, [2]);
+  assert.equal(markerWrittenBeforeJournal.dashboardRefreshes.length, 1);
 
   const markerLostAfterJournal = scenario({
     stage: 'sheet-marker-written',
@@ -845,6 +954,18 @@ function testMutationRecoveryStages() {
     sheetRowCreated: true
   }, []);
   assert.throws(markerLostAfterJournal.result, /source marker is missing/);
+
+  const deletedRowAwaitingDashboardRefresh = scenario({
+    stage: 'sheet-row-rolled-back',
+    sheetName: 'Water',
+    sheetRow: 2,
+    sheetRowCreated: false,
+    sheetRowPreexisting: false,
+    sheetRowDeleted: true
+  }, []);
+  assert.equal(deletedRowAwaitingDashboardRefresh.result().unmarkedRowMayRemain,
+    false);
+  assert.equal(deletedRowAwaitingDashboardRefresh.dashboardRefreshes.length, 1);
 
   const existingRow = scenario({
     stage: 'sheet-existing',
@@ -856,6 +977,47 @@ function testMutationRecoveryStages() {
   assert.equal(existingRow.result().unmarkedRowMayRemain, false);
   assert.deepEqual(existingRow.deletedRows, []);
   assert.deepEqual(existingRow.refreshedRows, [2]);
+
+  const restoredRows = [];
+  const payloadFile = { getId: () => 'source-file-id' };
+  const payloadContext = loadCataloger();
+  payloadContext.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => ({
+      getLastRow: () => 3,
+      getRange: (row) => ({ row })
+    })
+  });
+  payloadContext.getSpreadsheetId_ = () => 'spreadsheet-id';
+  payloadContext.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Source file'],
+    lookup: { 'source file': 1 }
+  });
+  payloadContext.getHeaderAliases_ = () => ['Source file'];
+  payloadContext.findHeaderIndex_ = () => 1;
+  payloadContext.getFileFromSourceCell_ = (cell) => cell.row === 3 ? payloadFile : null;
+  payloadContext.restoreImportedRowPayload_ = (_sheet, row, originalRow, payload) => {
+    restoredRows.push([row, originalRow, payload]);
+  };
+  const recoveredDashboardSheets = [];
+  const rollbackLayouts = { monthlyF1: { sourceRanges: ['F1:Z13'] } };
+  payloadContext.refreshElectricityDashboardAfterRollback_ = (state) => {
+    recoveredDashboardSheets.push(state.sheet);
+    assert.equal(JSON.stringify(state.electricityDashboardLayouts),
+      JSON.stringify(rollbackLayouts));
+  };
+  assert.equal(payloadContext.rollbackJournalSheetRow_({
+    stage: 'sheet-existing-written',
+    sheetName: 'Water',
+    sheetRow: 3,
+    sheetOriginalRow: 2,
+    sheetRowCreated: false,
+    sheetRowPreexisting: true,
+    sheetRowPayload: { cells: [] },
+    electricityDashboardLayouts: rollbackLayouts
+  }, payloadFile).unmarkedRowMayRemain, false);
+  assert.deepEqual(restoredRows, [[3, 2, { cells: [] }]]);
+  assert.equal(recoveredDashboardSheets.length, 1);
 
   const existingRowAfterRename = scenario({
     stage: 'renamed',
@@ -880,6 +1042,89 @@ function testMutationRecoveryStages() {
   );
   assert.deepEqual(legacyExistingRowAfterRename.deletedRows, []);
   assert.deepEqual(legacyExistingRowAfterRename.refreshedRows, [3]);
+}
+
+function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
+  const fileId = 'source-file-id';
+  const initialJournal = {
+    stage: 'sheet-marker-written',
+    sheetName: 'Water',
+    sheetRow: 2,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false
+  };
+  const store = {};
+  let journalWriteAttempts = 0;
+  const context = loadCataloger();
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + fileId;
+  store[journalKey] = JSON.stringify(initialJournal);
+  const properties = {
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => {
+      journalWriteAttempts += 1;
+      if (journalWriteAttempts === 1) {
+        throw new Error('primary journal update failed');
+      }
+      store[key] = value;
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => properties
+  };
+  const file = { getId: () => fileId };
+  let markedRow = 2;
+  const deletedRows = [];
+  let dashboardRefreshes = 0;
+  const sheet = {
+    getLastRow: () => 4,
+    getRange: (row) => ({ row }),
+    deleteRow: (row) => {
+      deletedRows.push(row);
+      markedRow = 0;
+    }
+  };
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Source file'],
+    lookup: { 'source file': 1 }
+  });
+  context.getHeaderAliases_ = () => ['Source file'];
+  context.findHeaderIndex_ = () => 1;
+  context.getFileFromSourceCell_ = (cell) =>
+    cell.row === markedRow ? file : null;
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    dashboardRefreshes += 1;
+  };
+
+  assert.equal(
+    context.rollbackJournalSheetRow_(initialJournal, file).unmarkedRowMayRemain,
+    false
+  );
+  assert.deepEqual(deletedRows, [2]);
+  assert.equal(journalWriteAttempts, 2);
+  const fallbackJournal = JSON.parse(store[journalKey]);
+  assert.equal(fallbackJournal.stage, 'sheet-row-rolled-back');
+  assert.equal(fallbackJournal.sheetRowCreated, false);
+  assert.equal(fallbackJournal.sheetRowDeleted, true);
+  assert.equal(fallbackJournal.sheetName, 'Water');
+  assert.equal(fallbackJournal.sheetRow, 2);
+  assert.equal(typeof fallbackJournal.updatedAt, 'number');
+
+  assert.equal(
+    context.rollbackJournalSheetRow_(fallbackJournal, file).unmarkedRowMayRemain,
+    false
+  );
+  assert.deepEqual(deletedRows, [2]);
+  assert.equal(journalWriteAttempts, 2);
+  assert.equal(dashboardRefreshes, 2);
 }
 
 function testMutationRecoveryReportsUnavailableFileOnce() {
@@ -1008,8 +1253,10 @@ function testFormulaAndStyleCopySources() {
   const context = loadCataloger();
   const sheet = {
     getLastRow: () => 6,
-    getRange: (row) => ({
-      copyTo: (_target, pasteType) => calls.push([row, pasteType])
+    getRange: (row, column, _rows, width) => ({
+      copyTo: (_target, pasteType) => calls.push([row, pasteType]),
+      getFormulas: () => [['', '=A1', '']],
+      clearContent: () => calls.push([row, column, width, 'clear'])
     })
   };
   const layout = { headerRow: 1, headers: ['A', 'B'] };
@@ -1020,9 +1267,101 @@ function testFormulaAndStyleCopySources() {
   assert.deepEqual(calls, [
     [3, 'format'],
     [3, 'formula'],
+    [4, 1, 1, 'clear'],
+    [4, 3, 1, 'clear'],
     [3, 'format'],
-    [3, 'formula']
+    [3, 'formula'],
+    [2, 1, 1, 'clear'],
+    [2, 3, 1, 'clear']
   ]);
+}
+
+function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier'],
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    year: ['Reference year'],
+    month: ['Reference month'],
+    frequency: ['Frequency'],
+    consumptionCost: ['Total consumption costs'],
+    nonConsumptionCosts: ['Total non-consumption costs'],
+    vat: ['VAT'],
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file', 'Calculated value'],
+    lookup: {
+      'issue date': 1,
+      'source file': 2,
+      'calculated value': 3
+    }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 3) {
+        return { getFormulas: () => [['', '=HYPERLINK("url","text")', '=A3*2']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, validInvoice());
+
+  assert.equal(writes.some((entry) => entry[1] === 3), false);
+  assert.equal(writes.some((entry) => entry[1] === 1), true);
+  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+    true);
+}
+
+function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Total cost', 'Source file'],
+    lookup: { 'total cost': 1, 'source file': 2 }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 2) {
+        return { getFormulas: () => [row === 3 ? ['', ''] : ['=A2*2', '']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, validInvoice());
+
+  assert.equal(writes.some((entry) => entry[1] === 1), false);
+  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+    true);
 }
 
 function testSourceHyperlinkFormulaIsPreserved() {
@@ -1047,6 +1386,473 @@ function testSourceHyperlinkFormulaIsPreserved() {
     { getUrl: () => 'https://drive.test/file-id' },
     extracted
   );
+}
+
+function testExistingInvoicePayloadRestoresAndRepositions() {
+  const context = loadCataloger();
+  const layout = { headers: ['Date', 'Source', 'Total', 'Notes'], lookup: {} };
+  const originalDate = new Date('2026-04-09T00:00:00Z');
+  const writes = [];
+  const moves = [];
+  const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 4 };
+  const sheet = {
+    getRange: (row, column, numRows, numColumns) => {
+      if (numRows && numColumns) {
+        if (row === 9) {
+          return {
+            ...sourceRow,
+            getValues: () => [[originalDate, 'ignored', 14.64, '=untrusted']],
+            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']]
+          };
+        }
+        return { row, column, numRows, numColumns };
+      }
+      return {
+        setFormula: (value) => writes.push(['formula', row, column, value]),
+        setValue: (value) => writes.push(['value', row, column, value]),
+        setRichTextValue: (value) => writes.push(['rich', row, column, value])
+      };
+    },
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const payload = context.captureImportedRowPayload_(sheet, 9, layout);
+  let findCalls = 0;
+  context.findSpreadsheetRowBySourceFile_ = () => {
+    findCalls += 1;
+    return findCalls === 1 ? 9 : 4;
+  };
+  context.restoreImportedRowPayload_(sheet, 9, 4, payload,
+    { getId: () => 'file-id' }, layout);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 4);
+  assert.equal(writes[0][0], 'value');
+  assert.equal(Object.prototype.toString.call(writes[0][3]), '[object Date]');
+  assert.deepEqual(writes[1], ['formula', 4, 2, '=HYPERLINK("url";"invoice")']);
+  assert.deepEqual(writes[2], ['value', 4, 3, 14.64]);
+  assert.equal(writes[3][0], 'rich');
+  assert.equal(writes[3][3].text, '=untrusted');
+
+  context.getInsertionRow_ = () => 12;
+  context.findSpreadsheetRowBySourceFile_ = () => 11;
+  assert.equal(context.repositionImportedRow_(sheet, 9, layout,
+    '2026-05-08', { getId: () => 'file-id' }), 11);
+  assert.equal(moves[1][1], 12);
+}
+
+function testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice() {
+  const context = loadCataloger();
+  const moves = [];
+  const dates = {
+    2: '2026-05-15',
+    3: '2026-03-01',
+    4: '2026-04-01',
+    5: '2026-06-01'
+  };
+  const sheet = {
+    getLastRow: () => 5,
+    getRange: (row, column, numRows, numColumns) => ({
+      row,
+      column,
+      numRows,
+      numColumns,
+      getValue: () => dates[row]
+    }),
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file'],
+    lookup: { 'issue date': 1, 'source file': 2 }
+  };
+  context.getHeaderAliases_ = (key) =>
+    key === 'issueDate' ? ['Issue date'] : [];
+  context.findSpreadsheetRowBySourceFile_ = () => 4;
+
+  assert.equal(context.repositionImportedRow_(sheet, 2, layout,
+    '2026-05-15', { getId: () => 'file-id' }), 4);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 5);
+}
+
+function testCorrectedInvoiceAppendsWithoutBlankRow() {
+  const context = loadCataloger();
+  const moves = [];
+  const dates = {
+    2: '2026-07-01',
+    3: '2026-03-01',
+    4: '2026-04-01',
+    5: '2026-06-01'
+  };
+  const sheet = {
+    getLastRow: () => 5,
+    getRange: (row, column, numRows, numColumns) => ({
+      row,
+      column,
+      numRows,
+      numColumns,
+      getValue: () => dates[row]
+    }),
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file'],
+    lookup: { 'issue date': 1, 'source file': 2 }
+  };
+  context.getHeaderAliases_ = (key) =>
+    key === 'issueDate' ? ['Issue date'] : [];
+  context.findSpreadsheetRowBySourceFile_ = () => 5;
+
+  assert.equal(context.repositionImportedRow_(sheet, 2, layout,
+    '2026-07-01', { getId: () => 'file-id' }), 5);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 6);
+}
+
+function createInsertedInvoiceRollbackFixture(deleteRow) {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const sheet = {
+    getName: () => 'Water',
+    getSheetId: () => 7,
+    deleteRow: deleteRow
+  };
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Issue date'],
+    lookup: {}
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.findSpreadsheetRowBySourceFile_ = () => 0;
+  context.getInsertionRow_ = () => 2;
+  context.insertBlankRowAt_ = () => {};
+  context.copyRowStyleAndFormulas_ = () => {};
+  context.refreshImportedSourceLink_ = () => {};
+  context.writeInvoiceRow_ = () => {};
+  context.verifyImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterInvoiceImport_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  return {
+    context,
+    file,
+    journalKey,
+    sheet,
+    store: propertyStore.store
+  };
+}
+
+function testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {
+    throw new Error('row deletion failed');
+  });
+  fixture.context.copyRowStyleAndFormulas_ = () => {
+    throw new Error('style copy failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /style copy failed.*row deletion failed/
+  );
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-insert-planned');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {
+    throw new Error('row deletion failed');
+  });
+  fixture.context.writeInvoiceRow_ = () => {
+    throw new Error('invoice write failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /invoice write failed.*row deletion failed/
+  );
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-marker-written');
+  assert.equal(journal.sheetRowCreated, true);
+  assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
+  const context = loadCataloger();
+  const deletedRows = [];
+  const sheet = {
+    getName: () => 'Electricity',
+    getSheetId: () => 7,
+    deleteRow: (row) => deletedRows.push(row)
+  };
+  const layout = { headerRow: 1, headers: ['Issue date'], lookup: {} };
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Electricity: 'Electricity' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.getSheetLayout_ = () => layout;
+  context.captureElectricityDashboardLayoutsForRollback_ = () => ({
+    monthlyF1: { sourceRanges: ['F1:Z13'] }
+  });
+  context.findSpreadsheetRowBySourceFile_ = () => 0;
+  context.getInsertionRow_ = () => 2;
+  context.updateMutationJournal_ = () => {};
+  context.insertBlankRowAt_ = () => {};
+  context.copyRowStyleAndFormulas_ = () => {};
+  context.refreshImportedSourceLink_ = () => {};
+  context.writeInvoiceRow_ = () => {};
+  context.verifyImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+  let rollbackRefreshes = 0;
+  context.refreshElectricityDashboardAfterRollback_ = (state) => {
+    assert.equal(state.sheet, sheet);
+    assert.equal(JSON.stringify(state.electricityDashboardLayouts), JSON.stringify({
+      monthlyF1: { sourceRanges: ['F1:Z13'] }
+    }));
+    rollbackRefreshes += 1;
+  };
+  assert.throws(() => context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice()
+  ), /dashboard refresh failed/);
+  assert.deepEqual(deletedRows, [2]);
+  assert.equal(rollbackRefreshes, 1);
+}
+
+function testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails() {
+  const deletedRows = [];
+  const fixture = createInsertedInvoiceRollbackFixture((row) => {
+    deletedRows.push(row);
+  });
+  fixture.context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+  fixture.context.refreshElectricityDashboardAfterRollback_ = () => {
+    throw new Error('dashboard rollback refresh failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /dashboard refresh failed.*dashboard rollback refresh failed/
+  );
+  assert.deepEqual(deletedRows, [2]);
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-row-rolled-back');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, true);
+}
+
+function testDashboardRollbackForcesRegeneration() {
+  const context = loadCataloger();
+  const spreadsheet = {};
+  let regenerated = 0;
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { electricity: 'Electricity' }
+  });
+  context.getElectricitySupplySheetName_ = (config) =>
+    config.sheet_by_supply.electricity;
+  const preservedLayouts = { monthlyF1: { sourceRanges: ['F1:Z13'] } };
+  context.initializeElectricityDashboard_ = (target, config, options) => {
+    assert.equal(target, spreadsheet);
+    assert.equal(config.locale, 'en');
+    assert.equal(options.preservedLayouts, preservedLayouts);
+    regenerated += 1;
+  };
+  context.refreshElectricityDashboardAfterRollback_({
+    sheet: {
+      getName: () => 'Electricity',
+      getParent: () => spreadsheet
+    },
+    extracted: validInvoice(),
+    electricityDashboardLayouts: preservedLayouts
+  });
+  assert.equal(regenerated, 1);
+
+  context.refreshElectricityDashboardAfterRollback_({
+    sheet: {
+      getName: () => 'Water',
+      getParent: () => spreadsheet
+    }
+  });
+  assert.equal(regenerated, 1);
+}
+
+function testRowDeletionIsJournaledBeforeDashboardRollback() {
+  const context = loadCataloger();
+  const journalUpdates = [];
+  const state = {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: {},
+    sheetRow: 4
+  };
+  context.rollbackImportedRow_ = () => {};
+  context.updateMutationJournal_ = (fileId, changes) => {
+    journalUpdates.push([fileId, changes]);
+  };
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+
+  context.rollbackProcessingMutations_({ getId: () => 'file-id' }, {}, 'invoice.pdf',
+    state);
+
+  assert.equal(state.sheetRowCreated, false);
+  assert.equal(state.imported, false);
+  assert.equal(JSON.stringify(journalUpdates), JSON.stringify([['file-id', {
+    stage: 'sheet-row-rolled-back',
+    sheetRowCreated: false,
+    sheetRowDeleted: true
+  }]]));
+  assert.equal(state.rollbackErrors.length, 1);
+}
+
+function testOuterRollbackUsesFullJournalFallbackCheckpoint() {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  const initialJournal = {
+    stage: 'moved',
+    originalName: 'invoice.pdf',
+    sheetName: 'Water',
+    sheetRow: 4,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false
+  };
+  const propertyStore = installScriptPropertyStore(context, {
+    [journalKey]: JSON.stringify(initialJournal)
+  });
+  let deletionAttempts = 0;
+  let primaryCheckpointAttempts = 0;
+  let dashboardRefreshes = 0;
+  context.rollbackImportedRow_ = () => {
+    deletionAttempts += 1;
+  };
+  context.updateMutationJournal_ = () => {
+    primaryCheckpointAttempts += 1;
+    throw new Error('primary checkpoint failed');
+  };
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    dashboardRefreshes += 1;
+  };
+  const state = {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: {},
+    sheetRow: 4
+  };
+
+  context.rollbackProcessingMutations_(file, {}, 'invoice.pdf', state);
+
+  assert.equal(deletionAttempts, 1);
+  assert.equal(primaryCheckpointAttempts, 1);
+  assert.equal(dashboardRefreshes, 1);
+  assert.equal(state.imported, false);
+  assert.equal(state.sheetRowCreated, false);
+  assert.equal(state.sheetLink, '');
+  assert.equal(state.rollbackErrors.length, 0);
+  const journal = JSON.parse(propertyStore.store[journalKey]);
+  assert.equal(journal.stage, 'sheet-row-rolled-back');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, true);
+  assert.equal(journal.originalName, 'invoice.pdf');
+  assert.equal(journal.sheetName, 'Water');
+  assert.equal(journal.sheetRow, 4);
+  assert.equal(typeof journal.updatedAt, 'number');
+}
+
+function testOuterRollbackDoesNotCheckpointMissingRowLocation() {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  const initialJournal = {
+    stage: 'sheet-marker-written',
+    sheetName: 'Water',
+    sheetRow: 4,
+    sheetRowCreated: true
+  };
+  const propertyStore = installScriptPropertyStore(context, {
+    [journalKey]: JSON.stringify(initialJournal)
+  });
+  let checkpointAttempts = 0;
+  context.updateMutationJournal_ = () => {
+    checkpointAttempts += 1;
+  };
+  context.rollbackProcessingMutations_(file, {}, 'invoice.pdf', {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: null,
+    sheetRow: 0
+  });
+
+  assert.equal(checkpointAttempts, 0);
+  const journal = JSON.parse(propertyStore.store[journalKey]);
+  assert.equal(journal.stage, 'sheet-marker-written');
+  assert.equal(journal.sheetRowCreated, true);
+  assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testMutationJournalPayloadUsesSeparateChunks() {
+  const context = loadCataloger();
+  const store = {};
+  const properties = {
+    getProperties: () => ({ ...store }),
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => { store[key] = value; },
+    setProperties: (values) => Object.assign(store, values),
+    deleteProperty: (key) => { delete store[key]; }
+  };
+  const payload = { cells: [{ value: { type: 'value', value: 'x'.repeat(5000) } }] };
+  const count = context.writeMutationJournalPayload_(properties, 'file-id', payload);
+  assert.equal(count > 1, true);
+  const journal = context.hydrateMutationJournalPayload_(properties, 'file-id', {
+    sheetRowPayloadChunks: count
+  });
+  assert.equal(journal.sheetRowPayload.cells[0].value.value.length, 5000);
 }
 
 function testBuildSpreadsheetHyperlinkFormulaEscapesValues() {
@@ -1497,11 +2303,27 @@ testReportFieldsCannotInjectExtraLines();
 testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
+testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
+testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();
+testExistingFormulaCellsAreNotOverwrittenDuringReimport();
+testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
+testExistingInvoicePayloadRestoresAndRepositions();
+testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
+testCorrectedInvoiceAppendsWithoutBlankRow();
+testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
+testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
+testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
+testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails();
+testDashboardRollbackForcesRegeneration();
+testRowDeletionIsJournaledBeforeDashboardRollback();
+testOuterRollbackUsesFullJournalFallbackCheckpoint();
+testOuterRollbackDoesNotCheckpointMissingRowLocation();
+testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();

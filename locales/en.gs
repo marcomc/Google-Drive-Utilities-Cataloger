@@ -20,6 +20,41 @@ function getEnglishLocalization_() {
       'Total cost',
       'Source file'
     ]),
+    electricityBandHeaders: Object.freeze([
+      'Consumption quantity F1',
+      'Unit cost F1',
+      'Consumption quantity F2',
+      'Unit cost F2',
+      'Consumption quantity F3',
+      'Unit cost F3'
+    ]),
+    electricityDashboard: Object.freeze({
+      sheet: 'Electricity Statistics',
+      dataSheet: 'Electricity Statistics - Data',
+      dateHeader: 'Issue date',
+      monthHeader: 'Month',
+      yearHeader: 'Year',
+      months: Object.freeze(['January', 'February', 'March', 'April', 'May',
+        'June', 'July', 'August', 'September', 'October', 'November',
+        'December']),
+      bandHeaders: Object.freeze(['Consumption quantity F1',
+        'Consumption quantity F2', 'Consumption quantity F3']),
+      bandAliases: Object.freeze([
+        Object.freeze(['consumption quantity f1', 'consumption f1 quantity',
+          'quantity consumption f1']),
+        Object.freeze(['consumption quantity f2', 'consumption f2 quantity',
+          'quantity consumption f2']),
+        Object.freeze(['consumption quantity f3', 'consumption f3 quantity',
+          'quantity consumption f3'])
+      ]),
+      charts: Object.freeze({
+        monthlyBands: 'Monthly consumption by band (F1/F2/F3)',
+        monthlyF1: 'Monthly F1 consumption by year',
+        monthlyF2: 'Monthly F2 consumption by year',
+        monthlyF3: 'Monthly F3 consumption by year',
+        annualBands: 'Annual consumption by band'
+      })
+    }),
     documentLabels: Object.freeze({ Invoice: 'Invoice', Contract: 'Contract', Report: 'Report' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',

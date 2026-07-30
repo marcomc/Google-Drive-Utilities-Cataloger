@@ -5,6 +5,10 @@
 - Treat the repository `AGENTS.md` as development guidance for the coding
   agent, and treat the separate `AGENTS.md` in the configured Google Drive
   intake folder as the runtime policy read by the Apps Script and Vertex AI.
+- Whenever `AGENTS.example.md` is created or updated, apply the corresponding
+  reviewed policy change to the live `AGENTS.md` in the Drive folder that
+  contains the user's configured utilities spreadsheet. The folder name is
+  installation-specific and must not be hard-coded as `Forniture`.
 - Never assume that updating this repository file updates the live Drive policy.
   When testing the application or implementing a change reveals a rule that
   should improve runtime classification, extraction, safety, or import
@@ -66,19 +70,50 @@
   changes, and replacement cleanup failure.
 - Write untrusted spreadsheet text as literal rich text. Reject normalized
   duplicate headers and never overwrite formula-backed columns.
+- Treat spreadsheet charts as user-owned presentation state. Never recreate,
+  move, resize, or reset unmanaged charts from code. When automation must
+  regenerate one of its own title-identified charts, first record its position,
+  dimensions, title, source range, and formatting; keep the chart bound to its
+  reserved technical-data block and restore its user-adjusted presentation.
+- Validate every required source header and capacity limit before creating a
+  derived dashboard, helper sheet, chart, or other managed spreadsheet
+  artifact. A missing prerequisite must leave no partial presentation state.
+- Before clearing or reusing a derived technical sheet, reject a source-sheet
+  alias and require a managed ownership marker or an exact legacy contract;
+  never infer ownership from the displayed name alone. Derived charts must keep
+  user-adjusted source ranges within their managed data block, and imported
+  data that expands a derived dimension (such as a new year) must refresh the
+  affected formulas and chart series.
 - When inserting template rows, copy formulas with range-level formula paste so
   relative references adjust; do not replay source formula strings verbatim.
 - Journal cross-service mutations before changing Sheets or Drive. Persist the
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
+- Treat every Sheets/Drive mutation as a state-machine boundary: persist a
+  completed row insert, replacement, move, rename, or deletion before the next
+  fallible refresh or external mutation. Fallback journal writes must repeat
+  the completed-state fields, and recovery must resume from that checkpoint
+  without requiring the old resource to still exist. Separate the mutation,
+  checkpoint, and downstream refresh error phases; never mark a mutation
+  complete from a catch block that also handles the mutation itself.
+- When rebuilding managed charts, preserve public state beyond the chart
+  options map, including source ranges, geometry, chart type, range merge
+  strategy, header count, hidden-dimension strategy, null interpolation, and
+  row/column transposition. Cover refresh, rollback, and journal-recovery paths
+  with customized-chart regressions.
 - Keep installer-owned `clasp` authorization isolated from the global profile.
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
   command name.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
-- Persist the identity of a newly created remote resource before subsequent
-  validation so a transient inspection failure cannot duplicate it on resume.
+- Journal planned ownership before creating a remote resource, then persist its
+  exact created identity before metadata, validation, or another fallible step
+  so an interruption cannot strand or duplicate it. On resume, adopt a
+  planned-only resource only through an exact pristine staging contract, and
+  fail closed for stale, malformed, mismatched, or user-owned candidates.
+  Apply the same contract to temporary and backup resources; a generated
+  unique name is not an ownership marker.
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.

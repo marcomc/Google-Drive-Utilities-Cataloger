@@ -74,6 +74,22 @@ function testCommittedJsonAndRuntimeConfig() {
     path.join(projectRoot, 'Installer.gs'),
     'utf8'
   );
+  const dashboardSource = fs.readFileSync(
+    path.join(projectRoot, 'ElectricityDashboard.gs'),
+    'utf8'
+  );
+  const utilitiesSource = fs.readFileSync(
+    path.join(projectRoot, 'UtilitiesCataloging.gs'),
+    'utf8'
+  );
+  const englishLocale = fs.readFileSync(
+    path.join(projectRoot, 'locales', 'en.gs'),
+    'utf8'
+  );
+  const italianLocale = fs.readFileSync(
+    path.join(projectRoot, 'locales', 'it.gs'),
+    'utf8'
+  );
   const installerShell = fs.readFileSync(
     path.join(projectRoot, 'scripts/install.sh'),
     'utf8'
@@ -84,6 +100,17 @@ function testCommittedJsonAndRuntimeConfig() {
   );
   assert.equal(manifest.runtimeVersion, 'V8');
   assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
+  assert.match(installerSource, /initializeElectricityDashboard_\(spreadsheet, automationConfig\)/);
+  assert.match(utilitiesSource,
+    /refreshElectricityDashboardAfterInvoiceImport_\(spreadsheet, automationConfig,/);
+  assert.match(dashboardSource,
+    /captureElectricityChartLayouts_\(dashboard, technical, labels\)/);
+  assert.match(dashboardSource, /getElectricityDashboardLabels_\(locale\)/);
+  assert.match(dashboardSource, /getLocalizationRegistry_\(\)\[locale\]/);
+  assert.match(dashboardSource, /ELECTRICITY_DASHBOARD_SOURCE_ROWS_ = 10000/);
+  assert.doesNotMatch(dashboardSource, /\$1002(?:[^0-9]|$)/);
+  assert.match(englishLocale, /Electricity Statistics/);
+  assert.match(italianLocale, /Statistiche Luce/);
   assert.doesNotMatch(installerSource, /getAllSheetHeaders_/);
   assert.match(installerShell, /\.ackDeadlineSeconds == 300/);
   assert.doesNotMatch(installerShell, /\.ackDeadlineSeconds == 60/);

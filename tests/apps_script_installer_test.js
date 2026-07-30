@@ -72,6 +72,62 @@ function testSecretManagerBootstrapHandoff() {
   );
 }
 
+function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  const operations = [];
+  const properties = {
+    getProperty: () => '',
+    setProperties: () => {},
+    deleteProperty: () => {}
+  };
+  const spreadsheet = {
+    getId: () => 'spreadsheet-id',
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  };
+  context.CONFIG = { PROPERTY_KEYS: {
+    ROOT_FOLDER_ID: 'ROOT_FOLDER_ID',
+    SPREADSHEET_ID: 'SPREADSHEET_ID',
+    GEMINI_API_KEY: 'GEMINI_API_KEY',
+    GEMINI_VERTEX_FALLBACK_UNTIL: 'GEMINI_VERTEX_FALLBACK_UNTIL'
+  } };
+  context.PropertiesService = { getScriptProperties: () => properties };
+  context.DriveApp = { getFolderById: () => ({ getUrl: () => 'https://drive.test' }) };
+  context.readInstallerBootstrapOptions_ = () => ({});
+  context.validateInstallerOptions_ = () => ({
+    rootFolderId: 'root-folder-id', spreadsheetId: '', spreadsheetTitle: 'Utilities',
+    automationConfig: {}, timeZone: 'Etc/UTC', agentsPolicy: 'policy',
+    geminiBackend: 'gemini_api', geminiModel: 'gemini', autoVertexFallback: false,
+    vertexLocation: 'global', notificationRecipient: 'owner@example.com',
+    projectId: 'project-id', geminiApiKey: ''
+  });
+  context.validateInstallerGeminiAccess_ = () => {};
+  context.ensureInstallerPolicyFile_ = () => ({ getUrl: () => 'https://drive.test/policy' });
+  context.ensureInstallerSpreadsheet_ = () => {
+    operations.push('spreadsheet');
+    return spreadsheet;
+  };
+  context.ensureInstallerDestinationFolders_ = () => {};
+  context.assertCatalogConfiguration_ = () => {};
+  context.provisionDriveEventTransportUnlocked_ = () => ({ pubSubConfigured: false });
+  context.installAutomationTriggersUnlocked_ = () => ({
+    geminiBackend: 'gemini_api', geminiAutoVertexFallbackEnabled: false
+  });
+  context.withCatalogLifecycleLock_ = (operation, callback) => {
+    operations.push(operation);
+    return callback();
+  };
+
+  context.bootstrapCatalogerInstallation({});
+
+  assert.deepEqual(operations, [
+    'installation-spreadsheet-initialization',
+    'spreadsheet',
+    'installation-bootstrap'
+  ]);
+}
+
 function testSecretManagerScopeIsRestricted() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -172,23 +228,27 @@ function testSpreadsheetValidationUsesDetectedHeaderRow() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
   });
-  context.getSheetLayout_ = () => ({
-    headerRow: 2,
-    headers: [
-      'Data di emissione',
-      'Fornitore',
-      'Numero fattura',
-      'File sorgente'
-    ]
-  });
-  context.getInstallerLocalization_ = () => ({
+  const localization = {
     headerAliases: {
       issueDate: ['data di emissione'],
       supplier: ['fornitore'],
       identifier: ['numero fattura'],
       sourceFile: ['file sorgente']
     }
-  });
+  };
+  context.getSheetLayout_ = (_sheet, headerAliases) => {
+    assert.equal(headerAliases, localization.headerAliases);
+    return {
+      headerRow: 2,
+      headers: [
+        'Data di emissione',
+        'Fornitore',
+        'Numero fattura',
+        'File sorgente'
+      ]
+    };
+  };
+  context.getInstallerLocalization_ = () => localization;
   context.normalizeHeader_ = (value) => String(value).trim().toLowerCase();
   const sheet = {
     getName: () => 'Acqua',
@@ -550,6 +610,7 @@ function testTimeZoneTransactionLifecycle() {
 }
 
 testSecretManagerBootstrapHandoff();
+testBootstrapInitializesSpreadsheetUnderLifecycleLock();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();

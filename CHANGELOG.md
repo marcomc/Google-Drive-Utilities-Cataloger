@@ -5,6 +5,92 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
+
+### Added
+
+- Electricity-consumption dashboards with monthly F1/F2/F3 comparisons by
+  year, annual band totals, localized English and Italian labels, and preserved
+  user-adjusted managed-chart geometry.
+- F1, F2, and F3 consumption and unit-cost columns for electricity sheets.
+
+### Changed
+
+- Preserve the complete F1/F2/F3 consumption detail reported on electricity
+  invoices, including monoraria contracts with the same unit price in each
+  band.
+- Identify customer and contract values from their localized invoice labels
+  instead of relying on the spreadsheet locale or English field names.
+
+### Fixed
+
+- Keep Energygas `CL...` customer codes out of contract-number fields.
+- Validate dashboard source headers and supported capacity before creating
+  derived sheets or charts, avoiding partial presentation state.
+- Protect technical-sheet ownership, retain managed-chart source ranges, and
+  refresh dashboard year series when a newly imported electricity invoice adds
+  a year not already represented in the comparison data.
+- Roll back corrected pre-existing invoice rows, including their formulas,
+  source link, and original position, when a later import mutation fails.
+- Reject dashboard refreshes that exceed source or year capacity, and preserve
+  existing managed charts if replacement chart insertion fails.
+- Roll back a newly inserted invoice row if its dashboard refresh fails, and
+  restore reimported strings as literal text during rollback.
+- Restrict preserved custom chart ranges to each chart's reserved technical
+  data block.
+- Apply and read back the corresponding installation-specific Drive runtime
+  policy, preserving its local routing rules.
+- Force dashboard regeneration after a restored invoice row, preserve advanced
+  managed-chart formatting, and expand a custom chart range only on a new-year
+  refresh.
+- Rebuild electricity statistics after replacement imports and journal recovery,
+  normalize reported F1/F2/F3 quantities to numeric kWh values, retain the
+  correct Energygas customer code, and skip dashboard work for other supplies.
+- Reject ambiguous single-separator F1/F2/F3 quantities and rebuild the
+  dashboard after rolling back a failed newly inserted electricity invoice.
+- Normalize unambiguous repeated-separator F1/F2/F3 quantities without
+  rejecting large electricity consumption values.
+- Reject electricity imports when an installed dashboard's required source
+  headers are missing or have been renamed.
+- Reject imports when a visible electricity dashboard survives without its
+  managed technical sheet, instead of leaving broken charts stale.
+- Reject dashboard pairs with an unmanaged technical sheet and preserve
+  separately selected category and series chart ranges as years expand.
+- Reject installer reruns against a damaged existing dashboard source and
+  refresh electricity statistics after journal recovery deletes an inserted row.
+- Preserve existing technical dashboard data across refresh failures and extend
+  a user-shortened all-bands range as electricity invoice rows are added.
+- Allocate the complete temporary technical-data backup and retain managed
+  chart font-size customization during refresh.
+- Prevent dashboard aliases to every configured supply tab and clean up a
+  temporary technical backup if snapshot creation fails.
+- Expand accepted legacy technical grids before snapshotting them for refresh.
+- Restore each managed chart's pre-import data range when a later invoice
+  mutation rolls back, so a failed import cannot widen a user-shortened view.
+- Continue cleaning up a newly created dashboard when deletion of its technical
+  sheet fails, and report every incomplete cleanup with the original failure.
+- Recognize every Energygas `CL`-prefixed identifier as a customer code,
+  including values with separators after the prefix.
+- Reserve temporary backup capacity before expanding an existing technical
+  dashboard sheet, leaving no grid or ownership mutation when preflight fails.
+- Protect template-derived calculated columns even if a particular imported row
+  is missing its formula, and aggregate electricity by the same issue-date year
+  fallback used for dashboard year discovery.
+- Apply the same numeric-or-issue-date fallback to monthly aggregation, retain
+  pre-import chart ranges in mutation journals for crash recovery, and reject
+  technical dashboard tabs that alias any configured supply source.
+- Reconcile orphaned temporary technical-data snapshots before dashboard
+  preflight, and reject out-of-range numeric year or month metadata before
+  falling back to the issue date.
+- Require a dedicated ownership marker before deleting an interrupted
+  technical-data snapshot, protecting similarly named user sheets.
+- Run installer spreadsheet and dashboard initialization under the shared
+  catalog lifecycle lock to avoid races with active processing runs.
+- Record successful source-row rollback before refreshing the dashboard, so
+  journal recovery retries only the pending dashboard rebuild after a failure.
+- Record every successful compensating row deletion before a dashboard refresh,
+  and preserve the managed chart option for plotting null values.
+
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
 ### Changed

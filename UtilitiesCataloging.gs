@@ -169,6 +169,9 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     moved: false,
     imported: false,
     sheetRowCreated: false,
+    sheetRowPreexisting: false,
+    sheetRowPayload: null,
+    sheetOriginalRow: 0,
     sheetLink: '',
     mutationJournalStarted: false,
     createdFolderPath: ''
@@ -249,8 +252,14 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       state.sheetLink = sheetImport.link;
       state.imported = true;
       state.sheetRowCreated = sheetImport.created;
+      state.sheetRowPreexisting = !sheetImport.created;
+      state.sheetRowPayload = sheetImport.previousRowPayload || null;
+      state.sheetOriginalRow = sheetImport.originalRow || sheetImport.row;
+      state.extracted = extracted;
       state.sheet = sheetImport.sheet;
       state.sheetRow = sheetImport.row;
+      state.electricityDashboardLayouts =
+        sheetImport.electricityDashboardLayouts || null;
     }
 
     updateMutationJournal_(file.getId(), { stage: 'renaming' });
@@ -321,14 +330,64 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
   }
   if (state.sheetRowCreated) {
     try {
-      rollbackImportedRow_(state.sheet, state.sheetRow, file);
+      deleteSheetRowAndCheckpoint_(file, function () {
+        rollbackImportedRow_(state.sheet, state.sheetRow, file);
+      });
       state.imported = false;
       state.sheetRowCreated = false;
       state.sheetLink = '';
+      refreshElectricityDashboardAfterRollback_(state);
+    } catch (error) {
+      state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
+    }
+  } else if (state.sheetRowPreexisting && state.sheetRowPayload) {
+    try {
+      restoreImportedRowPayload_(state.sheet, state.sheetRow,
+        state.sheetOriginalRow, state.sheetRowPayload, file);
+      state.imported = false;
+      state.sheetLink = '';
+      refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
     }
   }
+}
+
+function refreshElectricityDashboardAfterRollback_(state) {
+  if (!state.sheet) {
+    return;
+  }
+  const automationConfig = getAutomationConfig_();
+  if (state.sheet.getName() !==
+    getElectricitySupplySheetName_(automationConfig)) {
+    return;
+  }
+  initializeElectricityDashboard_(state.sheet.getParent(), automationConfig, {
+    preservedLayouts: state.electricityDashboardLayouts || null
+  });
+}
+
+function captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig) {
+  if (sheet.getName() !== getElectricitySupplySheetName_(automationConfig)) {
+    return null;
+  }
+  const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+  const spreadsheet = sheet.getParent();
+  const dashboard = spreadsheet.getSheetByName(labels.sheet);
+  const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (!dashboard || !technical) {
+    return null;
+  }
+  return captureElectricityChartLayouts_(dashboard, technical, labels);
+}
+
+function getElectricityDashboardRollbackLayouts_(layouts) {
+  return Object.keys(layouts || {}).reduce(function (rollbackLayouts, key) {
+    if (layouts[key].sourceRanges && layouts[key].sourceRanges.length) {
+      rollbackLayouts[key] = { sourceRanges: layouts[key].sourceRanges };
+    }
+    return rollbackLayouts;
+  }, {});
 }
 
 function listDirectIntakePdfs_(rootFolder) {
@@ -802,7 +861,8 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
-    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. For HERA, "Codice contratto" is contract_number and "Codice cliente" is customer_code.',
+    'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
       String(automationConfig.address_missing_type || 'unknown') + '.',
@@ -899,6 +959,16 @@ function normalizeExtraction_(extracted) {
   normalized.identifier = String(normalized.identifier || '').trim();
   normalized.contract_number = String(normalized.contract_number || '').trim();
   normalized.customer_code = String(normalized.customer_code || '').trim();
+  if (/^ENERGYGAS(?: ITALIA)?$/i.test(normalized.supplier || '') &&
+    /^CL/i.test(normalized.contract_number)) {
+    // Energygas uses CL... values for the customer code. Do not let a model
+    // label guess populate the contract column. Retain an independently
+    // extracted customer code, or use the CL value only when it is absent.
+    if (!normalized.customer_code) {
+      normalized.customer_code = normalized.contract_number;
+    }
+    normalized.contract_number = '';
+  }
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
   normalized.reference_month = normalized.reference_month ? String(normalized.reference_month).padStart(2, '0') : null;
   normalized.period_start = normalizeIsoDate_(normalized.period_start);
@@ -910,8 +980,90 @@ function normalizeExtraction_(extracted) {
   normalized.total = normalizeMoney_(normalized.total);
   applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ? normalized.problems : [];
-  normalized.sheet_values = Array.isArray(normalized.sheet_values) ? normalized.sheet_values : [];
+  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
+}
+
+function normalizeSheetValues_(sheetValues) {
+  if (!Array.isArray(sheetValues)) {
+    return [];
+  }
+  return sheetValues.map(function (entry) {
+    if (!entry || typeof entry !== 'object') {
+      return entry;
+    }
+    const normalized = Object.assign({}, entry);
+    if (typeof normalized.header === 'string') {
+      normalized.header = normalized.header.trim();
+    }
+    // Sheets trims leading and trailing text input. Normalize the model output
+    // before both writing and verification so a harmless whitespace variant
+    // cannot turn a successfully rolled-back import into an ERROR.
+    if (typeof normalized.value === 'string') {
+      normalized.value = normalized.value.trim();
+    }
+    if (isElectricityBandConsumptionHeader_(normalized.header) &&
+      normalized.value !== null && normalized.value !== undefined) {
+      const quantity = normalizeElectricityBandConsumption_(normalized.value);
+      if (quantity === null) {
+        throw new Error('Gemini extraction has a nonnumeric electricity band consumption value.');
+      }
+      normalized.value = quantity;
+    }
+    return normalized;
+  });
+}
+
+function isElectricityBandConsumptionHeader_(header) {
+  const normalizedHeader = normalizeHeader_(header);
+  const registry = typeof getLocalizationRegistry_ === 'function' ?
+    getLocalizationRegistry_() : {};
+  const isLocalizedAlias = Object.keys(registry).some(function (locale) {
+    const dashboard = registry[locale].electricityDashboard;
+    return dashboard && dashboard.bandAliases.some(function (aliases) {
+      return aliases.map(normalizeHeader_).indexOf(normalizedHeader) >= 0;
+    });
+  });
+  return isLocalizedAlias || [
+    'consumption quantity f1', 'consumption quantity f2',
+    'consumption quantity f3', 'consumption f1 quantity',
+    'consumption f2 quantity', 'consumption f3 quantity',
+    'quantity consumption f1', 'quantity consumption f2',
+    'quantity consumption f3', 'quantita consumi f1',
+    'quantita consumi f2', 'quantita consumi f3'
+  ].indexOf(normalizedHeader) >= 0;
+}
+
+function normalizeElectricityBandConsumption_(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  let text = value.trim().replace(/\s+/g, '');
+  text = text.replace(/kwh$/i, '');
+  if (!/^[+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?$/.test(text)) {
+    return null;
+  }
+  // With only one separator, a three-digit suffix can be either a grouping
+  // separator or a decimal fraction. Reject it rather than silently changing
+  // an invoice quantity such as 1,234 kWh into 1.234 kWh.
+  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text)) {
+    return null;
+  }
+  if (/^[+]?\d{1,3}(?:[.,]\d{3})+$/.test(text)) {
+    text = text.replace(/[.,]/g, '');
+  } else if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
+    const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
+      ',' : '.';
+    const groupingSeparator = decimalSeparator === ',' ? /\./g : /,/g;
+    text = text.replace(groupingSeparator, '').replace(decimalSeparator, '.');
+  } else if (text.indexOf(',') >= 0) {
+    text = text.replace(',', '.');
+  }
+  const quantity = Number(text);
+  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
 }
 
 function validateExtraction_(extracted) {
@@ -1274,22 +1426,66 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   if (!sheet) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
+  const electricityDashboardLayouts =
+    captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
+  updateMutationJournal_(file.getId(), {
+    electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
+      electricityDashboardLayouts
+    )
+  });
   const layout = getSheetLayout_(sheet);
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
+    const previousRowPayload = captureImportedRowPayload_(sheet, existingRow,
+      layout);
     updateMutationJournal_(file.getId(), {
       stage: 'sheet-existing',
       sheetName: sheetName,
       sheetRow: existingRow,
       sheetRowCreated: false,
-      sheetRowPreexisting: true
+      sheetRowPreexisting: true,
+      sheetOriginalRow: existingRow,
+      sheetRowPayload: previousRowPayload
     });
-    verifyImportedRow_(sheet, existingRow, layout, file, extracted);
+    let correctedRow = existingRow;
+    try {
+      // Re-extraction is a replacement of the complete literal payload. This
+      // prevents stale optional values from surviving when a newer extraction
+      // omits or corrects them; formula-backed columns remain untouched.
+      clearImportedLiteralCells_(sheet, existingRow, layout);
+      writeInvoiceRow_(sheet, existingRow, layout, file, extracted);
+      verifyImportedRow_(sheet, existingRow, layout, file, extracted);
+      correctedRow = repositionImportedRow_(sheet, existingRow, layout,
+        extracted.issue_date, file);
+      updateMutationJournal_(file.getId(), {
+        stage: 'sheet-existing-written',
+        sheetRow: correctedRow
+      });
+      refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+        sheet, extracted);
+    } catch (error) {
+      try {
+        restoreImportedRowPayload_(sheet, correctedRow, existingRow,
+          previousRowPayload, file, layout);
+        refreshElectricityDashboardAfterRollback_({
+          sheet: sheet,
+          electricityDashboardLayouts: electricityDashboardLayouts
+        });
+      } catch (rollbackError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Spreadsheet rollback also failed: ' +
+          describeError_(rollbackError);
+      }
+      throw error;
+    }
     return {
-      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + existingRow,
+      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + correctedRow,
       sheet: sheet,
-      row: existingRow,
-      created: false
+      row: correctedRow,
+      created: false,
+      originalRow: existingRow,
+      previousRowPayload: previousRowPayload,
+      electricityDashboardLayouts: electricityDashboardLayouts
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
@@ -1311,14 +1507,31 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
     verifyImportedRow_(sheet, targetRow, layout, file, extracted);
     updateMutationJournal_(file.getId(), { stage: 'sheet-written' });
+    refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+      sheet, extracted);
   } catch (error) {
+    let deletionCompleted = false;
     try {
-      sheet.deleteRow(targetRow);
+      deleteSheetRowAndCheckpoint_(file, function () {
+        sheet.deleteRow(targetRow);
+      });
+      deletionCompleted = true;
     } catch (rollbackError) {
-      updateMutationJournal_(file.getId(), { stage: 'sheet-rollback-failed' });
       error.mutationRollbackIncomplete = true;
       error.message += ' Spreadsheet rollback also failed: ' +
         describeError_(rollbackError);
+    }
+    if (deletionCompleted) {
+      try {
+        refreshElectricityDashboardAfterRollback_({
+          sheet: sheet,
+          electricityDashboardLayouts: electricityDashboardLayouts
+        });
+      } catch (dashboardError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Spreadsheet dashboard rollback also failed: ' +
+          describeError_(dashboardError);
+      }
     }
     throw error;
   }
@@ -1326,8 +1539,109 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
     sheet: sheet,
     row: targetRow,
-    created: true
+    created: true,
+    electricityDashboardLayouts: electricityDashboardLayouts
   };
+}
+
+function clearImportedLiteralCells_(sheet, row, layout) {
+  const formulaColumns = getFormulaBackedColumns_(sheet, row, layout);
+  layout.headers.forEach(function (header, index) {
+    if (header && !formulaColumns[index]) {
+      sheet.getRange(row, index + 1).clearContent();
+    }
+  });
+}
+
+function getFormulaBackedColumns_(sheet, row, layout) {
+  const firstDataRow = layout.headerRow + 1;
+  const lastRow = Math.max(firstDataRow, sheet.getLastRow());
+  const rows = [row, firstDataRow, row - 1, row + 1].filter(function (candidate,
+    index, all) {
+    return candidate >= firstDataRow && candidate <= lastRow &&
+      all.indexOf(candidate) === index;
+  });
+  const formulaColumns = layout.headers.map(function () { return false; });
+  rows.forEach(function (candidate) {
+    sheet.getRange(candidate, 1, 1, layout.headers.length).getFormulas()[0]
+      .forEach(function (formula, index) {
+        formulaColumns[index] = formulaColumns[index] || Boolean(formula);
+      });
+  });
+  return formulaColumns;
+}
+
+function captureImportedRowPayload_(sheet, row, layout) {
+  const range = sheet.getRange(row, 1, 1, layout.headers.length);
+  const values = range.getValues()[0];
+  const formulas = range.getFormulas()[0];
+  return {
+    cells: values.map(function (value, index) {
+      return {
+        formula: formulas[index] || '',
+        value: serializeImportedCellValue_(value)
+      };
+    })
+  };
+}
+
+function serializeImportedCellValue_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return { type: 'date', value: value.getTime() };
+  }
+  return { type: 'value', value: value };
+}
+
+function deserializeImportedCellValue_(value) {
+  if (value && value.type === 'date') {
+    return new Date(value.value);
+  }
+  return value ? value.value : '';
+}
+
+function restoreImportedRowPayload_(sheet, row, originalRow, payload, file,
+  suppliedLayout) {
+  const layout = suppliedLayout || getSheetLayout_(sheet);
+  let restoredRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) || row;
+  if (originalRow && restoredRow !== originalRow) {
+    moveImportedRowToIndex_(sheet, restoredRow, originalRow,
+      layout.headers.length);
+    restoredRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) ||
+      originalRow;
+  }
+  if (!payload || !Array.isArray(payload.cells) ||
+    payload.cells.length !== layout.headers.length) {
+    throw new Error('The previous spreadsheet row payload is invalid.');
+  }
+  payload.cells.forEach(function (cell, index) {
+    const range = sheet.getRange(restoredRow, index + 1);
+    if (cell.formula) {
+      range.setFormula(cell.formula);
+    } else {
+      const value = deserializeImportedCellValue_(cell.value);
+      if (typeof value === 'string') {
+        setLiteralSheetValue_(range, value);
+      } else {
+        range.setValue(value);
+      }
+    }
+  });
+  return restoredRow;
+}
+
+function repositionImportedRow_(sheet, row, layout, issueDate, file) {
+  const insertionRow = getInsertionRow_(sheet, layout, issueDate);
+  const targetRow = insertionRow > row ? insertionRow - 1 : insertionRow;
+  if (targetRow === row) {
+    return row;
+  }
+  moveImportedRowToIndex_(sheet, row, targetRow, layout.headers.length);
+  return findSpreadsheetRowBySourceFile_(sheet, layout, file.getId()) || row;
+}
+
+function moveImportedRowToIndex_(sheet, row, targetRow, columnCount) {
+  const destination = targetRow > row ? targetRow + 1 : targetRow;
+  sheet.moveRows(sheet.getRange(row, 1, 1, columnCount), destination);
 }
 
 function refreshImportedSourceLink_(sheet, row, file) {
@@ -1363,7 +1677,7 @@ function findSpreadsheetRowBySourceFile_(sheet, layout, fileId) {
 
 function rollbackImportedRow_(sheet, row, file) {
   if (!sheet || !row) {
-    return;
+    throw new Error('Cannot delete the imported spreadsheet row without its location.');
   }
   const layout = getSheetLayout_(sheet);
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
@@ -1375,6 +1689,41 @@ function rollbackImportedRow_(sheet, row, file) {
   sheet.deleteRow(row);
 }
 
+function deleteSheetRowAndCheckpoint_(file, deleteRow) {
+  const fileId = file.getId();
+  const properties = PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
+  const raw = properties.getProperty(key);
+  let journal = {};
+  if (raw) {
+    try {
+      journal = JSON.parse(raw);
+    } catch (error) {
+      throw new Error('Mutation journal is malformed for file ID ' + fileId + '.');
+    }
+  }
+  deleteRow();
+  const deletionCheckpoint = {
+    stage: 'sheet-row-rolled-back',
+    sheetRowCreated: false,
+    sheetRowDeleted: true
+  };
+  try {
+    updateMutationJournal_(fileId, deletionCheckpoint);
+  } catch (primaryError) {
+    try {
+      saveMutationJournal_(fileId, Object.assign({}, journal,
+        deletionCheckpoint, { updatedAt: Date.now() }));
+    } catch (fallbackError) {
+      throw new Error(
+        'The spreadsheet row was deleted, but its mutation journal checkpoint ' +
+        'failed: ' + describeError_(primaryError) +
+        ' Fallback checkpoint also failed: ' + describeError_(fallbackError)
+      );
+    }
+  }
+}
+
 function insertBlankRowAt_(sheet, targetRow) {
   if (targetRow > sheet.getMaxRows()) {
     sheet.insertRowsAfter(sheet.getMaxRows(), 1);
@@ -1383,7 +1732,11 @@ function insertBlankRowAt_(sheet, targetRow) {
   sheet.insertRowBefore(targetRow);
 }
 
-function getSheetLayout_(sheet) {
+function getSheetLayout_(sheet, headerAliases) {
+  const issueDateAliases = headerAliases ?
+    headerAliases.issueDate || [] : getHeaderAliases_('issueDate');
+  const supplierAliases = headerAliases ?
+    headerAliases.supplier || [] : getHeaderAliases_('supplier');
   const width = sheet.getLastColumn();
   const rowsToInspect = Math.min(10, Math.max(1, sheet.getLastRow()));
   const rows = sheet.getRange(1, 1, rowsToInspect, width).getDisplayValues();
@@ -1401,8 +1754,8 @@ function getSheetLayout_(sheet) {
         }
       }
     });
-    if (findHeaderIndex_(lookup, getHeaderAliases_('issueDate')) &&
-      findHeaderIndex_(lookup, getHeaderAliases_('supplier'))) {
+    if (findHeaderIndex_(lookup, issueDateAliases) &&
+      findHeaderIndex_(lookup, supplierAliases)) {
       const duplicates = Object.keys(duplicateHeaders);
       if (duplicates.length > 0) {
         throw new Error(
@@ -1463,9 +1816,31 @@ function copyRowStyleAndFormulas_(sheet, targetRow, layout) {
   }
   const source = sheet.getRange(sourceRow, 1, 1, layout.headers.length);
   const target = sheet.getRange(targetRow, 1, 1, layout.headers.length);
+  const sourceFormulas = source.getFormulas()[0];
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
   // Copying formulas as a range preserves relative references for the new row.
   source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+  clearCopiedLiteralCells_(sheet, targetRow, sourceFormulas);
+}
+
+function clearCopiedLiteralCells_(sheet, row, formulas) {
+  let startColumn = 0;
+  const clear = function (endColumn) {
+    if (!startColumn) {
+      return;
+    }
+    sheet.getRange(row, startColumn, 1, endColumn - startColumn + 1)
+      .clearContent();
+    startColumn = 0;
+  };
+  formulas.forEach(function (formula, index) {
+    if (formula) {
+      clear(index);
+    } else if (!startColumn) {
+      startColumn = index + 1;
+    }
+  });
+  clear(formulas.length);
 }
 
 function writeInvoiceRow_(sheet, row, layout, file, extracted) {
@@ -1484,12 +1859,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('total'), extracted.total);
 
   const allowedHeaders = Object.create(null);
-  const firstDataRow = layout.headerRow + 1;
-  const referenceRow = row > firstDataRow ? row - 1 :
-    (row + 1 <= sheet.getLastRow() ? row + 1 : 0);
-  const formulaColumns = referenceRow ?
-    sheet.getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0] :
-    layout.headers.map(function () { return ''; });
+  const formulaColumns = getFormulaBackedColumns_(sheet, row, layout);
   layout.headers.forEach(function (header) {
     allowedHeaders[normalizeHeader_(header)] = header;
   });
@@ -1912,10 +2282,7 @@ function attachMutationJournal_(result, fileId) {
 }
 
 function saveMutationJournal_(fileId, journal) {
-  PropertiesService.getScriptProperties().setProperty(
-    CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId,
-    JSON.stringify(journal)
-  );
+  writeMutationJournal_(PropertiesService.getScriptProperties(), fileId, journal);
 }
 
 function updateMutationJournal_(fileId, changes) {
@@ -1934,7 +2301,53 @@ function updateMutationJournal_(fileId, changes) {
     journal[property] = changes[property];
   });
   journal.updatedAt = Date.now();
-  properties.setProperty(key, JSON.stringify(journal));
+  writeMutationJournal_(properties, fileId, journal);
+}
+
+function writeMutationJournal_(properties, fileId, journal) {
+  const stored = Object.assign({}, journal);
+  if (stored.sheetRowPayload) {
+    stored.sheetRowPayloadChunks = writeMutationJournalPayload_(properties,
+      fileId, stored.sheetRowPayload);
+    delete stored.sheetRowPayload;
+  }
+  properties.setProperty(CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId,
+    JSON.stringify(stored));
+}
+
+function writeMutationJournalPayload_(properties, fileId, payload) {
+  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  Object.keys(properties.getProperties()).forEach(function (key) {
+    if (key.indexOf(prefix) === 0) {
+      properties.deleteProperty(key);
+    }
+  });
+  const raw = JSON.stringify(payload);
+  const size = CONFIG.MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS;
+  const values = {};
+  let count = 0;
+  for (let offset = 0; offset < raw.length; offset += size) {
+    values[prefix + count] = raw.slice(offset, offset + size);
+    count += 1;
+  }
+  properties.setProperties(values, false);
+  return count;
+}
+
+function hydrateMutationJournalPayload_(properties, fileId, journal) {
+  if (!journal.sheetRowPayloadChunks) {
+    return journal;
+  }
+  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  const raw = Array.from({ length: journal.sheetRowPayloadChunks }, function (_, index) {
+    const chunk = properties.getProperty(prefix + index);
+    if (chunk === null || chunk === '') {
+      throw new Error('Mutation journal payload is incomplete for file ID ' + fileId + '.');
+    }
+    return chunk;
+  }).join('');
+  journal.sheetRowPayload = JSON.parse(raw);
+  return journal;
 }
 
 function clearMutationJournal_(fileId) {
@@ -1945,6 +2358,12 @@ function clearMutationJournal_(fileId) {
   properties.deleteProperty(
     CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId
   );
+  const payloadPrefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  Object.keys(properties.getProperties()).forEach(function (key) {
+    if (key.indexOf(payloadPrefix) === 0) {
+      properties.deleteProperty(key);
+    }
+  });
 }
 
 function hasMutationJournal_(fileId) {
@@ -1991,6 +2410,7 @@ function recoverMutationJournalForFile_(
   }
   try {
     journal = JSON.parse(raw);
+    hydrateMutationJournalPayload_(properties, fileId, journal);
     if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
       throw new Error('The mutation journal is not a JSON object.');
     }
@@ -2114,16 +2534,39 @@ function rollbackJournalSheetRow_(journal, file) {
     if (matches.length === 0) {
       throw new Error('The pre-existing spreadsheet source row is missing.');
     }
-    refreshImportedSourceLink_(sheet, matches[0], file);
+    if (journal.sheetRowPayload) {
+      restoreImportedRowPayload_(sheet, matches[0], journal.sheetOriginalRow ||
+        journal.sheetRow, journal.sheetRowPayload, file, layout);
+      refreshElectricityDashboardAfterRollback_({
+        sheet: sheet,
+        electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+      });
+    } else {
+      // Journals written before row-payload snapshots remain recoverable.
+      refreshImportedSourceLink_(sheet, matches[0], file);
+    }
     return { unmarkedRowMayRemain: false };
   }
   if (matches.length === 0) {
+    if (journal.sheetRowDeleted) {
+      refreshElectricityDashboardAfterRollback_({
+        sheet: sheet,
+        electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+      });
+      return { unmarkedRowMayRemain: false };
+    }
     if (journal.sheetRowCreated) {
       throw new Error('The journaled spreadsheet source marker is missing.');
     }
     return { unmarkedRowMayRemain: true };
   }
-  sheet.deleteRow(matches[0]);
+  deleteSheetRowAndCheckpoint_(file, function () {
+    sheet.deleteRow(matches[0]);
+  });
+  refreshElectricityDashboardAfterRollback_({
+    sheet: sheet,
+    electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+  });
   return { unmarkedRowMayRemain: false };
 }
 
