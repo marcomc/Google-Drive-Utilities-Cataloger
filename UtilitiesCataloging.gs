@@ -2523,11 +2523,25 @@ function rollbackJournalSheetRow_(journal, file) {
     return { unmarkedRowMayRemain: true };
   }
   sheet.deleteRow(matches[0]);
-  updateMutationJournal_(file.getId(), {
+  const deletionCheckpoint = {
     stage: 'sheet-row-rolled-back',
     sheetRowCreated: false,
     sheetRowDeleted: true
-  });
+  };
+  try {
+    updateMutationJournal_(file.getId(), deletionCheckpoint);
+  } catch (primaryError) {
+    try {
+      saveMutationJournal_(file.getId(), Object.assign({}, journal,
+        deletionCheckpoint, { updatedAt: Date.now() }));
+    } catch (fallbackError) {
+      throw new Error(
+        'The spreadsheet row was deleted, but its mutation journal checkpoint ' +
+        'failed: ' + describeError_(primaryError) +
+        ' Fallback checkpoint also failed: ' + describeError_(fallbackError)
+      );
+    }
+  }
   refreshElectricityDashboardAfterRollback_({
     sheet: sheet,
     electricityDashboardLayouts: journal.electricityDashboardLayouts || null

@@ -997,6 +997,89 @@ function testMutationRecoveryStages() {
   assert.deepEqual(legacyExistingRowAfterRename.refreshedRows, [3]);
 }
 
+function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
+  const fileId = 'source-file-id';
+  const initialJournal = {
+    stage: 'sheet-marker-written',
+    sheetName: 'Water',
+    sheetRow: 2,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false
+  };
+  const store = {};
+  let journalWriteAttempts = 0;
+  const context = loadCataloger();
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + fileId;
+  store[journalKey] = JSON.stringify(initialJournal);
+  const properties = {
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => {
+      journalWriteAttempts += 1;
+      if (journalWriteAttempts === 1) {
+        throw new Error('primary journal update failed');
+      }
+      store[key] = value;
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => properties
+  };
+  const file = { getId: () => fileId };
+  let markedRow = 2;
+  const deletedRows = [];
+  let dashboardRefreshes = 0;
+  const sheet = {
+    getLastRow: () => 4,
+    getRange: (row) => ({ row }),
+    deleteRow: (row) => {
+      deletedRows.push(row);
+      markedRow = 0;
+    }
+  };
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Source file'],
+    lookup: { 'source file': 1 }
+  });
+  context.getHeaderAliases_ = () => ['Source file'];
+  context.findHeaderIndex_ = () => 1;
+  context.getFileFromSourceCell_ = (cell) =>
+    cell.row === markedRow ? file : null;
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    dashboardRefreshes += 1;
+  };
+
+  assert.equal(
+    context.rollbackJournalSheetRow_(initialJournal, file).unmarkedRowMayRemain,
+    false
+  );
+  assert.deepEqual(deletedRows, [2]);
+  assert.equal(journalWriteAttempts, 2);
+  const fallbackJournal = JSON.parse(store[journalKey]);
+  assert.equal(fallbackJournal.stage, 'sheet-row-rolled-back');
+  assert.equal(fallbackJournal.sheetRowCreated, false);
+  assert.equal(fallbackJournal.sheetRowDeleted, true);
+  assert.equal(fallbackJournal.sheetName, 'Water');
+  assert.equal(fallbackJournal.sheetRow, 2);
+  assert.equal(typeof fallbackJournal.updatedAt, 'number');
+
+  assert.equal(
+    context.rollbackJournalSheetRow_(fallbackJournal, file).unmarkedRowMayRemain,
+    false
+  );
+  assert.deepEqual(deletedRows, [2]);
+  assert.equal(journalWriteAttempts, 2);
+  assert.equal(dashboardRefreshes, 2);
+}
+
 function testMutationRecoveryReportsUnavailableFileOnce() {
   const context = loadCataloger();
   const journalPrefix = vm.runInContext(
@@ -1965,6 +2048,7 @@ testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testMutationRecoveryStages();
+testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();

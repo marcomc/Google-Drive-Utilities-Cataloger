@@ -105,8 +105,11 @@
   command name.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
-- Persist the identity of a newly created remote resource before subsequent
-  validation so a transient inspection failure cannot duplicate it on resume.
+- Journal planned ownership before creating a remote resource, then persist its
+  exact created identity before metadata, validation, or another fallible step
+  so an interruption cannot strand or duplicate it. On resume, adopt a
+  planned-only resource only through an exact pristine staging contract, and
+  fail closed for stale, malformed, mismatched, or user-owned candidates.
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.

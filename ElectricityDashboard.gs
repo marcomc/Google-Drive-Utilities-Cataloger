@@ -9,6 +9,11 @@ const ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_ = 26;
 const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ =
   'gduc.electricity_dashboard_technical';
 const ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_ = 'v1';
+const ELECTRICITY_DASHBOARD_TECHNICAL_CREATION_VERSION_ = 1;
+const ELECTRICITY_DASHBOARD_TECHNICAL_CREATION_MAX_AGE_MS_ =
+  24 * 60 * 60 * 1000;
+const ELECTRICITY_DASHBOARD_TECHNICAL_STAGING_PREFIX_ =
+  'Electricity dashboard technical pending ';
 const ELECTRICITY_DASHBOARD_BACKUP_ROWS_ =
   ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 3 * 13 +
   ELECTRICITY_DASHBOARD_MAX_YEARS_ + 2;
@@ -38,12 +43,22 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     return;
   }
   const dashboard = spreadsheet.getSheetByName(labels.sheet);
-  const technical = spreadsheet.getSheetByName(labels.dataSheet);
+  let technical = spreadsheet.getSheetByName(labels.dataSheet);
   if (!validateElectricityDashboardSource_(electricity, labels)) {
     if (dashboard || technical) {
       throw new Error('Electricity dashboard source headers are missing or invalid.');
     }
     return;
+  }
+  const technicalCreation = reconcileElectricityDashboardTechnicalCreation_(
+    spreadsheet, labels);
+  if (technicalCreation.sheet) {
+    if (technical && technical.getSheetId() !==
+      technicalCreation.sheet.getSheetId()) {
+      throw new Error('The electricity dashboard technical creation record ' +
+        'does not match the target sheet.');
+    }
+    technical = technicalCreation.sheet;
   }
   if (dashboard && Object.keys(automationConfig.sheet_by_supply || {}).some(
     function (supply) {
@@ -68,7 +83,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   let managedDashboard = dashboard;
   let managedTechnical = technical;
   let dashboardCreated = false;
-  let technicalCreated = false;
+  let technicalCreated = technicalCreation.recovered;
   let technicalBackup = null;
   try {
     if (!managedDashboard) {
@@ -76,7 +91,8 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       dashboardCreated = true;
     }
     if (!managedTechnical) {
-      managedTechnical = spreadsheet.insertSheet(labels.dataSheet);
+      managedTechnical = createElectricityDashboardTechnicalSheet_(spreadsheet,
+        labels, technicalCreation.journal);
       technicalCreated = true;
     }
     markElectricityDashboardTechnicalSheet_(managedTechnical);
@@ -141,6 +157,196 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     }
     throw error;
   }
+}
+
+function reconcileElectricityDashboardTechnicalCreation_(spreadsheet, labels) {
+  const properties = PropertiesService.getScriptProperties();
+  const propertyKey =
+    CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_TECHNICAL_CREATION;
+  const raw = properties.getProperty(propertyKey);
+  if (!raw) {
+    return { sheet: null, journal: null, recovered: false };
+  }
+
+  const journal = parseElectricityDashboardTechnicalCreation_(raw,
+    spreadsheet, labels);
+  const sheets = spreadsheet.getSheets();
+  const target = spreadsheet.getSheetByName(journal.targetName);
+  if (target && (journal.state !== 'created' ||
+    target.getSheetId() !== journal.sheetId)) {
+    throw new Error('The electricity dashboard technical creation record ' +
+      'does not match the target sheet.');
+  }
+
+  let sheet = null;
+  if (journal.state === 'created') {
+    sheet = sheets.find(function (candidate) {
+      return candidate.getSheetId() === journal.sheetId;
+    });
+    if (!sheet) {
+      throw new Error('The electricity dashboard technical creation record ' +
+        'references a missing sheet.');
+    }
+    assertElectricityDashboardTechnicalCreationSheet_(sheet, journal, true);
+  } else {
+    const staged = sheets.filter(function (candidate) {
+      return candidate.getName() === journal.stagingName;
+    });
+    if (staged.length > 1) {
+      throw new Error('The electricity dashboard technical creation record ' +
+        'matches multiple sheets.');
+    }
+    if (staged.length === 0) {
+      return { sheet: null, journal: journal, recovered: false };
+    }
+    sheet = staged[0];
+    assertElectricityDashboardTechnicalCreationSheet_(sheet, journal, false);
+    journal.state = 'created';
+    journal.sheetId = sheet.getSheetId();
+    writeElectricityDashboardTechnicalCreation_(properties, journal);
+  }
+
+  finalizeElectricityDashboardTechnicalCreation_(properties, sheet, journal);
+  return { sheet: sheet, journal: null, recovered: true };
+}
+
+function createElectricityDashboardTechnicalSheet_(spreadsheet, labels,
+  existingJournal) {
+  const properties = PropertiesService.getScriptProperties();
+  const journal = existingJournal ||
+    planElectricityDashboardTechnicalCreation_(properties, spreadsheet, labels);
+  const sheet = spreadsheet.insertSheet(journal.stagingName);
+  journal.state = 'created';
+  journal.sheetId = sheet.getSheetId();
+  writeElectricityDashboardTechnicalCreation_(properties, journal);
+  assertElectricityDashboardTechnicalCreationSheet_(sheet, journal, false);
+  finalizeElectricityDashboardTechnicalCreation_(properties, sheet, journal);
+  return sheet;
+}
+
+function planElectricityDashboardTechnicalCreation_(properties, spreadsheet,
+  labels) {
+  const existingSheetIds = spreadsheet.getSheets().map(function (sheet) {
+    return sheet.getSheetId();
+  });
+  const journal = {
+    version: ELECTRICITY_DASHBOARD_TECHNICAL_CREATION_VERSION_,
+    state: 'planned',
+    spreadsheetId: spreadsheet.getId(),
+    targetName: labels.dataSheet,
+    stagingName: ELECTRICITY_DASHBOARD_TECHNICAL_STAGING_PREFIX_ +
+      Utilities.getUuid(),
+    plannedAt: new Date().getTime(),
+    existingSheetIds: existingSheetIds
+  };
+  writeElectricityDashboardTechnicalCreation_(properties, journal);
+  return journal;
+}
+
+function parseElectricityDashboardTechnicalCreation_(raw, spreadsheet, labels) {
+  let journal;
+  try {
+    journal = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The electricity dashboard technical creation record is malformed.');
+  }
+  const validSheetIds = Array.isArray(journal && journal.existingSheetIds) &&
+    journal.existingSheetIds.every(function (sheetId, index, sheetIds) {
+      return isValidElectricityDashboardSheetId_(sheetId) &&
+        sheetIds.indexOf(sheetId) === index;
+    });
+  const validBase = journal &&
+    journal.version === ELECTRICITY_DASHBOARD_TECHNICAL_CREATION_VERSION_ &&
+    (journal.state === 'planned' || journal.state === 'created') &&
+    typeof journal.spreadsheetId === 'string' && journal.spreadsheetId &&
+    typeof journal.targetName === 'string' && journal.targetName &&
+    typeof journal.stagingName === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(journal.stagingName.substring(
+        ELECTRICITY_DASHBOARD_TECHNICAL_STAGING_PREFIX_.length)) &&
+    journal.stagingName.indexOf(
+      ELECTRICITY_DASHBOARD_TECHNICAL_STAGING_PREFIX_) === 0 &&
+    typeof journal.plannedAt === 'number' && isFinite(journal.plannedAt) &&
+    journal.plannedAt > 0 && Math.floor(journal.plannedAt) === journal.plannedAt &&
+    validSheetIds;
+  const validState = journal && (journal.state === 'planned' ?
+    typeof journal.sheetId === 'undefined' :
+    isValidElectricityDashboardSheetId_(journal.sheetId) &&
+      journal.existingSheetIds.indexOf(journal.sheetId) < 0);
+  if (!validBase || !validState) {
+    throw new Error('The electricity dashboard technical creation record is malformed.');
+  }
+  const age = new Date().getTime() - journal.plannedAt;
+  if (age < -5 * 60 * 1000 ||
+    age > ELECTRICITY_DASHBOARD_TECHNICAL_CREATION_MAX_AGE_MS_) {
+    throw new Error('The electricity dashboard technical creation record is stale.');
+  }
+  if (journal.spreadsheetId !== spreadsheet.getId() ||
+    journal.targetName !== labels.dataSheet) {
+    throw new Error('The electricity dashboard technical creation record ' +
+      'does not match this spreadsheet.');
+  }
+  return journal;
+}
+
+function isValidElectricityDashboardSheetId_(sheetId) {
+  return typeof sheetId === 'number' && isFinite(sheetId) &&
+    sheetId >= 0 && Math.floor(sheetId) === sheetId;
+}
+
+function assertElectricityDashboardTechnicalCreationSheet_(sheet, journal,
+  allowOwnershipMarker) {
+  if (journal.existingSheetIds.indexOf(sheet.getSheetId()) >= 0 ||
+    (sheet.getName() !== journal.stagingName &&
+      sheet.getName() !== journal.targetName)) {
+    throw new Error('The electricity dashboard technical creation record ' +
+      'does not match the created sheet.');
+  }
+  const metadata = sheet.getDeveloperMetadata();
+  const hasOwnership = metadata.some(function (item) {
+    return item.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
+      item.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
+  });
+  const validMetadata = metadata.length === 0 ||
+    allowOwnershipMarker && hasOwnership && metadata.every(function (item) {
+      return item.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
+        item.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
+    });
+  const pristine = sheet.getMaxRows() ===
+      ELECTRICITY_DASHBOARD_NEW_SHEET_ROWS_ &&
+    sheet.getMaxColumns() === ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_ &&
+    sheet.getLastRow() === 0 && sheet.getLastColumn() === 0 &&
+    !sheet.isSheetHidden() && sheet.getFrozenRows() === 0 &&
+    sheet.getFrozenColumns() === 0 && sheet.getCharts().length === 0 &&
+    sheet.getDrawings().length === 0 && validMetadata;
+  if (!pristine || sheet.getName() === journal.targetName && !hasOwnership) {
+    throw new Error('The electricity dashboard technical creation record ' +
+      'does not identify a pristine created sheet.');
+  }
+}
+
+function finalizeElectricityDashboardTechnicalCreation_(properties, sheet,
+  journal) {
+  const target = sheet.getParent().getSheetByName(journal.targetName);
+  if (target && target.getSheetId() !== sheet.getSheetId()) {
+    throw new Error('The electricity dashboard technical creation target is occupied.');
+  }
+  markElectricityDashboardTechnicalSheet_(sheet);
+  if (!isElectricityDashboardTechnicalSheetMarked_(sheet)) {
+    throw new Error('The electricity dashboard technical sheet ownership ' +
+      'marker was not persisted.');
+  }
+  if (sheet.getName() !== journal.targetName) {
+    sheet.setName(journal.targetName);
+  }
+  properties.deleteProperty(
+    CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_TECHNICAL_CREATION);
+}
+
+function writeElectricityDashboardTechnicalCreation_(properties, journal) {
+  properties.setProperty(
+    CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_TECHNICAL_CREATION,
+    JSON.stringify(journal));
 }
 
 function getElectricityDashboardTechnicalDataBlocks_(sheet) {
@@ -242,11 +448,7 @@ function assertElectricityDashboardTechnicalSheet_(technical, electricity,
 }
 
 function isManagedElectricityDashboardTechnicalSheet_(sheet, labels) {
-  const isMarked = sheet.getDeveloperMetadata().some(function (metadata) {
-    return metadata.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
-      metadata.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
-  });
-  if (isMarked) {
+  if (isElectricityDashboardTechnicalSheetMarked_(sheet)) {
     return true;
   }
   if (!sheet.isSheetHidden()) {
@@ -262,12 +464,15 @@ function isManagedElectricityDashboardTechnicalSheet_(sheet, labels) {
   });
 }
 
-function markElectricityDashboardTechnicalSheet_(sheet) {
-  const marked = sheet.getDeveloperMetadata().some(function (metadata) {
+function isElectricityDashboardTechnicalSheetMarked_(sheet) {
+  return sheet.getDeveloperMetadata().some(function (metadata) {
     return metadata.getKey() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_ &&
       metadata.getValue() === ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_;
   });
-  if (!marked) {
+}
+
+function markElectricityDashboardTechnicalSheet_(sheet) {
+  if (!isElectricityDashboardTechnicalSheetMarked_(sheet)) {
     sheet.addDeveloperMetadata(ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_KEY_,
       ELECTRICITY_DASHBOARD_TECHNICAL_METADATA_VALUE_);
   }

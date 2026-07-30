@@ -8,8 +8,31 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
+const technicalCreationProperty =
+  'ELECTRICITY_DASHBOARD_TECHNICAL_CREATION';
 
-function loadDashboard() {
+function createScriptProperties(initialValues = {}) {
+  const values = { ...initialValues };
+  const history = [];
+  return {
+    values,
+    history,
+    api: {
+      getProperty: (key) => values[key] || null,
+      setProperty: (key, value) => {
+        values[key] = value;
+        history.push({ action: 'set', key, value });
+      },
+      deleteProperty: (key) => {
+        delete values[key];
+        history.push({ action: 'delete', key });
+      }
+    }
+  };
+}
+
+function loadDashboard(scriptProperties = createScriptProperties()) {
+  let uuidSequence = 0;
   const context = vm.createContext({
     Date,
     isNaN,
@@ -18,6 +41,15 @@ function loadDashboard() {
     Object,
     String,
     Array,
+    PropertiesService: {
+      getScriptProperties: () => scriptProperties.api
+    },
+    Utilities: {
+      getUuid: () => {
+        uuidSequence += 1;
+        return `00000000-0000-4000-8000-${String(uuidSequence).padStart(12, '0')}`;
+      }
+    },
     Charts: {
       ChartHiddenDimensionStrategy: {
         IGNORE_ROWS: 'IGNORE_ROWS'
@@ -37,7 +69,7 @@ function loadDashboard() {
       lookup[String(alias).trim().toLowerCase()]
     ).find(Boolean) || 0
   });
-  ['locales/en.gs', 'locales/it.gs', 'Localization.gs',
+  ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs',
     'ElectricityDashboard.gs'].forEach((file) => {
     vm.runInContext(
       fs.readFileSync(path.join(projectRoot, file), 'utf8'),
@@ -59,6 +91,74 @@ function loadInstaller() {
       );
     });
   return context;
+}
+
+function createPristineTechnicalSheet(name, sheetId) {
+  let currentName = name;
+  let parent = null;
+  const metadata = [];
+  const sheet = {
+    getName: () => currentName,
+    setName: (value) => {
+      currentName = value;
+      return sheet;
+    },
+    getSheetId: () => sheetId,
+    getParent: () => parent,
+    setParent: (value) => {
+      parent = value;
+    },
+    getDeveloperMetadata: () => metadata.map((item) => ({
+      getKey: () => item.key,
+      getValue: () => item.value
+    })),
+    addDeveloperMetadata: (key, value) => {
+      metadata.push({ key, value });
+      return sheet;
+    },
+    getMaxRows: () => 1000,
+    getMaxColumns: () => 26,
+    getLastRow: () => 0,
+    getLastColumn: () => 0,
+    isSheetHidden: () => false,
+    getFrozenRows: () => 0,
+    getFrozenColumns: () => 0,
+    getCharts: () => [],
+    getDrawings: () => [],
+    metadata
+  };
+  return sheet;
+}
+
+function createTechnicalSpreadsheet(initialSheets = []) {
+  const sheets = initialSheets.slice();
+  const insertedNames = [];
+  let nextSheetId = 100;
+  const spreadsheet = {
+    getId: () => 'spreadsheet-1',
+    getSheets: () => sheets.slice(),
+    getSheetByName: (name) => sheets.find((sheet) =>
+      sheet.getName() === name
+    ) || null,
+    insertSheet: (name) => {
+      const sheet = createPristineTechnicalSheet(name, nextSheetId);
+      nextSheetId += 1;
+      sheet.setParent(spreadsheet);
+      sheets.push(sheet);
+      insertedNames.push(name);
+      return sheet;
+    },
+    deleteSheet: (sheet) => {
+      const index = sheets.indexOf(sheet);
+      if (index >= 0) {
+        sheets.splice(index, 1);
+      }
+    },
+    insertedNames,
+    sheets
+  };
+  sheets.forEach((sheet) => sheet.setParent(spreadsheet));
+  return spreadsheet;
 }
 
 function testLocalizedDashboardContracts() {
@@ -206,6 +306,7 @@ function testDashboardCreationAttemptsBothCleanupsAfterFailure() {
   context.validateElectricityDashboardSource_ = () => true;
   context.assertElectricityDashboardTechnicalSheet_ = () => {};
   context.assertElectricityDashboardCapacity_ = () => {};
+  context.createElectricityDashboardTechnicalSheet_ = () => technical;
   context.markElectricityDashboardTechnicalSheet_ = () => {};
   context.captureElectricityChartLayouts_ = () => ({});
   context.writeElectricityDashboardData_ = () => {
@@ -269,6 +370,225 @@ function testDashboardInitializationReconcilesInterruptedBackups() {
   assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, {
     locale: 'en', sheet_by_supply: { electricity: 'Electricity' }
   }), /stop after preflight/);
+}
+
+function testTechnicalCreationJournalsNormalFreshCreation() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const spreadsheet = createTechnicalSpreadsheet();
+  const insertSheet = spreadsheet.insertSheet;
+  spreadsheet.insertSheet = (name) => {
+    const created = insertSheet(name);
+    const addDeveloperMetadata = created.addDeveloperMetadata;
+    created.addDeveloperMetadata = (key, value) => {
+      const checkpoint = JSON.parse(
+        properties.values[technicalCreationProperty]
+      );
+      assert.equal(checkpoint.state, 'created');
+      assert.equal(checkpoint.sheetId, created.getSheetId());
+      return addDeveloperMetadata(key, value);
+    };
+    return created;
+  };
+  const deleteProperty = properties.api.deleteProperty;
+  properties.api.deleteProperty = (key) => {
+    const target = spreadsheet.getSheetByName(labels.dataSheet);
+    assert.ok(target);
+    assert.equal(target.metadata.some((item) =>
+      item.key === 'gduc.electricity_dashboard_technical' &&
+      item.value === 'v1'
+    ), true);
+    deleteProperty(key);
+  };
+
+  const sheet = context.createElectricityDashboardTechnicalSheet_(spreadsheet,
+    labels, null);
+
+  assert.equal(sheet.getName(), labels.dataSheet);
+  assert.deepEqual(sheet.metadata, [{
+    key: 'gduc.electricity_dashboard_technical',
+    value: 'v1'
+  }]);
+  assert.equal(properties.values[technicalCreationProperty], undefined);
+  assert.match(spreadsheet.insertedNames[0],
+    /^Electricity dashboard technical pending /);
+  const checkpoints = properties.history.filter((entry) =>
+    entry.action === 'set'
+  ).map((entry) => JSON.parse(entry.value).state);
+  assert.deepEqual(checkpoints, ['planned', 'created']);
+  assert.equal(properties.history.at(-1).action, 'delete');
+}
+
+function testInitializationReconcilesCreationBeforeOwnershipPreflight() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const source = createPristineTechnicalSheet('Electricity', 1);
+  const spreadsheet = createTechnicalSpreadsheet([source]);
+  const journal = context.planElectricityDashboardTechnicalCreation_(
+    properties.api, spreadsheet, labels);
+  const staged = spreadsheet.insertSheet(journal.stagingName);
+  context.validateElectricityDashboardSource_ = () => true;
+  context.assertElectricityDashboardTechnicalSheet_ = (technical) => {
+    assert.equal(technical, staged);
+    assert.equal(technical.getName(), labels.dataSheet);
+    assert.equal(technical.metadata.some((item) =>
+      item.key === 'gduc.electricity_dashboard_technical' &&
+      item.value === 'v1'
+    ), true);
+    throw new Error('stop after ownership preflight');
+  };
+
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, {
+    locale: 'en',
+    sheet_by_supply: { electricity: 'Electricity' }
+  }), /stop after ownership preflight/);
+}
+
+function testTechnicalCreationRecoversInterruptionBeforeInsert() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const spreadsheet = createTechnicalSpreadsheet();
+  const journal = context.planElectricityDashboardTechnicalCreation_(
+    properties.api, spreadsheet, labels);
+
+  const recovery = context.reconcileElectricityDashboardTechnicalCreation_(
+    spreadsheet, labels);
+
+  assert.equal(recovery.sheet, null);
+  assert.equal(recovery.recovered, false);
+  assert.equal(recovery.journal.stagingName, journal.stagingName);
+  const sheet = context.createElectricityDashboardTechnicalSheet_(spreadsheet,
+    labels, recovery.journal);
+  assert.equal(sheet.getName(), labels.dataSheet);
+  assert.equal(properties.values[technicalCreationProperty], undefined);
+  assert.deepEqual(spreadsheet.insertedNames, [journal.stagingName]);
+}
+
+function testTechnicalCreationRecoversInsertBeforeExactIdCheckpoint() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const spreadsheet = createTechnicalSpreadsheet();
+  const journal = context.planElectricityDashboardTechnicalCreation_(
+    properties.api, spreadsheet, labels);
+  const staged = spreadsheet.insertSheet(journal.stagingName);
+
+  const recovery = context.reconcileElectricityDashboardTechnicalCreation_(
+    spreadsheet, labels);
+
+  assert.equal(recovery.sheet, staged);
+  assert.equal(recovery.recovered, true);
+  assert.equal(staged.getName(), labels.dataSheet);
+  assert.equal(properties.values[technicalCreationProperty], undefined);
+  const createdCheckpoint = properties.history.find((entry) =>
+    entry.action === 'set' && JSON.parse(entry.value).state === 'created'
+  );
+  assert.equal(JSON.parse(createdCheckpoint.value).sheetId, staged.getSheetId());
+}
+
+function testTechnicalCreationRecoversExactIdCheckpointBeforeMetadata() {
+  const properties = createScriptProperties();
+  const context = loadDashboard(properties);
+  const labels = context.getElectricityDashboardLabels_('en');
+  const spreadsheet = createTechnicalSpreadsheet();
+  const journal = context.planElectricityDashboardTechnicalCreation_(
+    properties.api, spreadsheet, labels);
+  const staged = spreadsheet.insertSheet(journal.stagingName);
+  journal.state = 'created';
+  journal.sheetId = staged.getSheetId();
+  properties.api.setProperty(technicalCreationProperty,
+    JSON.stringify(journal));
+
+  const recovery = context.reconcileElectricityDashboardTechnicalCreation_(
+    spreadsheet, labels);
+
+  assert.equal(recovery.sheet, staged);
+  assert.equal(staged.getName(), labels.dataSheet);
+  assert.deepEqual(staged.metadata, [{
+    key: 'gduc.electricity_dashboard_technical',
+    value: 'v1'
+  }]);
+  assert.equal(properties.values[technicalCreationProperty], undefined);
+}
+
+function testTechnicalCreationFailsClosedForUnsafeRecords() {
+  const labelsFor = (context) =>
+    context.getElectricityDashboardLabels_('en');
+
+  const staleProperties = createScriptProperties();
+  const staleContext = loadDashboard(staleProperties);
+  const staleSpreadsheet = createTechnicalSpreadsheet();
+  const staleJournal = staleContext.planElectricityDashboardTechnicalCreation_(
+    staleProperties.api, staleSpreadsheet, labelsFor(staleContext));
+  staleJournal.plannedAt = Date.now() - 25 * 60 * 60 * 1000;
+  staleProperties.api.setProperty(technicalCreationProperty,
+    JSON.stringify(staleJournal));
+  assert.throws(() =>
+    staleContext.reconcileElectricityDashboardTechnicalCreation_(
+      staleSpreadsheet, labelsFor(staleContext)
+    ), /creation record is stale/);
+  assert.ok(staleProperties.values[technicalCreationProperty]);
+
+  const mismatchProperties = createScriptProperties();
+  const mismatchContext = loadDashboard(mismatchProperties);
+  const mismatchSpreadsheet = createTechnicalSpreadsheet();
+  const mismatchJournal =
+    mismatchContext.planElectricityDashboardTechnicalCreation_(
+      mismatchProperties.api, mismatchSpreadsheet, labelsFor(mismatchContext));
+  mismatchJournal.spreadsheetId = 'another-spreadsheet';
+  mismatchProperties.api.setProperty(technicalCreationProperty,
+    JSON.stringify(mismatchJournal));
+  assert.throws(() =>
+    mismatchContext.reconcileElectricityDashboardTechnicalCreation_(
+      mismatchSpreadsheet, labelsFor(mismatchContext)
+    ), /does not match this spreadsheet/);
+
+  const malformedProperties = createScriptProperties({
+    [technicalCreationProperty]: '{not-json'
+  });
+  const malformedContext = loadDashboard(malformedProperties);
+  assert.throws(() =>
+    malformedContext.reconcileElectricityDashboardTechnicalCreation_(
+      createTechnicalSpreadsheet(), labelsFor(malformedContext)
+    ), /creation record is malformed/);
+}
+
+function testTechnicalCreationNeverAdoptsUserOrModifiedSheets() {
+  const userProperties = createScriptProperties();
+  const userContext = loadDashboard(userProperties);
+  const userLabels = userContext.getElectricityDashboardLabels_('en');
+  const userSpreadsheet = createTechnicalSpreadsheet();
+  userContext.planElectricityDashboardTechnicalCreation_(
+    userProperties.api, userSpreadsheet, userLabels);
+  const userSheet = userSpreadsheet.insertSheet(userLabels.dataSheet);
+  assert.throws(() =>
+    userContext.reconcileElectricityDashboardTechnicalCreation_(
+      userSpreadsheet, userLabels
+    ), /does not match the target sheet/);
+  assert.deepEqual(userSheet.metadata, []);
+
+  const modifiedProperties = createScriptProperties();
+  const modifiedContext = loadDashboard(modifiedProperties);
+  const modifiedLabels = modifiedContext.getElectricityDashboardLabels_('en');
+  const modifiedSpreadsheet = createTechnicalSpreadsheet();
+  const modifiedJournal =
+    modifiedContext.planElectricityDashboardTechnicalCreation_(
+      modifiedProperties.api, modifiedSpreadsheet, modifiedLabels);
+  const modifiedSheet = modifiedSpreadsheet.insertSheet(
+    modifiedJournal.stagingName);
+  modifiedSheet.addDeveloperMetadata('user.metadata', 'keep');
+  assert.throws(() =>
+    modifiedContext.reconcileElectricityDashboardTechnicalCreation_(
+      modifiedSpreadsheet, modifiedLabels
+    ), /does not identify a pristine created sheet/);
+  assert.equal(modifiedSpreadsheet.sheets.includes(modifiedSheet), true);
+  assert.deepEqual(modifiedSheet.metadata, [{
+    key: 'user.metadata',
+    value: 'keep'
+  }]);
 }
 
 function testTechnicalFormulaRangesUseReservedCapacity() {
@@ -799,6 +1119,7 @@ function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
   context.assertElectricityDashboardTechnicalSheet_ = () => {};
   context.reconcileElectricityDashboardTechnicalBackups_ = () => {};
   context.assertElectricityDashboardCapacity_ = () => {};
+  context.createElectricityDashboardTechnicalSheet_ = () => technical;
   context.markElectricityDashboardTechnicalSheet_ = () => {};
   context.writeElectricityDashboardData_ = () => chartRanges;
   context.shouldExtendElectricityChartRange_ = (
@@ -938,6 +1259,13 @@ testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalSheetCannotAliasAnyConfiguredSource();
 testDashboardInitializationReconcilesInterruptedBackups();
+testTechnicalCreationJournalsNormalFreshCreation();
+testInitializationReconcilesCreationBeforeOwnershipPreflight();
+testTechnicalCreationRecoversInterruptionBeforeInsert();
+testTechnicalCreationRecoversInsertBeforeExactIdCheckpoint();
+testTechnicalCreationRecoversExactIdCheckpointBeforeMetadata();
+testTechnicalCreationFailsClosedForUnsafeRecords();
+testTechnicalCreationNeverAdoptsUserOrModifiedSheets();
 testTechnicalFormulaRangesUseReservedCapacity();
 testDashboardCapacityIncludesTemporaryBackup();
 testTechnicalRangesUseTheReservedGrid();
