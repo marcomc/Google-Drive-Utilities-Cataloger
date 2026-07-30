@@ -209,6 +209,26 @@ function testDashboardCreationAttemptsBothCleanupsAfterFailure() {
   assert.deepEqual(deleted, [technical, dashboard]);
 }
 
+function testTechnicalSheetCannotAliasAnyConfiguredSource() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const electricity = {};
+  const water = {};
+  const spreadsheet = {
+    getSheetByName: (name) => {
+      if (name === 'Electricity') {
+        return electricity;
+      }
+      return name === labels.dataSheet ? water : null;
+    }
+  };
+  context.validateElectricityDashboardSource_ = () => true;
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, {
+    locale: 'en',
+    sheet_by_supply: { electricity: 'Electricity', water: labels.dataSheet }
+  }), /technical sheet name matches a source sheet/);
+}
+
 function testTechnicalFormulaRangesUseReservedCapacity() {
   const context = loadDashboard();
   const source = {
@@ -227,7 +247,7 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
   );
   assert.equal(
     context.electricitySumFormula_(source, 'N', 2026, 4),
-    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(\'Electricity\'!$G$2:$G$10002=4)*\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(IFERROR(VALUE(\'Electricity\'!$G$2:$G$10002),MONTH(\'Electricity\'!$A$2:$A$10002))=4)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(
     context.electricityAnnualFormula_(source, 'N', 2026),
@@ -624,6 +644,7 @@ testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
+testTechnicalSheetCannotAliasAnyConfiguredSource();
 testTechnicalFormulaRangesUseReservedCapacity();
 testDashboardCapacityIncludesTemporaryBackup();
 testTechnicalRangesUseTheReservedGrid();

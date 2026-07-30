@@ -940,8 +940,11 @@ function testMutationRecoveryStages() {
     restoredRows.push([row, originalRow, payload]);
   };
   const recoveredDashboardSheets = [];
+  const rollbackLayouts = { monthlyF1: { sourceRanges: ['F1:Z13'] } };
   payloadContext.refreshElectricityDashboardAfterRollback_ = (state) => {
     recoveredDashboardSheets.push(state.sheet);
+    assert.equal(JSON.stringify(state.electricityDashboardLayouts),
+      JSON.stringify(rollbackLayouts));
   };
   assert.equal(payloadContext.rollbackJournalSheetRow_({
     stage: 'sheet-existing-written',
@@ -950,7 +953,8 @@ function testMutationRecoveryStages() {
     sheetOriginalRow: 2,
     sheetRowCreated: false,
     sheetRowPreexisting: true,
-    sheetRowPayload: { cells: [] }
+    sheetRowPayload: { cells: [] },
+    electricityDashboardLayouts: rollbackLayouts
   }, payloadFile).unmarkedRowMayRemain, false);
   assert.deepEqual(restoredRows, [[3, 2, { cells: [] }]]);
   assert.equal(recoveredDashboardSheets.length, 1);

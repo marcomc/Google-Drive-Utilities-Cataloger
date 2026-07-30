@@ -76,6 +76,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Protect template-derived calculated columns even if a particular imported row
   is missing its formula, and aggregate electricity by the same issue-date year
   fallback used for dashboard year discovery.
+- Apply the same numeric-or-issue-date fallback to monthly aggregation, retain
+  pre-import chart ranges in mutation journals for crash recovery, and reject
+  technical dashboard tabs that alias any configured supply source.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

@@ -48,6 +48,14 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     })) {
     throw new Error('The electricity dashboard sheet name matches a source sheet.');
   }
+  if (technical && Object.keys(automationConfig.sheet_by_supply || {}).some(
+    function (supply) {
+      return spreadsheet.getSheetByName(
+        automationConfig.sheet_by_supply[supply]
+      ) === technical;
+    })) {
+    throw new Error('The electricity dashboard technical sheet name matches a source sheet.');
+  }
   assertElectricityDashboardTechnicalSheet_(technical, electricity, labels);
   assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical);
 
@@ -72,8 +80,10 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       technicalBackup = createElectricityDashboardTechnicalBackup_(spreadsheet,
         managedTechnical);
     }
-    const chartLayouts = options && options.preservedLayouts ||
-      captureElectricityChartLayouts_(managedDashboard, managedTechnical, labels);
+    const chartLayouts = mergeElectricityChartLayouts_(
+      captureElectricityChartLayouts_(managedDashboard, managedTechnical, labels),
+      options && options.preservedLayouts
+    );
     const chartRanges = writeElectricityDashboardData_(managedTechnical,
       electricity, labels);
     if (!chartRanges) {
@@ -522,6 +532,18 @@ function captureElectricityChartLayouts_(dashboard, technical, labels) {
   return layouts;
 }
 
+function mergeElectricityChartLayouts_(capturedLayouts, preservedLayouts) {
+  if (!preservedLayouts) {
+    return capturedLayouts;
+  }
+  const layouts = Object.assign({}, capturedLayouts);
+  Object.keys(preservedLayouts).forEach(function (key) {
+    layouts[key] = Object.assign({}, capturedLayouts[key] || {},
+      preservedLayouts[key]);
+  });
+  return layouts;
+}
+
 function isElectricityChartRangeWithinManagedBlock_(range, technical, key) {
   if (range.getSheet().getSheetId() !== technical.getSheetId()) {
     return false;
@@ -723,7 +745,9 @@ function electricitySumFormula_(source, bandColumn, year, month) {
     ':$' + source.month + '$' + source.lastRow;
   const effectiveYear = 'IFERROR(VALUE(' + yearRange + ')' + source.separator +
     'YEAR(' + dateRange + '))';
-  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*(' + monthRange +
+  const effectiveMonth = 'IFERROR(VALUE(' + monthRange + ')' + source.separator +
+    'MONTH(' + dateRange + '))';
+  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*(' + effectiveMonth +
     '=' + month + ')*' + bandRange + ')';
 }
 

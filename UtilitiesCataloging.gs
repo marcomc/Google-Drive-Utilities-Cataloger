@@ -379,6 +379,15 @@ function captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig)
   return captureElectricityChartLayouts_(dashboard, technical, labels);
 }
 
+function getElectricityDashboardRollbackLayouts_(layouts) {
+  return Object.keys(layouts || {}).reduce(function (rollbackLayouts, key) {
+    if (layouts[key].sourceRanges && layouts[key].sourceRanges.length) {
+      rollbackLayouts[key] = { sourceRanges: layouts[key].sourceRanges };
+    }
+    return rollbackLayouts;
+  }, {});
+}
+
 function listDirectIntakePdfs_(rootFolder) {
   const files = [];
   const iterator = rootFolder.getFilesByType(MimeType.PDF);
@@ -1417,6 +1426,11 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   }
   const electricityDashboardLayouts =
     captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
+  updateMutationJournal_(file.getId(), {
+    electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
+      electricityDashboardLayouts
+    )
+  });
   const layout = getSheetLayout_(sheet);
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
@@ -2470,7 +2484,10 @@ function rollbackJournalSheetRow_(journal, file) {
     if (journal.sheetRowPayload) {
       restoreImportedRowPayload_(sheet, matches[0], journal.sheetOriginalRow ||
         journal.sheetRow, journal.sheetRowPayload, file, layout);
-      refreshElectricityDashboardAfterRollback_({ sheet: sheet });
+      refreshElectricityDashboardAfterRollback_({
+        sheet: sheet,
+        electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+      });
     } else {
       // Journals written before row-payload snapshots remain recoverable.
       refreshImportedSourceLink_(sheet, matches[0], file);
@@ -2484,7 +2501,10 @@ function rollbackJournalSheetRow_(journal, file) {
     return { unmarkedRowMayRemain: true };
   }
   sheet.deleteRow(matches[0]);
-  refreshElectricityDashboardAfterRollback_({ sheet: sheet });
+  refreshElectricityDashboardAfterRollback_({
+    sheet: sheet,
+    electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+  });
   return { unmarkedRowMayRemain: false };
 }
 
