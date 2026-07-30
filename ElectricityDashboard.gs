@@ -105,12 +105,16 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   }
   const technicalBackupCreation =
     reconcileElectricityDashboardTechnicalBackups_(spreadsheet, technical);
-  assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical);
+  const technicalRecoveredFromCreation = technicalCreation.recovered;
+  const willCreateTechnicalBackup =
+    Boolean(technical && !technicalRecoveredFromCreation);
+  assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical,
+    willCreateTechnicalBackup);
 
   let managedDashboard = dashboard;
   let managedTechnical = technical;
   let dashboardCreated = false;
-  let technicalCreated = technicalCreation.recovered;
+  let technicalCreated = technicalRecoveredFromCreation;
   let technicalBackup = null;
   try {
     if (!managedDashboard) {
@@ -124,7 +128,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       technicalCreated = true;
     }
     markElectricityDashboardTechnicalSheet_(managedTechnical);
-    if (!technicalCreated) {
+    if (willCreateTechnicalBackup) {
       const grid = getElectricityDashboardTechnicalGrid_();
       ensureElectricityDashboardGrid_(managedTechnical, grid.rows, grid.columns);
       technicalBackup = createElectricityDashboardTechnicalBackup_(spreadsheet,
@@ -980,7 +984,8 @@ function markElectricityDashboardTechnicalSheet_(sheet) {
   }
 }
 
-function assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical) {
+function assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical,
+  willCreateTechnicalBackup) {
   const required = getElectricityDashboardTechnicalGrid_();
   const currentCells = spreadsheet.getSheets().reduce(function (total, sheet) {
     return total + sheet.getMaxRows() * sheet.getMaxColumns();
@@ -993,7 +998,8 @@ function assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical) 
     required.rows * required.columns;
   const dashboardCells = dashboard ? 0 : ELECTRICITY_DASHBOARD_NEW_SHEET_ROWS_ *
     ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_;
-  const backupCells = technical ? ELECTRICITY_DASHBOARD_BACKUP_ROWS_ *
+  const backupCells = willCreateTechnicalBackup ?
+    ELECTRICITY_DASHBOARD_BACKUP_ROWS_ *
     ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ : 0;
   if (currentCells - technicalCells + finalTechnicalCells + dashboardCells +
     backupCells >

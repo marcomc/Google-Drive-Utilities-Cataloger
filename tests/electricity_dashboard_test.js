@@ -1446,7 +1446,28 @@ function testDashboardCapacityIncludesTemporaryBackup() {
   };
   assert.throws(() => context.assertElectricityDashboardCapacity_({
     getSheets: () => [other, technical]
-  }, {}, technical), /temporary backup exceeds/);
+  }, {}, technical, true), /temporary backup exceeds/);
+}
+
+function testRecoveredTechnicalCapacitySkipsUnusedBackup() {
+  const context = loadDashboard();
+  const grid = context.getElectricityDashboardTechnicalGrid_();
+  const technical = {
+    getMaxRows: () => 1000,
+    getMaxColumns: () => 26
+  };
+  const other = {
+    getMaxRows: () => 1,
+    getMaxColumns: () => 10000000 - grid.rows * grid.columns - 100
+  };
+  const spreadsheet = {
+    getSheets: () => [other, technical]
+  };
+
+  assert.doesNotThrow(() => context.assertElectricityDashboardCapacity_(
+    spreadsheet, {}, technical, false));
+  assert.throws(() => context.assertElectricityDashboardCapacity_(
+    spreadsheet, {}, technical, true), /temporary backup exceeds/);
 }
 
 function testTechnicalRangesUseTheReservedGrid() {
@@ -2090,6 +2111,7 @@ testTechnicalCreationFailsClosedForUnsafeRecords();
 testTechnicalCreationNeverAdoptsUserOrModifiedSheets();
 testTechnicalFormulaRangesUseReservedCapacity();
 testDashboardCapacityIncludesTemporaryBackup();
+testRecoveredTechnicalCapacitySkipsUnusedBackup();
 testTechnicalRangesUseTheReservedGrid();
 testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
