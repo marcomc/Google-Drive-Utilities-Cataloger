@@ -870,6 +870,7 @@ function testMutationRecoveryStages() {
     context.refreshElectricityDashboardAfterRollback_ = (state) => {
       dashboardRefreshes.push(state.sheet);
     };
+    context.updateMutationJournal_ = () => {};
     return {
       deletedRows,
       refreshedRows,

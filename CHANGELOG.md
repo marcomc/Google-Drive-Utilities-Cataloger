@@ -88,6 +88,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   catalog lifecycle lock to avoid races with active processing runs.
 - Record successful source-row rollback before refreshing the dashboard, so
   journal recovery retries only the pending dashboard rebuild after a failure.
+- Record every successful compensating row deletion before a dashboard refresh,
+  and preserve the managed chart option for plotting null values.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

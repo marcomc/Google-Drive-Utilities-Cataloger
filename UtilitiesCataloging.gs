@@ -1515,6 +1515,11 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   } catch (error) {
     try {
       sheet.deleteRow(targetRow);
+      updateMutationJournal_(file.getId(), {
+        stage: 'sheet-row-rolled-back',
+        sheetRowCreated: false,
+        sheetRowDeleted: true
+      });
       refreshElectricityDashboardAfterRollback_({
         sheet: sheet,
         electricityDashboardLayouts: electricityDashboardLayouts
@@ -2513,6 +2518,11 @@ function rollbackJournalSheetRow_(journal, file) {
     return { unmarkedRowMayRemain: true };
   }
   sheet.deleteRow(matches[0]);
+  updateMutationJournal_(file.getId(), {
+    stage: 'sheet-row-rolled-back',
+    sheetRowCreated: false,
+    sheetRowDeleted: true
+  });
   refreshElectricityDashboardAfterRollback_({
     sheet: sheet,
     electricityDashboardLayouts: journal.electricityDashboardLayouts || null

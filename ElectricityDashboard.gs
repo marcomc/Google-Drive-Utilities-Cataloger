@@ -637,7 +637,7 @@ function captureElectricityChartOptions_(options) {
     'orientation', 'pieHole', 'pieSliceText', 'pointShape', 'pointSize',
     'reverseCategories', 'series', 'theme', 'tooltip', 'trendlines', 'vAxes',
     'vAxis', 'width', 'titleTextStyle', 'animation', 'axisTitlesPosition',
-    'crosshair', 'focusTarget', 'histogram', 'intervals', 'selectionMode',
+    'crosshair', 'focusTarget', 'histogram', 'interpolateNulls', 'intervals', 'selectionMode',
     'slices', 'targetAxisIndex', 'viewWindowMode'].forEach(function (key) {
     const value = options.get(key);
     if (value !== null && value !== undefined) {
