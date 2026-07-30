@@ -89,6 +89,15 @@
 - Journal cross-service mutations before changing Sheets or Drive. Persist the
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
+- Treat every Sheets/Drive mutation as a state-machine boundary: persist a
+  completed row insert, replacement, move, rename, or deletion before the next
+  fallible refresh or external mutation. Fallback journal writes must repeat
+  the completed-state fields, and recovery must resume from that checkpoint
+  without requiring the old resource to still exist.
+- When rebuilding managed charts, preserve public state beyond the chart
+  options map, including source ranges, geometry, null interpolation, and
+  row/column transposition. Cover refresh, rollback, and journal-recovery paths
+  with customized-chart regressions.
 - Keep installer-owned `clasp` authorization isolated from the global profile.
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
