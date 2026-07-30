@@ -1631,8 +1631,9 @@ function restoreImportedRowPayload_(sheet, row, originalRow, payload, file,
 }
 
 function repositionImportedRow_(sheet, row, layout, issueDate, file) {
-  const targetRow = getInsertionRow_(sheet, layout, issueDate);
-  if (targetRow === row || targetRow === row + 1) {
+  const insertionRow = getInsertionRow_(sheet, layout, issueDate);
+  const targetRow = insertionRow > row ? insertionRow - 1 : insertionRow;
+  if (targetRow === row) {
     return row;
   }
   moveImportedRowToIndex_(sheet, row, targetRow, layout.headers.length);

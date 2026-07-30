@@ -578,6 +578,91 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 
+function testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const electricity = {};
+  const inserted = [];
+  const dashboard = {
+    getCharts: () => [],
+    newChart: () => {
+      const state = { ranges: [], options: {} };
+      const builder = {
+        addRange: (range) => {
+          state.ranges.push(range.a1);
+          return builder;
+        },
+        setNumHeaders: () => builder,
+        setPosition: (...position) => {
+          state.position = position;
+          return builder;
+        },
+        setOption: (key, value) => {
+          state.options[key] = value;
+          return builder;
+        },
+        setTransposeRowsAndColumns: () => builder,
+        build: () => ({ state })
+      };
+      return {
+        asLineChart: () => builder,
+        asColumnChart: () => builder
+      };
+    },
+    insertChart: (chart) => inserted.push(chart),
+    removeChart: () => {}
+  };
+  const technical = {
+    getRange: (a1) => ({ a1 }),
+    hideSheet: () => {}
+  };
+  const spreadsheet = {
+    getSheetByName: (name) => name === 'Electricity' ? electricity : null,
+    insertSheet: (name) => name === labels.sheet ? dashboard : technical
+  };
+  const chartRanges = {
+    monthlyBands: { a1: 'A1:D10001' },
+    monthlyF1: { a1: 'F1:AE13' },
+    monthlyF2: { a1: 'AG1:BJ13' },
+    monthlyF3: { a1: 'BK1:CK13' },
+    annualBands: { a1: 'CI1:CL26' }
+  };
+  context.validateElectricityDashboardSource_ = () => true;
+  context.assertElectricityDashboardTechnicalSheet_ = () => {};
+  context.reconcileElectricityDashboardTechnicalBackups_ = () => {};
+  context.assertElectricityDashboardCapacity_ = () => {};
+  context.markElectricityDashboardTechnicalSheet_ = () => {};
+  context.writeElectricityDashboardData_ = () => chartRanges;
+  context.shouldExtendElectricityChartRange_ = (
+    _preserved, _sourceRange, _technical, key
+  ) => {
+    assert.equal(key, 'monthlyF1');
+    return false;
+  };
+
+  context.initializeElectricityDashboard_(spreadsheet, {
+    locale: 'en',
+    sheet_by_supply: { electricity: 'Electricity' }
+  }, {
+    preservedLayouts: {
+      monthlyF1: { sourceRanges: ['F1:Z13'] }
+    },
+    extendManagedRanges: true
+  });
+
+  assert.equal(inserted.length, 5);
+  const monthlyF1 = inserted.find((chart) =>
+    chart.state.options.title === labels.charts.monthlyF1
+  );
+  assert.ok(monthlyF1);
+  assert.deepEqual(monthlyF1.state.ranges, ['F1:Z13']);
+  assert.deepEqual(monthlyF1.state.position, [8, 18, 0, 0]);
+  assert.equal(monthlyF1.state.options.width, 700);
+  assert.equal(monthlyF1.state.options.height, 360);
+  assert.equal(JSON.stringify(monthlyF1.state.options.legend),
+    JSON.stringify({ position: 'right' }));
+}
+
 function testManagedChartsSurviveReplacementFailure() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
@@ -688,6 +773,7 @@ testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshRebuildsEveryElectricityImport();
 testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
+testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();
 testPreservedChartRangesExtendOnlyFromTheirManagedOrigin();
 console.log('electricity dashboard tests passed');

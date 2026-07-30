@@ -650,7 +650,7 @@ function captureElectricityChartOptions_(options) {
 }
 
 function getElectricityChartLayout_(layouts, key, row, column, width, height) {
-  return layouts[key] || {
+  return Object.assign({
     key: key,
     row: row,
     column: column,
@@ -659,7 +659,7 @@ function getElectricityChartLayout_(layouts, key, row, column, width, height) {
     width: width,
     height: height,
     options: {}
-  };
+  }, layouts[key] || {});
 }
 
 function insertElectricityChart_(dashboard, technical, sourceRange, layout,

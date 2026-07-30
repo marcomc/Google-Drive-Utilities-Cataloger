@@ -1303,10 +1303,80 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
   assert.equal(writes[3][3].text, '=untrusted');
 
   context.getInsertionRow_ = () => 12;
-  context.findSpreadsheetRowBySourceFile_ = () => 12;
+  context.findSpreadsheetRowBySourceFile_ = () => 11;
   assert.equal(context.repositionImportedRow_(sheet, 9, layout,
-    '2026-05-08', { getId: () => 'file-id' }), 12);
-  assert.equal(moves[1][1], 13);
+    '2026-05-08', { getId: () => 'file-id' }), 11);
+  assert.equal(moves[1][1], 12);
+}
+
+function testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice() {
+  const context = loadCataloger();
+  const moves = [];
+  const dates = {
+    2: '2026-05-15',
+    3: '2026-03-01',
+    4: '2026-04-01',
+    5: '2026-06-01'
+  };
+  const sheet = {
+    getLastRow: () => 5,
+    getRange: (row, column, numRows, numColumns) => ({
+      row,
+      column,
+      numRows,
+      numColumns,
+      getValue: () => dates[row]
+    }),
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file'],
+    lookup: { 'issue date': 1, 'source file': 2 }
+  };
+  context.getHeaderAliases_ = (key) =>
+    key === 'issueDate' ? ['Issue date'] : [];
+  context.findSpreadsheetRowBySourceFile_ = () => 4;
+
+  assert.equal(context.repositionImportedRow_(sheet, 2, layout,
+    '2026-05-15', { getId: () => 'file-id' }), 4);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 5);
+}
+
+function testCorrectedInvoiceAppendsWithoutBlankRow() {
+  const context = loadCataloger();
+  const moves = [];
+  const dates = {
+    2: '2026-07-01',
+    3: '2026-03-01',
+    4: '2026-04-01',
+    5: '2026-06-01'
+  };
+  const sheet = {
+    getLastRow: () => 5,
+    getRange: (row, column, numRows, numColumns) => ({
+      row,
+      column,
+      numRows,
+      numColumns,
+      getValue: () => dates[row]
+    }),
+    moveRows: (range, destination) => moves.push([range, destination])
+  };
+  const layout = {
+    headerRow: 1,
+    headers: ['Issue date', 'Source file'],
+    lookup: { 'issue date': 1, 'source file': 2 }
+  };
+  context.getHeaderAliases_ = (key) =>
+    key === 'issueDate' ? ['Issue date'] : [];
+  context.findSpreadsheetRowBySourceFile_ = () => 5;
+
+  assert.equal(context.repositionImportedRow_(sheet, 2, layout,
+    '2026-07-01', { getId: () => 'file-id' }), 5);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0][1], 6);
 }
 
 function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
@@ -1902,6 +1972,8 @@ testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
+testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
+testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();
