@@ -15,6 +15,9 @@ const ELECTRICITY_DASHBOARD_BACKUP_ROWS_ =
 const ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ = 26;
 const ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ =
   'Electricity dashboard backup ';
+const ELECTRICITY_DASHBOARD_BACKUP_METADATA_KEY_ =
+  'gduc.electricity_dashboard_backup';
+const ELECTRICITY_DASHBOARD_BACKUP_METADATA_VALUE_ = 'v1';
 
 function getElectricityDashboardLabels_(locale) {
   const localization = getLocalizationRegistry_()[locale];
@@ -162,6 +165,7 @@ function createElectricityDashboardTechnicalBackup_(spreadsheet, technical) {
   const backup = spreadsheet.insertSheet(ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ +
     new Date().getTime());
   try {
+    markElectricityDashboardTechnicalBackup_(backup);
     ensureElectricityDashboardGrid_(backup, ELECTRICITY_DASHBOARD_BACKUP_ROWS_,
       ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_);
     const blocks = getElectricityDashboardTechnicalDataBlocks_(technical);
@@ -192,9 +196,16 @@ function reconcileElectricityDashboardTechnicalBackups_(spreadsheet) {
 }
 
 function isElectricityDashboardTechnicalBackup_(sheet) {
-  return sheet && typeof sheet.getName === 'function' &&
-    new RegExp('^' + ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ + '\\d+$')
-      .test(sheet.getName());
+  return sheet && typeof sheet.getDeveloperMetadata === 'function' &&
+    sheet.getDeveloperMetadata().some(function (metadata) {
+      return metadata.getKey() === ELECTRICITY_DASHBOARD_BACKUP_METADATA_KEY_ &&
+        metadata.getValue() === ELECTRICITY_DASHBOARD_BACKUP_METADATA_VALUE_;
+    });
+}
+
+function markElectricityDashboardTechnicalBackup_(sheet) {
+  sheet.addDeveloperMetadata(ELECTRICITY_DASHBOARD_BACKUP_METADATA_KEY_,
+    ELECTRICITY_DASHBOARD_BACKUP_METADATA_VALUE_);
 }
 
 function restoreElectricityDashboardTechnicalBackup_(backup, technical) {

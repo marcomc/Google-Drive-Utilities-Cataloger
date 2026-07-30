@@ -82,6 +82,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Reconcile orphaned temporary technical-data snapshots before dashboard
   preflight, and reject out-of-range numeric year or month metadata before
   falling back to the issue date.
+- Require a dedicated ownership marker before deleting an interrupted
+  technical-data snapshot, protecting similarly named user sheets.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 

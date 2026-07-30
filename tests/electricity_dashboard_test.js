@@ -235,13 +235,21 @@ function testDashboardInitializationReconcilesInterruptedBackups() {
   const source = {};
   const technical = {};
   const backup = {
-    getName: () => 'Electricity dashboard backup 1234567890123'
+    getName: () => 'Electricity dashboard backup 1234567890123',
+    getDeveloperMetadata: () => [{
+      getKey: () => 'gduc.electricity_dashboard_backup',
+      getValue: () => 'v1'
+    }]
+  };
+  const userNamedSheet = {
+    getName: () => 'Electricity dashboard backup 9876543210987',
+    getDeveloperMetadata: () => []
   };
   const deleted = [];
   const spreadsheet = {
     getSheetByName: (name) => name === 'Electricity' ? source :
       name === labels.dataSheet ? technical : null,
-    getSheets: () => [backup],
+    getSheets: () => [backup, userNamedSheet],
     deleteSheet: (sheet) => deleted.push(sheet)
   };
   context.validateElectricityDashboardSource_ = () => true;
