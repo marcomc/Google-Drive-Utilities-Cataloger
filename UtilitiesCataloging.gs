@@ -1518,12 +1518,30 @@ function importUtilityInvoiceToSheet_(file, extracted) {
 }
 
 function clearImportedLiteralCells_(sheet, row, layout) {
-  const formulas = sheet.getRange(row, 1, 1, layout.headers.length).getFormulas()[0];
+  const formulaColumns = getFormulaBackedColumns_(sheet, row, layout);
   layout.headers.forEach(function (header, index) {
-    if (header && !formulas[index]) {
+    if (header && !formulaColumns[index]) {
       sheet.getRange(row, index + 1).clearContent();
     }
   });
+}
+
+function getFormulaBackedColumns_(sheet, row, layout) {
+  const firstDataRow = layout.headerRow + 1;
+  const lastRow = Math.max(firstDataRow, sheet.getLastRow());
+  const rows = [row, firstDataRow, row - 1, row + 1].filter(function (candidate,
+    index, all) {
+    return candidate >= firstDataRow && candidate <= lastRow &&
+      all.indexOf(candidate) === index;
+  });
+  const formulaColumns = layout.headers.map(function () { return false; });
+  rows.forEach(function (candidate) {
+    sheet.getRange(candidate, 1, 1, layout.headers.length).getFormulas()[0]
+      .forEach(function (formula, index) {
+        formulaColumns[index] = formulaColumns[index] || Boolean(formula);
+      });
+  });
+  return formulaColumns;
 }
 
 function captureImportedRowPayload_(sheet, row, layout) {
@@ -1774,8 +1792,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('total'), extracted.total);
 
   const allowedHeaders = Object.create(null);
-  const formulaColumns = sheet.getRange(row, 1, 1, layout.headers.length)
-    .getFormulas()[0];
+  const formulaColumns = getFormulaBackedColumns_(sheet, row, layout);
   layout.headers.forEach(function (header) {
     allowedHeaders[normalizeHeader_(header)] = header;
   });

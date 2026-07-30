@@ -227,11 +227,11 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
   );
   assert.equal(
     context.electricitySumFormula_(source, 'N', 2026, 4),
-    '=SUMIFS(\'Electricity\'!$N$2:$N$10002,\'Electricity\'!$F$2:$F$10002,2026,\'Electricity\'!$G$2:$G$10002,4)'
+    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(\'Electricity\'!$G$2:$G$10002=4)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(
     context.electricityAnnualFormula_(source, 'N', 2026),
-    '=SUMIF(\'Electricity\'!$F$2:$F$10002,2026,\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(context.columnLetter_(90), 'CL');
   assert.deepEqual(
@@ -244,6 +244,22 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
       annualStart: 87
     }
   );
+}
+
+function testDashboardCapacityIncludesTemporaryBackup() {
+  const context = loadDashboard();
+  const grid = context.getElectricityDashboardTechnicalGrid_();
+  const technical = {
+    getMaxRows: () => 1000,
+    getMaxColumns: () => grid.columns
+  };
+  const other = {
+    getMaxRows: () => 1,
+    getMaxColumns: () => 10000000 - grid.rows * grid.columns
+  };
+  assert.throws(() => context.assertElectricityDashboardCapacity_({
+    getSheets: () => [other, technical]
+  }, {}, technical), /temporary backup exceeds/);
 }
 
 function testTechnicalRangesUseTheReservedGrid() {
@@ -609,6 +625,7 @@ testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalFormulaRangesUseReservedCapacity();
+testDashboardCapacityIncludesTemporaryBackup();
 testTechnicalRangesUseTheReservedGrid();
 testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();

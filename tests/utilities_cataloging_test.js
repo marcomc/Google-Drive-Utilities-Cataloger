@@ -1181,6 +1181,42 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
     true);
 }
 
+function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Total cost', 'Source file'],
+    lookup: { 'total cost': 1, 'source file': 2 }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 2) {
+        return { getFormulas: () => [row === 3 ? ['', ''] : ['=A2*2', '']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, validInvoice());
+
+  assert.equal(writes.some((entry) => entry[1] === 1), false);
+  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+    true);
+}
+
 function testSourceHyperlinkFormulaIsPreserved() {
   const context = loadCataloger();
   context.getHeaderAliases_ = (key) => key === 'sourceFile' ? ['Source file'] : [];
@@ -1812,6 +1848,7 @@ testMutationRecoveryReportsUnavailableFileOnce();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
+testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();

@@ -248,9 +248,12 @@ function assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical) 
     required.rows * required.columns;
   const dashboardCells = dashboard ? 0 : ELECTRICITY_DASHBOARD_NEW_SHEET_ROWS_ *
     ELECTRICITY_DASHBOARD_NEW_SHEET_COLUMNS_;
-  if (currentCells - technicalCells + finalTechnicalCells + dashboardCells >
+  const backupCells = technical ? ELECTRICITY_DASHBOARD_BACKUP_ROWS_ *
+    ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ : 0;
+  if (currentCells - technicalCells + finalTechnicalCells + dashboardCells +
+    backupCells >
     ELECTRICITY_DASHBOARD_MAX_SPREADSHEET_CELLS_) {
-    throw new Error('Electricity dashboard exceeds the Google Sheets cell limit.');
+    throw new Error('Electricity dashboard or its temporary backup exceeds the Google Sheets cell limit.');
   }
 }
 
@@ -714,11 +717,14 @@ function electricitySumFormula_(source, bandColumn, year, month) {
     ':$' + bandColumn + '$' + source.lastRow;
   const yearRange = source.sheet + '$' + source.year + '$' + source.firstDataRow +
     ':$' + source.year + '$' + source.lastRow;
+  const dateRange = source.sheet + '$' + source.date + '$' + source.firstDataRow +
+    ':$' + source.date + '$' + source.lastRow;
   const monthRange = source.sheet + '$' + source.month + '$' + source.firstDataRow +
     ':$' + source.month + '$' + source.lastRow;
-  return '=SUMIFS(' + bandRange + source.separator + yearRange +
-    source.separator + year + source.separator + monthRange +
-    source.separator + month + ')';
+  const effectiveYear = 'IFERROR(VALUE(' + yearRange + ')' + source.separator +
+    'YEAR(' + dateRange + '))';
+  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*(' + monthRange +
+    '=' + month + ')*' + bandRange + ')';
 }
 
 function electricityAnnualFormula_(source, bandColumn, year) {
@@ -726,8 +732,11 @@ function electricityAnnualFormula_(source, bandColumn, year) {
     ':$' + bandColumn + '$' + source.lastRow;
   const yearRange = source.sheet + '$' + source.year + '$' + source.firstDataRow +
     ':$' + source.year + '$' + source.lastRow;
-  return '=SUMIF(' + yearRange + source.separator + year + source.separator +
-    bandRange + ')';
+  const dateRange = source.sheet + '$' + source.date + '$' + source.firstDataRow +
+    ':$' + source.date + '$' + source.lastRow;
+  const effectiveYear = 'IFERROR(VALUE(' + yearRange + ')' + source.separator +
+    'YEAR(' + dateRange + '))';
+  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*' + bandRange + ')';
 }
 
 function getElectricitySupplySheetName_(automationConfig) {

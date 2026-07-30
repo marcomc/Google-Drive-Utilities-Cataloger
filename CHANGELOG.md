@@ -71,6 +71,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   sheet fails, and report every incomplete cleanup with the original failure.
 - Recognize every Energygas `CL`-prefixed identifier as a customer code,
   including values with separators after the prefix.
+- Reserve temporary backup capacity before expanding an existing technical
+  dashboard sheet, leaving no grid or ownership mutation when preflight fails.
+- Protect template-derived calculated columns even if a particular imported row
+  is missing its formula, and aggregate electricity by the same issue-date year
+  fallback used for dashboard year discovery.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
