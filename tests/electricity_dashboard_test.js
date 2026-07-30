@@ -1762,7 +1762,9 @@ function testCustomizedChartBuilderStateSurvivesRefresh() {
       title: labels.charts.monthlyF1,
       width: 811,
       height: 377,
-      legend: { position: 'bottom' }
+      legend: { position: 'bottom' },
+      subtitle: 'User-authored comparison',
+      subtitleTextStyle: { color: '#123456', italic: true }
     })[key]
   };
   let modifyCalls = 0;
@@ -1868,6 +1870,9 @@ function testCustomizedChartBuilderStateSurvivesRefresh() {
   assert.equal(refreshed.state.mergeStrategy, 'MERGE_ROWS');
   assert.equal(refreshed.state.numHeaders, 2);
   assert.equal(refreshed.state.transposeRowsAndColumns, true);
+  assert.equal(refreshed.state.options.subtitle, 'User-authored comparison');
+  assert.deepEqual(refreshed.state.options.subtitleTextStyle,
+    { color: '#123456', italic: true });
   assert.deepEqual(refreshed.state.ranges, ['F1:F13', 'G1:I13']);
   assert.deepEqual(refreshed.state.position, [17, 9, 12, 14]);
 }

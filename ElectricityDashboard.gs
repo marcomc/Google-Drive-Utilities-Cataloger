@@ -1368,9 +1368,10 @@ function captureElectricityChartOptions_(options) {
     'fontName', 'fontSize', 'hAxis', 'height', 'is3D', 'isStacked', 'legend', 'lineWidth',
     'orientation', 'pieHole', 'pieSliceText', 'pointShape', 'pointSize',
     'reverseCategories', 'series', 'theme', 'tooltip', 'trendlines', 'vAxes',
-    'vAxis', 'width', 'titleTextStyle', 'animation', 'axisTitlesPosition',
-    'crosshair', 'focusTarget', 'histogram', 'interpolateNulls', 'intervals', 'selectionMode',
-    'slices', 'targetAxisIndex', 'viewWindowMode'].forEach(function (key) {
+    'vAxis', 'width', 'subtitle', 'subtitleTextStyle', 'titleTextStyle',
+    'animation', 'axisTitlesPosition', 'crosshair', 'focusTarget', 'histogram',
+    'interpolateNulls', 'intervals', 'selectionMode', 'slices', 'targetAxisIndex',
+    'viewWindowMode'].forEach(function (key) {
     const value = options.get(key);
     if (value !== null && value !== undefined) {
       preserved[key] = value;
