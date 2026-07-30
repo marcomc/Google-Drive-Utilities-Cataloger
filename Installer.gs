@@ -740,7 +740,9 @@ function getInstallerLocalization_(locale) {
 }
 
 function validateInstallerSheetHeaders_(sheet, locale) {
-  const headers = getSheetLayout_(sheet).headers.map(normalizeHeader_);
+  const localization = getInstallerLocalization_(locale);
+  const headers = getSheetLayout_(sheet,
+    localization.headerAliases).headers.map(normalizeHeader_);
   const seenHeaders = Object.create(null);
   headers.forEach(function (header) {
     if (!header) {
@@ -754,7 +756,6 @@ function validateInstallerSheetHeaders_(sheet, locale) {
     }
     seenHeaders[header] = true;
   });
-  const localization = getInstallerLocalization_(locale);
   ['issueDate', 'supplier', 'identifier', 'sourceFile'].forEach(function (key) {
     const aliases = localization.headerAliases[key].map(normalizeHeader_);
     const present = aliases.some(function (alias) {

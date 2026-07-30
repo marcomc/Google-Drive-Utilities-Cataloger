@@ -291,6 +291,51 @@ function testDashboardSkipsSheetsWithoutAllRequiredHeaders() {
   assert.equal(context.hasElectricityDashboardHeaders_({}, labels), false);
 }
 
+function testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists() {
+  const context = loadDashboard();
+  const localization = context.getLocalizationRegistry_().it;
+  const labels = localization.electricityDashboard;
+  const lookup = {
+    'data di emissione': 1,
+    'anno di riferimento': 2,
+    'mese di riferimento': 3,
+    'quantità consumi f1': 4,
+    'quantità consumi f2': 5,
+    'quantità consumi f3': 6
+  };
+  let aliasArguments = 0;
+  context.getSheetLayout_ = (_sheet, headerAliases) => {
+    assert.equal(headerAliases, localization.headerAliases);
+    aliasArguments += 1;
+    return { headerRow: 1, lookup };
+  };
+  context.getHeaderAliases_ = () => {
+    throw new Error('persisted automation configuration is unavailable');
+  };
+  context.getElectricityDashboardYears_ = () => [];
+
+  assert.equal(context.validateElectricityDashboardSource_({
+    getLastRow: () => 1
+  }, labels, localization.headerAliases), true);
+  assert.equal(aliasArguments, 2);
+
+  let initializationAliases = null;
+  context.validateElectricityDashboardSource_ =
+    (_sheet, _labels, headerAliases) => {
+      initializationAliases = headerAliases;
+      return false;
+    };
+  context.initializeElectricityDashboard_({
+    getSheetByName: (name) => name === 'Luce' ? {} : null
+  }, {
+    locale: 'it',
+    canonical_supplies: ['luce'],
+    sheet_by_supply: { luce: 'Luce' }
+  });
+  assert.equal(JSON.stringify(initializationAliases),
+    JSON.stringify(localization.headerAliases));
+}
+
 function testDashboardValidationPreventsPartialArtifacts() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
@@ -2096,6 +2141,7 @@ function testPreservedChartRangesExtendOnlyFromTheirManagedOrigin() {
 testLocalizedDashboardContracts();
 testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
+testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists();
 testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalSheetCannotAliasAnyConfiguredSource();

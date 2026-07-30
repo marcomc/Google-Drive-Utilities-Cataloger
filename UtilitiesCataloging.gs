@@ -1732,7 +1732,11 @@ function insertBlankRowAt_(sheet, targetRow) {
   sheet.insertRowBefore(targetRow);
 }
 
-function getSheetLayout_(sheet) {
+function getSheetLayout_(sheet, headerAliases) {
+  const issueDateAliases = headerAliases ?
+    headerAliases.issueDate || [] : getHeaderAliases_('issueDate');
+  const supplierAliases = headerAliases ?
+    headerAliases.supplier || [] : getHeaderAliases_('supplier');
   const width = sheet.getLastColumn();
   const rowsToInspect = Math.min(10, Math.max(1, sheet.getLastRow()));
   const rows = sheet.getRange(1, 1, rowsToInspect, width).getDisplayValues();
@@ -1750,8 +1754,8 @@ function getSheetLayout_(sheet) {
         }
       }
     });
-    if (findHeaderIndex_(lookup, getHeaderAliases_('issueDate')) &&
-      findHeaderIndex_(lookup, getHeaderAliases_('supplier'))) {
+    if (findHeaderIndex_(lookup, issueDateAliases) &&
+      findHeaderIndex_(lookup, supplierAliases)) {
       const duplicates = Object.keys(duplicateHeaders);
       if (duplicates.length > 0) {
         throw new Error(

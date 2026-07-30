@@ -46,7 +46,10 @@ function getElectricityDashboardLabels_(locale) {
 }
 
 function initializeElectricityDashboard_(spreadsheet, automationConfig, options) {
-  const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+  const locale = automationConfig.locale || 'en';
+  const localization = getLocalizationRegistry_()[locale];
+  const labels = getElectricityDashboardLabels_(locale);
+  const headerAliases = localization.headerAliases;
   const electricitySheetName = getElectricitySupplySheetName_(automationConfig);
   if (!electricitySheetName) {
     return;
@@ -57,7 +60,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   }
   const displayedDashboard = spreadsheet.getSheetByName(labels.sheet);
   let technical = spreadsheet.getSheetByName(labels.dataSheet);
-  if (!validateElectricityDashboardSource_(electricity, labels)) {
+  if (!validateElectricityDashboardSource_(electricity, labels, headerAliases)) {
     if (displayedDashboard || technical) {
       throw new Error('Electricity dashboard source headers are missing or invalid.');
     }
@@ -139,7 +142,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       options && options.preservedLayouts
     );
     const chartRanges = writeElectricityDashboardData_(managedTechnical,
-      electricity, labels);
+      electricity, labels, headerAliases);
     if (!chartRanges) {
       throw new Error('Electricity dashboard source headers changed during initialization.');
     }
@@ -1025,12 +1028,13 @@ function getElectricityDashboardTechnicalGrid_() {
   };
 }
 
-function hasElectricityDashboardHeaders_(electricity, labels) {
-  const lookup = getSheetLayout_(electricity).lookup;
+function hasElectricityDashboardHeaders_(electricity, labels, headerAliases) {
+  const aliases = getElectricityDashboardHeaderAliases_(headerAliases);
+  const lookup = getSheetLayout_(electricity, aliases).lookup;
   const requiredColumns = [
-    findHeaderIndex_(lookup, getHeaderAliases_('issueDate')),
-    findHeaderIndex_(lookup, getHeaderAliases_('year')),
-    findHeaderIndex_(lookup, getHeaderAliases_('month'))
+    findHeaderIndex_(lookup, aliases.issueDate),
+    findHeaderIndex_(lookup, aliases.year),
+    findHeaderIndex_(lookup, aliases.month)
   ];
   labels.bandAliases.forEach(function (aliases) {
     requiredColumns.push(findDashboardHeader_(lookup, aliases));
@@ -1038,14 +1042,16 @@ function hasElectricityDashboardHeaders_(electricity, labels) {
   return requiredColumns.every(Boolean);
 }
 
-function validateElectricityDashboardSource_(electricity, labels) {
-  if (!hasElectricityDashboardHeaders_(electricity, labels)) {
+function validateElectricityDashboardSource_(electricity, labels,
+  headerAliases) {
+  const aliases = getElectricityDashboardHeaderAliases_(headerAliases);
+  if (!hasElectricityDashboardHeaders_(electricity, labels, aliases)) {
     return false;
   }
-  const layout = getSheetLayout_(electricity);
+  const layout = getSheetLayout_(electricity, aliases);
   const lookup = layout.lookup;
-  const dateColumn = findHeaderIndex_(lookup, getHeaderAliases_('issueDate'));
-  const yearColumn = findHeaderIndex_(lookup, getHeaderAliases_('year'));
+  const dateColumn = findHeaderIndex_(lookup, aliases.issueDate);
+  const yearColumn = findHeaderIndex_(lookup, aliases.year);
   if (electricity.getLastRow() > ELECTRICITY_DASHBOARD_SOURCE_ROWS_ +
     layout.headerRow) {
     throw new Error('Electricity dashboard supports up to ' +
@@ -1059,12 +1065,14 @@ function validateElectricityDashboardSource_(electricity, labels) {
   return true;
 }
 
-function writeElectricityDashboardData_(technical, electricity, labels) {
-  const layout = getSheetLayout_(electricity);
+function writeElectricityDashboardData_(technical, electricity, labels,
+  headerAliases) {
+  const aliases = getElectricityDashboardHeaderAliases_(headerAliases);
+  const layout = getSheetLayout_(electricity, aliases);
   const lookup = layout.lookup;
-  const dateColumn = findHeaderIndex_(lookup, getHeaderAliases_('issueDate'));
-  const yearColumn = findHeaderIndex_(lookup, getHeaderAliases_('year'));
-  const monthColumn = findHeaderIndex_(lookup, getHeaderAliases_('month'));
+  const dateColumn = findHeaderIndex_(lookup, aliases.issueDate);
+  const yearColumn = findHeaderIndex_(lookup, aliases.year);
+  const monthColumn = findHeaderIndex_(lookup, aliases.month);
   const bands = labels.bandAliases.map(function (aliases, index) {
     return { label: 'F' + (index + 1), column: findDashboardHeader_(lookup, aliases) };
   });
@@ -1115,6 +1123,15 @@ function writeElectricityDashboardData_(technical, electricity, labels) {
     monthlyF3: technical.getRange(1, grid.monthlyStarts[2], 13, grid.blockWidth),
     annualBands: technical.getRange(1, grid.annualStart,
       ELECTRICITY_DASHBOARD_MAX_YEARS_ + 1, 4)
+  };
+}
+
+function getElectricityDashboardHeaderAliases_(headerAliases) {
+  return headerAliases || {
+    issueDate: getHeaderAliases_('issueDate'),
+    supplier: getHeaderAliases_('supplier'),
+    year: getHeaderAliases_('year'),
+    month: getHeaderAliases_('month')
   };
 }
 

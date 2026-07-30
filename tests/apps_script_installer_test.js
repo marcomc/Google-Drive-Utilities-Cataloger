@@ -228,23 +228,27 @@ function testSpreadsheetValidationUsesDetectedHeaderRow() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
   });
-  context.getSheetLayout_ = () => ({
-    headerRow: 2,
-    headers: [
-      'Data di emissione',
-      'Fornitore',
-      'Numero fattura',
-      'File sorgente'
-    ]
-  });
-  context.getInstallerLocalization_ = () => ({
+  const localization = {
     headerAliases: {
       issueDate: ['data di emissione'],
       supplier: ['fornitore'],
       identifier: ['numero fattura'],
       sourceFile: ['file sorgente']
     }
-  });
+  };
+  context.getSheetLayout_ = (_sheet, headerAliases) => {
+    assert.equal(headerAliases, localization.headerAliases);
+    return {
+      headerRow: 2,
+      headers: [
+        'Data di emissione',
+        'Fornitore',
+        'Numero fattura',
+        'File sorgente'
+      ]
+    };
+  };
+  context.getInstallerLocalization_ = () => localization;
   context.normalizeHeader_ = (value) => String(value).trim().toLowerCase();
   const sheet = {
     getName: () => 'Acqua',

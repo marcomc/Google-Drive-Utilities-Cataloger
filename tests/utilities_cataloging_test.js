@@ -860,6 +860,33 @@ function testDuplicateNormalizedSheetHeadersAreRejected() {
   );
 }
 
+function testSheetLayoutAcceptsPendingLocaleAliases() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = () => {
+    throw new Error('persisted automation configuration is unavailable');
+  };
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 1,
+    getName: () => 'Luce',
+    getRange: () => ({
+      getDisplayValues: () => [[
+        'Data di emissione',
+        'Fornitore'
+      ]]
+    })
+  };
+
+  const layout = context.getSheetLayout_(sheet, {
+    issueDate: ['data di emissione'],
+    supplier: ['fornitore']
+  });
+
+  assert.equal(layout.headerRow, 1);
+  assert.equal(layout.lookup['data di emissione'], 1);
+  assert.equal(layout.lookup.fornitore, 2);
+}
+
 function testMutationRecoveryStages() {
   function scenario(journal, markedRows) {
     const deletedRows = [];
@@ -2276,6 +2303,7 @@ testReportFieldsCannotInjectExtraLines();
 testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
+testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
