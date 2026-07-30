@@ -93,7 +93,9 @@
   completed row insert, replacement, move, rename, or deletion before the next
   fallible refresh or external mutation. Fallback journal writes must repeat
   the completed-state fields, and recovery must resume from that checkpoint
-  without requiring the old resource to still exist.
+  without requiring the old resource to still exist. Separate the mutation,
+  checkpoint, and downstream refresh error phases; never mark a mutation
+  complete from a catch block that also handles the mutation itself.
 - When rebuilding managed charts, preserve public state beyond the chart
   options map, including source ranges, geometry, chart type, range merge
   strategy, header count, hidden-dimension strategy, null interpolation, and

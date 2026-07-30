@@ -330,15 +330,12 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
   }
   if (state.sheetRowCreated) {
     try {
-      rollbackImportedRow_(state.sheet, state.sheetRow, file);
+      deleteSheetRowAndCheckpoint_(file, function () {
+        rollbackImportedRow_(state.sheet, state.sheetRow, file);
+      });
       state.imported = false;
       state.sheetRowCreated = false;
       state.sheetLink = '';
-      updateMutationJournal_(file.getId(), {
-        stage: 'sheet-row-rolled-back',
-        sheetRowCreated: false,
-        sheetRowDeleted: true
-      });
       refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
@@ -1513,26 +1510,28 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
       sheet, extracted);
   } catch (error) {
+    let deletionCompleted = false;
     try {
-      sheet.deleteRow(targetRow);
-      updateMutationJournal_(file.getId(), {
-        stage: 'sheet-row-rolled-back',
-        sheetRowCreated: false,
-        sheetRowDeleted: true
+      deleteSheetRowAndCheckpoint_(file, function () {
+        sheet.deleteRow(targetRow);
       });
-      refreshElectricityDashboardAfterRollback_({
-        sheet: sheet,
-        electricityDashboardLayouts: electricityDashboardLayouts
-      });
+      deletionCompleted = true;
     } catch (rollbackError) {
-      updateMutationJournal_(file.getId(), {
-        stage: 'sheet-rollback-failed',
-        sheetRowCreated: false,
-        sheetRowDeleted: true
-      });
       error.mutationRollbackIncomplete = true;
       error.message += ' Spreadsheet rollback also failed: ' +
         describeError_(rollbackError);
+    }
+    if (deletionCompleted) {
+      try {
+        refreshElectricityDashboardAfterRollback_({
+          sheet: sheet,
+          electricityDashboardLayouts: electricityDashboardLayouts
+        });
+      } catch (dashboardError) {
+        error.mutationRollbackIncomplete = true;
+        error.message += ' Spreadsheet dashboard rollback also failed: ' +
+          describeError_(dashboardError);
+      }
     }
     throw error;
   }
@@ -1678,7 +1677,7 @@ function findSpreadsheetRowBySourceFile_(sheet, layout, fileId) {
 
 function rollbackImportedRow_(sheet, row, file) {
   if (!sheet || !row) {
-    return;
+    throw new Error('Cannot delete the imported spreadsheet row without its location.');
   }
   const layout = getSheetLayout_(sheet);
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
@@ -1688,6 +1687,41 @@ function rollbackImportedRow_(sheet, row, file) {
     throw new Error('Refusing to delete a spreadsheet row whose source file changed.');
   }
   sheet.deleteRow(row);
+}
+
+function deleteSheetRowAndCheckpoint_(file, deleteRow) {
+  const fileId = file.getId();
+  const properties = PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
+  const raw = properties.getProperty(key);
+  let journal = {};
+  if (raw) {
+    try {
+      journal = JSON.parse(raw);
+    } catch (error) {
+      throw new Error('Mutation journal is malformed for file ID ' + fileId + '.');
+    }
+  }
+  deleteRow();
+  const deletionCheckpoint = {
+    stage: 'sheet-row-rolled-back',
+    sheetRowCreated: false,
+    sheetRowDeleted: true
+  };
+  try {
+    updateMutationJournal_(fileId, deletionCheckpoint);
+  } catch (primaryError) {
+    try {
+      saveMutationJournal_(fileId, Object.assign({}, journal,
+        deletionCheckpoint, { updatedAt: Date.now() }));
+    } catch (fallbackError) {
+      throw new Error(
+        'The spreadsheet row was deleted, but its mutation journal checkpoint ' +
+        'failed: ' + describeError_(primaryError) +
+        ' Fallback checkpoint also failed: ' + describeError_(fallbackError)
+      );
+    }
+  }
 }
 
 function insertBlankRowAt_(sheet, targetRow) {
@@ -2522,26 +2556,9 @@ function rollbackJournalSheetRow_(journal, file) {
     }
     return { unmarkedRowMayRemain: true };
   }
-  sheet.deleteRow(matches[0]);
-  const deletionCheckpoint = {
-    stage: 'sheet-row-rolled-back',
-    sheetRowCreated: false,
-    sheetRowDeleted: true
-  };
-  try {
-    updateMutationJournal_(file.getId(), deletionCheckpoint);
-  } catch (primaryError) {
-    try {
-      saveMutationJournal_(file.getId(), Object.assign({}, journal,
-        deletionCheckpoint, { updatedAt: Date.now() }));
-    } catch (fallbackError) {
-      throw new Error(
-        'The spreadsheet row was deleted, but its mutation journal checkpoint ' +
-        'failed: ' + describeError_(primaryError) +
-        ' Fallback checkpoint also failed: ' + describeError_(fallbackError)
-      );
-    }
-  }
+  deleteSheetRowAndCheckpoint_(file, function () {
+    sheet.deleteRow(matches[0]);
+  });
   refreshElectricityDashboardAfterRollback_({
     sheet: sheet,
     electricityDashboardLayouts: journal.electricityDashboardLayouts || null

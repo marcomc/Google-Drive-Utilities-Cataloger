@@ -90,6 +90,26 @@ function validInvoice() {
   };
 }
 
+function installScriptPropertyStore(context, initialValues = {}) {
+  const store = { ...initialValues };
+  const properties = {
+    getProperties: () => ({ ...store }),
+    getProperty: (key) => Object.prototype.hasOwnProperty.call(store, key) ?
+      store[key] : null,
+    setProperty: (key, value) => {
+      store[key] = value;
+    },
+    setProperties: (values) => Object.assign(store, values),
+    deleteProperty: (key) => {
+      delete store[key];
+    }
+  };
+  context.PropertiesService = {
+    getScriptProperties: () => properties
+  };
+  return { properties, store };
+}
+
 function testFormulaLikeTextIsWrittenLiterally() {
   const context = loadCataloger();
   [
@@ -1462,6 +1482,91 @@ function testCorrectedInvoiceAppendsWithoutBlankRow() {
   assert.equal(moves[0][1], 6);
 }
 
+function createInsertedInvoiceRollbackFixture(deleteRow) {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const sheet = {
+    getName: () => 'Water',
+    getSheetId: () => 7,
+    deleteRow: deleteRow
+  };
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Issue date'],
+    lookup: {}
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.findSpreadsheetRowBySourceFile_ = () => 0;
+  context.getInsertionRow_ = () => 2;
+  context.insertBlankRowAt_ = () => {};
+  context.copyRowStyleAndFormulas_ = () => {};
+  context.refreshImportedSourceLink_ = () => {};
+  context.writeInvoiceRow_ = () => {};
+  context.verifyImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterInvoiceImport_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  return {
+    context,
+    file,
+    journalKey,
+    sheet,
+    store: propertyStore.store
+  };
+}
+
+function testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {
+    throw new Error('row deletion failed');
+  });
+  fixture.context.copyRowStyleAndFormulas_ = () => {
+    throw new Error('style copy failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /style copy failed.*row deletion failed/
+  );
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-insert-planned');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {
+    throw new Error('row deletion failed');
+  });
+  fixture.context.writeInvoiceRow_ = () => {
+    throw new Error('invoice write failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /invoice write failed.*row deletion failed/
+  );
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-marker-written');
+  assert.equal(journal.sheetRowCreated, true);
+  assert.equal(journal.sheetRowDeleted, undefined);
+}
+
 function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   const context = loadCataloger();
   const deletedRows = [];
@@ -1507,6 +1612,31 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   ), /dashboard refresh failed/);
   assert.deepEqual(deletedRows, [2]);
   assert.equal(rollbackRefreshes, 1);
+}
+
+function testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails() {
+  const deletedRows = [];
+  const fixture = createInsertedInvoiceRollbackFixture((row) => {
+    deletedRows.push(row);
+  });
+  fixture.context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+  fixture.context.refreshElectricityDashboardAfterRollback_ = () => {
+    throw new Error('dashboard rollback refresh failed');
+  };
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice()
+    ),
+    /dashboard refresh failed.*dashboard rollback refresh failed/
+  );
+  assert.deepEqual(deletedRows, [2]);
+  const journal = JSON.parse(fixture.store[fixture.journalKey]);
+  assert.equal(journal.stage, 'sheet-row-rolled-back');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, true);
 }
 
 function testDashboardRollbackForcesRegeneration() {
@@ -1577,6 +1707,105 @@ function testRowDeletionIsJournaledBeforeDashboardRollback() {
     sheetRowDeleted: true
   }]]));
   assert.equal(state.rollbackErrors.length, 1);
+}
+
+function testOuterRollbackUsesFullJournalFallbackCheckpoint() {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  const initialJournal = {
+    stage: 'moved',
+    originalName: 'invoice.pdf',
+    sheetName: 'Water',
+    sheetRow: 4,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false
+  };
+  const propertyStore = installScriptPropertyStore(context, {
+    [journalKey]: JSON.stringify(initialJournal)
+  });
+  let deletionAttempts = 0;
+  let primaryCheckpointAttempts = 0;
+  let dashboardRefreshes = 0;
+  context.rollbackImportedRow_ = () => {
+    deletionAttempts += 1;
+  };
+  context.updateMutationJournal_ = () => {
+    primaryCheckpointAttempts += 1;
+    throw new Error('primary checkpoint failed');
+  };
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    dashboardRefreshes += 1;
+  };
+  const state = {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: {},
+    sheetRow: 4
+  };
+
+  context.rollbackProcessingMutations_(file, {}, 'invoice.pdf', state);
+
+  assert.equal(deletionAttempts, 1);
+  assert.equal(primaryCheckpointAttempts, 1);
+  assert.equal(dashboardRefreshes, 1);
+  assert.equal(state.imported, false);
+  assert.equal(state.sheetRowCreated, false);
+  assert.equal(state.sheetLink, '');
+  assert.equal(state.rollbackErrors.length, 0);
+  const journal = JSON.parse(propertyStore.store[journalKey]);
+  assert.equal(journal.stage, 'sheet-row-rolled-back');
+  assert.equal(journal.sheetRowCreated, false);
+  assert.equal(journal.sheetRowDeleted, true);
+  assert.equal(journal.originalName, 'invoice.pdf');
+  assert.equal(journal.sheetName, 'Water');
+  assert.equal(journal.sheetRow, 4);
+  assert.equal(typeof journal.updatedAt, 'number');
+}
+
+function testOuterRollbackDoesNotCheckpointMissingRowLocation() {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
+    context
+  ) + file.getId();
+  const initialJournal = {
+    stage: 'sheet-marker-written',
+    sheetName: 'Water',
+    sheetRow: 4,
+    sheetRowCreated: true
+  };
+  const propertyStore = installScriptPropertyStore(context, {
+    [journalKey]: JSON.stringify(initialJournal)
+  });
+  let checkpointAttempts = 0;
+  context.updateMutationJournal_ = () => {
+    checkpointAttempts += 1;
+  };
+  context.rollbackProcessingMutations_(file, {}, 'invoice.pdf', {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: null,
+    sheetRow: 0
+  });
+
+  assert.equal(checkpointAttempts, 0);
+  const journal = JSON.parse(propertyStore.store[journalKey]);
+  assert.equal(journal.stage, 'sheet-marker-written');
+  assert.equal(journal.sheetRowCreated, true);
+  assert.equal(journal.sheetRowDeleted, undefined);
 }
 
 function testMutationJournalPayloadUsesSeparateChunks() {
@@ -2058,9 +2287,14 @@ testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
+testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
+testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
+testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();
+testOuterRollbackUsesFullJournalFallbackCheckpoint();
+testOuterRollbackDoesNotCheckpointMissingRowLocation();
 testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
