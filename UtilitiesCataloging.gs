@@ -334,6 +334,11 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
       state.imported = false;
       state.sheetRowCreated = false;
       state.sheetLink = '';
+      updateMutationJournal_(file.getId(), {
+        stage: 'sheet-row-rolled-back',
+        sheetRowCreated: false,
+        sheetRowDeleted: true
+      });
       refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
@@ -2495,6 +2500,13 @@ function rollbackJournalSheetRow_(journal, file) {
     return { unmarkedRowMayRemain: false };
   }
   if (matches.length === 0) {
+    if (journal.sheetRowDeleted) {
+      refreshElectricityDashboardAfterRollback_({
+        sheet: sheet,
+        electricityDashboardLayouts: journal.electricityDashboardLayouts || null
+      });
+      return { unmarkedRowMayRemain: false };
+    }
     if (journal.sheetRowCreated) {
       throw new Error('The journaled spreadsheet source marker is missing.');
     }

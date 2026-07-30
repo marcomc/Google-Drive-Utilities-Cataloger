@@ -907,6 +907,18 @@ function testMutationRecoveryStages() {
   }, []);
   assert.throws(markerLostAfterJournal.result, /source marker is missing/);
 
+  const deletedRowAwaitingDashboardRefresh = scenario({
+    stage: 'sheet-row-rolled-back',
+    sheetName: 'Water',
+    sheetRow: 2,
+    sheetRowCreated: false,
+    sheetRowPreexisting: false,
+    sheetRowDeleted: true
+  }, []);
+  assert.equal(deletedRowAwaitingDashboardRefresh.result().unmarkedRowMayRemain,
+    false);
+  assert.equal(deletedRowAwaitingDashboardRefresh.dashboardRefreshes.length, 1);
+
   const existingRow = scenario({
     stage: 'sheet-existing',
     sheetName: 'Water',
@@ -1377,6 +1389,40 @@ function testDashboardRollbackForcesRegeneration() {
     }
   });
   assert.equal(regenerated, 1);
+}
+
+function testRowDeletionIsJournaledBeforeDashboardRollback() {
+  const context = loadCataloger();
+  const journalUpdates = [];
+  const state = {
+    moved: false,
+    renamed: false,
+    imported: true,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    sheetLink: 'https://sheets.test',
+    sheet: {},
+    sheetRow: 4
+  };
+  context.rollbackImportedRow_ = () => {};
+  context.updateMutationJournal_ = (fileId, changes) => {
+    journalUpdates.push([fileId, changes]);
+  };
+  context.refreshElectricityDashboardAfterRollback_ = () => {
+    throw new Error('dashboard refresh failed');
+  };
+
+  context.rollbackProcessingMutations_({ getId: () => 'file-id' }, {}, 'invoice.pdf',
+    state);
+
+  assert.equal(state.sheetRowCreated, false);
+  assert.equal(state.imported, false);
+  assert.equal(JSON.stringify(journalUpdates), JSON.stringify([['file-id', {
+    stage: 'sheet-row-rolled-back',
+    sheetRowCreated: false,
+    sheetRowDeleted: true
+  }]]));
+  assert.equal(state.rollbackErrors.length, 1);
 }
 
 function testMutationJournalPayloadUsesSeparateChunks() {
@@ -1857,6 +1903,7 @@ testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
 testDashboardRollbackForcesRegeneration();
+testRowDeletionIsJournaledBeforeDashboardRollback();
 testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
