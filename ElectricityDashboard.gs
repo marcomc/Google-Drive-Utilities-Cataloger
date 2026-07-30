@@ -73,9 +73,9 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   }
   if (dashboard && Object.keys(automationConfig.sheet_by_supply || {}).some(
     function (supply) {
-      return spreadsheet.getSheetByName(
+      return isSameElectricityDashboardSheet_(spreadsheet.getSheetByName(
         automationConfig.sheet_by_supply[supply]
-      ) === dashboard;
+      ), dashboard);
     })) {
     throw new Error('The electricity dashboard sheet name matches a source sheet.');
   }
@@ -93,9 +93,9 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   }
   if (technical && Object.keys(automationConfig.sheet_by_supply || {}).some(
     function (supply) {
-      return spreadsheet.getSheetByName(
+      return isSameElectricityDashboardSheet_(spreadsheet.getSheetByName(
         automationConfig.sheet_by_supply[supply]
-      ) === technical;
+      ), technical);
     })) {
     throw new Error('The electricity dashboard technical sheet name matches a source sheet.');
   }
@@ -944,13 +944,18 @@ function assertElectricityDashboardTechnicalSheet_(technical, electricity,
   if (!technical) {
     return;
   }
-  if (technical === electricity) {
+  if (isSameElectricityDashboardSheet_(technical, electricity)) {
     throw new Error('The electricity dashboard technical sheet name matches the source sheet.');
   }
   if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
     throw new Error('Refusing to overwrite an unmanaged electricity dashboard technical sheet: ' +
       technical.getName());
   }
+}
+
+function isSameElectricityDashboardSheet_(left, right) {
+  return Boolean(left && right &&
+    left.getSheetId() === right.getSheetId());
 }
 
 function isManagedElectricityDashboardTechnicalSheet_(sheet, labels) {

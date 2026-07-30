@@ -307,7 +307,10 @@ function testDashboardValidationPreventsPartialArtifacts() {
     'consumption quantity f2': 5,
     'consumption quantity f3': 6
   };
-  const source = { getLastRow: () => 10002 };
+  const source = {
+    getLastRow: () => 10002,
+    getSheetId: () => 42
+  };
   const inserted = [];
   context.getSheetLayout_ = () => ({ headerRow: 1, lookup });
   const spreadsheet = {
@@ -319,8 +322,12 @@ function testDashboardValidationPreventsPartialArtifacts() {
   source.getLastRow = () => 2;
   context.getElectricityDashboardYears_ = () => [2026];
   assert.throws(() => context.initializeElectricityDashboard_({
-    getSheetByName: (name) => name === 'Electricity' || name === labels.sheet ?
-      source : null
+    getSheetByName: (name) => {
+      if (name === 'Electricity') {
+        return source;
+      }
+      return name === labels.sheet ? { getSheetId: () => 42 } : null;
+    }
   }, config), /dashboard sheet name matches a source sheet/);
 
   source.getLastRow = () => 10002;
@@ -393,14 +400,12 @@ function testDashboardCreationAttemptsBothCleanupsAfterFailure() {
 function testTechnicalSheetCannotAliasAnyConfiguredSource() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
-  const electricity = {};
-  const water = {};
   const spreadsheet = {
     getSheetByName: (name) => {
       if (name === 'Electricity') {
-        return electricity;
+        return { getSheetId: () => 1 };
       }
-      return name === labels.dataSheet ? water : null;
+      return name === labels.dataSheet ? { getSheetId: () => 2 } : null;
     }
   };
   context.validateElectricityDashboardSource_ = () => true;
@@ -413,8 +418,8 @@ function testTechnicalSheetCannotAliasAnyConfiguredSource() {
 function testDashboardInitializationReconcilesInterruptedBackups() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
-  const source = {};
-  const technical = {};
+  const source = { getSheetId: () => 1 };
+  const technical = { getSheetId: () => 2 };
   const backup = {
     getName: () => 'Electricity dashboard backup 1234567890123',
     getDeveloperMetadata: () => [{
@@ -1644,16 +1649,20 @@ function testTechnicalGridExpansionAndLayoutPreservation() {
 function testTechnicalOwnershipAndCapacityPreflight() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
-  const source = { getName: () => 'Electricity' };
+  const source = {
+    getName: () => 'Electricity',
+    getSheetId: () => 42
+  };
   const unmanaged = {
     getName: () => labels.dataSheet,
+    getSheetId: () => 43,
     getDeveloperMetadata: () => [],
     isSheetHidden: () => false
   };
   assert.throws(() => context.assertElectricityDashboardTechnicalSheet_(
     unmanaged, source, labels), /unmanaged electricity dashboard technical sheet/);
   assert.throws(() => context.assertElectricityDashboardTechnicalSheet_(
-    source, source, labels), /matches the source sheet/);
+    { getSheetId: () => 42 }, source, labels), /matches the source sheet/);
 
   const fullSheet = {
     getMaxRows: () => 100000,
