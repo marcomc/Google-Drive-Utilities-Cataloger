@@ -229,6 +229,32 @@ function testTechnicalSheetCannotAliasAnyConfiguredSource() {
   }), /technical sheet name matches a source sheet/);
 }
 
+function testDashboardInitializationReconcilesInterruptedBackups() {
+  const context = loadDashboard();
+  const labels = context.getElectricityDashboardLabels_('en');
+  const source = {};
+  const technical = {};
+  const backup = {
+    getName: () => 'Electricity dashboard backup 1234567890123'
+  };
+  const deleted = [];
+  const spreadsheet = {
+    getSheetByName: (name) => name === 'Electricity' ? source :
+      name === labels.dataSheet ? technical : null,
+    getSheets: () => [backup],
+    deleteSheet: (sheet) => deleted.push(sheet)
+  };
+  context.validateElectricityDashboardSource_ = () => true;
+  context.assertElectricityDashboardTechnicalSheet_ = () => {};
+  context.assertElectricityDashboardCapacity_ = () => {
+    assert.deepEqual(deleted, [backup]);
+    throw new Error('stop after preflight');
+  };
+  assert.throws(() => context.initializeElectricityDashboard_(spreadsheet, {
+    locale: 'en', sheet_by_supply: { electricity: 'Electricity' }
+  }), /stop after preflight/);
+}
+
 function testTechnicalFormulaRangesUseReservedCapacity() {
   const context = loadDashboard();
   const source = {
@@ -247,11 +273,11 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
   );
   assert.equal(
     context.electricitySumFormula_(source, 'N', 2026, 4),
-    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(IFERROR(VALUE(\'Electricity\'!$G$2:$G$10002),MONTH(\'Electricity\'!$A$2:$A$10002))=4)*\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(IFERROR(IF((VALUE(\'Electricity\'!$G$2:$G$10002)>=1)*(VALUE(\'Electricity\'!$G$2:$G$10002)<=12),VALUE(\'Electricity\'!$G$2:$G$10002),MONTH(\'Electricity\'!$A$2:$A$10002)),MONTH(\'Electricity\'!$A$2:$A$10002))=4)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(
     context.electricityAnnualFormula_(source, 'N', 2026),
-    '=SUMPRODUCT((IFERROR(VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(context.columnLetter_(90), 'CL');
   assert.deepEqual(
@@ -645,6 +671,7 @@ testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalSheetCannotAliasAnyConfiguredSource();
+testDashboardInitializationReconcilesInterruptedBackups();
 testTechnicalFormulaRangesUseReservedCapacity();
 testDashboardCapacityIncludesTemporaryBackup();
 testTechnicalRangesUseTheReservedGrid();

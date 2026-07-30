@@ -13,6 +13,8 @@ const ELECTRICITY_DASHBOARD_BACKUP_ROWS_ =
   ELECTRICITY_DASHBOARD_SOURCE_ROWS_ + 3 * 13 +
   ELECTRICITY_DASHBOARD_MAX_YEARS_ + 2;
 const ELECTRICITY_DASHBOARD_BACKUP_COLUMNS_ = 26;
+const ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ =
+  'Electricity dashboard backup ';
 
 function getElectricityDashboardLabels_(locale) {
   const localization = getLocalizationRegistry_()[locale];
@@ -57,6 +59,7 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     throw new Error('The electricity dashboard technical sheet name matches a source sheet.');
   }
   assertElectricityDashboardTechnicalSheet_(technical, electricity, labels);
+  reconcileElectricityDashboardTechnicalBackups_(spreadsheet);
   assertElectricityDashboardCapacity_(spreadsheet, dashboard, technical);
 
   let managedDashboard = dashboard;
@@ -156,7 +159,7 @@ function getElectricityDashboardTechnicalDataBlocks_(sheet) {
 
 function createElectricityDashboardTechnicalBackup_(spreadsheet, technical) {
   assertElectricityDashboardBackupCapacity_(spreadsheet);
-  const backup = spreadsheet.insertSheet('Electricity dashboard backup ' +
+  const backup = spreadsheet.insertSheet(ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ +
     new Date().getTime());
   try {
     ensureElectricityDashboardGrid_(backup, ELECTRICITY_DASHBOARD_BACKUP_ROWS_,
@@ -178,6 +181,20 @@ function createElectricityDashboardTechnicalBackup_(spreadsheet, technical) {
     }
     throw error;
   }
+}
+
+function reconcileElectricityDashboardTechnicalBackups_(spreadsheet) {
+  spreadsheet.getSheets().filter(function (sheet) {
+    return isElectricityDashboardTechnicalBackup_(sheet);
+  }).forEach(function (backup) {
+    spreadsheet.deleteSheet(backup);
+  });
+}
+
+function isElectricityDashboardTechnicalBackup_(sheet) {
+  return sheet && typeof sheet.getName === 'function' &&
+    new RegExp('^' + ELECTRICITY_DASHBOARD_BACKUP_PREFIX_ + '\\d+$')
+      .test(sheet.getName());
 }
 
 function restoreElectricityDashboardTechnicalBackup_(backup, technical) {
@@ -743,10 +760,10 @@ function electricitySumFormula_(source, bandColumn, year, month) {
     ':$' + source.date + '$' + source.lastRow;
   const monthRange = source.sheet + '$' + source.month + '$' + source.firstDataRow +
     ':$' + source.month + '$' + source.lastRow;
-  const effectiveYear = 'IFERROR(VALUE(' + yearRange + ')' + source.separator +
-    'YEAR(' + dateRange + '))';
-  const effectiveMonth = 'IFERROR(VALUE(' + monthRange + ')' + source.separator +
-    'MONTH(' + dateRange + '))';
+  const effectiveYear = electricityBoundedValueOrDatePartFormula_(yearRange,
+    dateRange, 'YEAR', 1900, 9999, source.separator);
+  const effectiveMonth = electricityBoundedValueOrDatePartFormula_(monthRange,
+    dateRange, 'MONTH', 1, 12, source.separator);
   return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*(' + effectiveMonth +
     '=' + month + ')*' + bandRange + ')';
 }
@@ -758,9 +775,18 @@ function electricityAnnualFormula_(source, bandColumn, year) {
     ':$' + source.year + '$' + source.lastRow;
   const dateRange = source.sheet + '$' + source.date + '$' + source.firstDataRow +
     ':$' + source.date + '$' + source.lastRow;
-  const effectiveYear = 'IFERROR(VALUE(' + yearRange + ')' + source.separator +
-    'YEAR(' + dateRange + '))';
+  const effectiveYear = electricityBoundedValueOrDatePartFormula_(yearRange,
+    dateRange, 'YEAR', 1900, 9999, source.separator);
   return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*' + bandRange + ')';
+}
+
+function electricityBoundedValueOrDatePartFormula_(valueRange, dateRange,
+  datePart, minimum, maximum, separator) {
+  const parsedValue = 'VALUE(' + valueRange + ')';
+  const fallback = datePart + '(' + dateRange + ')';
+  return 'IFERROR(IF((' + parsedValue + '>=' + minimum + ')*(' +
+    parsedValue + '<=' + maximum + ')' + separator + parsedValue + separator +
+    fallback + ')' + separator + fallback + ')';
 }
 
 function getElectricitySupplySheetName_(automationConfig) {

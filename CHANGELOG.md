@@ -79,6 +79,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Apply the same numeric-or-issue-date fallback to monthly aggregation, retain
   pre-import chart ranges in mutation journals for crash recovery, and reject
   technical dashboard tabs that alias any configured supply source.
+- Reconcile orphaned temporary technical-data snapshots before dashboard
+  preflight, and reject out-of-range numeric year or month metadata before
+  falling back to the issue date.
 
 ## [0.2.0] - 2026-07-23 - Gemini 3.6 Flash
 
