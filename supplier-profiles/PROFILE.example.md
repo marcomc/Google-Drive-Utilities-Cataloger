@@ -24,6 +24,8 @@ verified_on: YYYY-MM-DD
 - After classification, inspect the documented sections in order and reconcile totals.
 - A structural mismatch is evidence for review or a pending proposal, never a
   reason to invent data.
+- Keep identifiers and all other non-quantitative document values as literal
+  text, including digit-only values and leading zeroes.
 
 ## Maintenance
 

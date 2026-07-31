@@ -157,6 +157,17 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(normalized.contract_number, 'CONTRACT-2');
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
   assert.equal(normalized.reference_month, '07');
+  assert.equal(typeof normalized.reference_month, 'string');
+
+  const digitOnlyIdentifiers = context.normalizeExtraction_({
+    ...raw,
+    identifier: 16657014,
+    contract_number: 123456,
+    customer_code: 53009296
+  });
+  assert.equal(typeof digitOnlyIdentifiers.identifier, 'string');
+  assert.equal(typeof digitOnlyIdentifiers.contract_number, 'string');
+  assert.equal(typeof digitOnlyIdentifiers.customer_code, 'string');
 
   const energygas = context.normalizeExtraction_({
     ...raw,
@@ -994,6 +1005,8 @@ function testPromptKeepsHeadersScopedBySupply() {
     /"customer_code": "printed customer\/client\/account code \(ID UTENTE is a customer code\), or null"/);
   assert.match(prompt, /Never substitute one for the other/);
   assert.match(prompt, /one of contract_number or customer_code is sufficient/);
+  assert.match(prompt, /Preserve every character and leading zero/);
+  assert.match(prompt, /two-character text value in the exact format mm/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);

@@ -76,6 +76,12 @@ manual review.
 - Add a working Drive link in the `Source file` column.
 - Import only data present in the document and existing sheet headers; never
   invent columns, consumption values, costs, or tax rates.
+- Store identifiers, customer/account codes, supply-point codes, names,
+  descriptions, dates, and other non-quantitative values as literal text even
+  when they contain only digits. Preserve leading zeroes and every printed
+  character; use numbers only for quantities, money, rates, and measurements.
+- Store the reference month as the two-character text value `mm` (`01` through
+  `12`), never as an unpadded or numeric value.
 - Keep a printed contract number and customer/client code in separate destination
   columns. Never substitute one for the other.
 - For invoice ownership, accept either a printed contract number or a printed
