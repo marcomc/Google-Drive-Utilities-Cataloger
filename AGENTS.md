@@ -89,6 +89,11 @@
 - Journal cross-service mutations before changing Sheets or Drive. Persist the
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
+- When a downstream import fails after validated extraction, preserve a labeled
+  non-imported extraction snapshot, failure stage, and rollback status in the
+  configured-recipient report without adding document data to Cloud logs.
+  Derive rollback completion from the actual remaining recoverable mutations,
+  and cover complete, incomplete, and recovery-failure report states.
 - Treat every Sheets/Drive mutation as a state-machine boundary: persist a
   completed row insert, replacement, move, rename, or deletion before the next
   fallible refresh or external mutation. Fallback journal writes must repeat
