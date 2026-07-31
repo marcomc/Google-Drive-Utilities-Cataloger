@@ -62,6 +62,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the extracted numeric totals happen to reconcile.
 - Fail closed when an installer-managed supplier-profile template was renamed
   or moved, preserving the recorded resource identity rather than replacing it.
+- Recognize the Italian `Codice contratto` label as an optional ownership
+  identifier when a customer code is present, while preserving VAT ambiguities
+  in both grammatical genders as blocking conditions.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

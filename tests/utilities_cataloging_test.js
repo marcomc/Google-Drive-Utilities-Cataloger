@@ -330,6 +330,10 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ['ID utente missing from the document.']
   };
   assert.equal(context.validateExtraction_(onlyContractNumber).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Codice contratto assente nel documento.']
+  }).valid, true);
 
   const noOwnershipIdentifier = {
     ...raw,
@@ -373,6 +377,10 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_({
     ...onlyCustomerCode,
     problems: ['Non è chiaro se le voci di dettaglio siano comprensive di IVA.']
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ["Non è chiara l'inclusione dell'IVA."]
   }).valid, false);
 
   const duplicateSheetValues = {
