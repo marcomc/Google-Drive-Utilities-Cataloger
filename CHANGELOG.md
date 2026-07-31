@@ -69,6 +69,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   in a failed-import report instead of stopping at the first discrepancy.
 - Persist a successful outcome before generating optional report links, and
   recognize Italian contract-code labels under either installation locale.
+- Reject incomplete supplier-profile workspace state and include nonfatal
+  operator links before serializing the durable notification body.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

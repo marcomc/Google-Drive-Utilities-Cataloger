@@ -158,7 +158,6 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
     saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
     results.push(result);
-    persistCatalogResult_(state, file, rootFolder, result);
     try {
       addOperatorLinksToResult_(result, rootFolder);
     } catch (error) {
@@ -166,6 +165,7 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
         describeFileForLog_(file), { reason: String(error.message || error) }
       ));
     }
+    persistCatalogResult_(state, file, rootFolder, result);
     logCatalogResult_(file, result);
   });
 

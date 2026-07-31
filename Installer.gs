@@ -808,7 +808,10 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
   const nameKey = key + 'Name';
   const parentKey = key + 'ParentId';
   const statusKey = key + 'Status';
-  if (!state || state[statusKey] === undefined) {
+  const isNewTemplateFolder = state && key === 'templateFolder' &&
+    state.profileRootStatus === 'managed' &&
+    state.templateFolderStatus === undefined;
+  if (!state || isNewTemplateFolder) {
     if (matches.length > 0) {
       throw new Error('The existing supplier profile folder is not installer-managed; ' +
         'refusing to adopt it.');
@@ -819,8 +822,10 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
     state[statusKey] = 'planned';
     state[idKey] = '';
     saveSupplierProfileWorkspaceState_(properties, state);
-  } else {
+  } else if (state[statusKey] !== undefined) {
     assertInstallerSupplierProfileFolderState_(state, parent, name, key);
+  } else {
+    throw new Error('The supplier profile workspace state is incomplete.');
   }
   if (state[statusKey] === 'managed') {
     if (matches.length !== 1 || matches[0].getId() !== state[idKey]) {
