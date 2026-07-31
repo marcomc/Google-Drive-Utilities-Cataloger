@@ -61,6 +61,15 @@ function getItalianLocalization_() {
       '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
       '(?:numero\\s+(?:di\\s+)?contratto|contract(?:\\s+number)?|id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|codice\\s+(?:cliente|utente))'
     ]),
+    supplierFieldDefaults: Object.freeze([
+      Object.freeze({
+        supplier: 'ILIAD',
+        supply_type: 'Internet',
+        header: "Spese d'incasso",
+        value: 0,
+        absencePattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b"
+      })
+    ]),
     supplierProfiles: Object.freeze({
       folder: 'Profili fornitori', pendingFolder: 'In attesa di approvazione',
       templateFolder: '_modello', profileFile: 'PROFILO.md',

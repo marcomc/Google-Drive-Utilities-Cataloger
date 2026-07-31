@@ -34,6 +34,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Ignore a reported missing secondary identifier when the other ownership
   identifier is present, while continuing to block invoices with neither a
   customer code nor a contract number.
+- Apply the reviewed ILIAD Internet default of numeric `0.00` for absent
+  `Spese d'incasso`/`Collection charges`, while preserving any printed amount.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

@@ -137,9 +137,10 @@ function testFormulaLikeTextIsWrittenLiterally() {
 function testExtractionSchemaAndCalendarValidation() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
-    canonical_suppliers: ['SUPPLIER'],
+    locale: 'it',
+    canonical_suppliers: ['SUPPLIER', 'ILIAD', 'Energygas Italia'],
     supplier_aliases: {},
-    canonical_supplies: ['Water'],
+    canonical_supplies: ['Water', 'Internet'],
     supply_aliases: {},
     address_rules: [],
     address_missing_type: 'import',
@@ -168,6 +169,36 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(typeof digitOnlyIdentifiers.identifier, 'string');
   assert.equal(typeof digitOnlyIdentifiers.contract_number, 'string');
   assert.equal(typeof digitOnlyIdentifiers.customer_code, 'string');
+
+  const iliadDefault = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+  assert.equal(JSON.stringify(iliadDefault.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 0 }
+  ]));
+  assert.deepEqual(iliadDefault.problems, []);
+
+  const iliadPrintedCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{ header: "Spese d'incasso", value: 1.25 }]
+  });
+  assert.equal(JSON.stringify(iliadPrintedCharge.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 1.25 }
+  ]));
+
+  const iliadEmptyCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  assert.equal(iliadEmptyCharge.sheet_values[0].value, 0);
 
   const energygas = context.normalizeExtraction_({
     ...raw,
@@ -1014,6 +1045,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt, /recurring Iliad Internet charges/);
+  assert.match(prompt, /localized supplier field defaults/);
+  assert.match(prompt, /numeric value 0/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);

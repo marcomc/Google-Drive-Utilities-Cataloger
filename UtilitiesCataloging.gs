@@ -1010,7 +1010,9 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year/month.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each printed line item in sheet_values using its exact header. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
-    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a field is genuinely not printed or not applicable, leave it absent and add a concise problem explaining that observation; never infer or copy it from another invoice.',
+    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a field is genuinely not printed or not applicable, leave it absent and add a concise problem explaining that observation; never infer or copy it from another invoice. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, return that exact target header with numeric value 0. If a nonzero amount is printed, return the printed amount instead; never use a previous invoice to fill it.',
+    'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
+      JSON.stringify(localization.supplierFieldDefaults || []) + '.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
@@ -1131,7 +1133,42 @@ function normalizeExtraction_(extracted) {
   applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ? normalized.problems : [];
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
+  applySupplierFieldDefaults_(normalized);
   return normalized;
+}
+
+function applySupplierFieldDefaults_(extracted) {
+  const defaults = getLocalization_().supplierFieldDefaults || [];
+  defaults.forEach(function (defaultValue) {
+    if (!defaultValue || defaultValue.supplier !== extracted.supplier ||
+      defaultValue.supply_type !== extracted.supply_type ||
+      !defaultValue.header) {
+      return;
+    }
+    const matching = extracted.sheet_values.filter(function (entry) {
+      return entry && normalizeHeader_(entry.header) ===
+        normalizeHeader_(defaultValue.header);
+    });
+    if (matching.length === 0) {
+      extracted.sheet_values.push({
+        header: defaultValue.header,
+        value: defaultValue.value
+      });
+    } else if (matching[0].value === null || matching[0].value === undefined ||
+      (typeof matching[0].value === 'string' && !matching[0].value.trim())) {
+      matching[0].value = defaultValue.value;
+    }
+    // A model note that merely reports this reviewed absence must not turn a
+    // safe, documented zero into a blocking extraction failure.
+    if (defaultValue.absencePattern) {
+      const absencePattern = new RegExp(defaultValue.absencePattern, 'i');
+      extracted.problems = extracted.problems.filter(function (problem) {
+        return !(absencePattern.test(String(problem)) &&
+          /(?:assente|mancante|non\s+presente|missing|absent|not\s+present)/i
+            .test(String(problem)));
+      });
+    }
+  });
 }
 
 function normalizeSheetValues_(sheetValues) {
