@@ -12,8 +12,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Preserve a successfully extracted invoice snapshot when a later Drive or
   spreadsheet operation fails, and label it as available but not imported in
   the configured-recipient email report.
-- Include the failed processing phase, extraction-reconciliation outcome, and
-  rollback state in error reports without adding invoice data to Cloud logs.
+- Include the failed processing phase, extraction-reconciliation outcome,
+  rollback state, and formula-total expected/observed values in error reports
+  without adding invoice data to Cloud logs.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

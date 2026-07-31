@@ -622,10 +622,13 @@ function testEmailReportIncludesSoftwareVersion() {
     ),
     true
   );
+  assert.match(report, /Failure stage: not available/);
+  assert.match(report, /Persistence: not available/);
 }
 
 function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
-  const events = [];
+  const cloudPayloads = [];
+  const consoleErrors = [];
   const extraction = validInvoice();
   const file = {
     getId: () => 'file-id',
@@ -633,7 +636,10 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     getSize: () => 10,
     getUrl: () => 'https://drive.test/file-id'
   };
-  const context = loadCataloger();
+  const context = loadCataloger({
+    Logger: { log: (payload) => cloudPayloads.push(payload) },
+    console: { error: (message) => consoleErrors.push(message) }
+  });
   vm.runInContext(
     fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
     context,
@@ -651,14 +657,20 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   context.getDestinationFolder_ = () => ({ folder: {}, path: 'Water/2026' });
   context.getDestinationCollision_ = () => ({ status: 'none' });
   context.importUtilityInvoiceToSheet_ = () => {
-    throw new Error('Spreadsheet formula total verification failed for: Total cost');
+    const error = new Error('Spreadsheet formula total verification failed for: Total cost');
+    error.formulaVerification = {
+      column: 'Total cost',
+      expected: 14.64,
+      actual: 12.34,
+      tolerance: 0.02
+    };
+    throw error;
   };
   context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
     state.rollbackErrors = [];
   };
   context.describeError_ = (error) => error.message;
   context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
-  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
   context.attachMutationJournal_ = (result) => result;
 
   const result = context.processIntakeFile_(file, {}, 'policy');
@@ -675,15 +687,87 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(report, /Supply \/ supplier: Water \/ SUPPLIER/);
   assert.match(report, /Total: 14\.64 EUR/);
   assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
-  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{
+  assert.match(report,
+    /Formula total verification: column Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
+  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
+    message: 'catalog-file-processing-error',
+    component: 'drive-utilities-cataloger',
+    applicationVersion: '0.3.1',
     event: 'catalog-file-processing-error',
-    details: {
-      fileId: 'file-id',
-      errorType: 'Error',
-      errorCategory: 'spreadsheet',
-      failureStage: 'spreadsheet-write-and-verify'
-    }
+    fileId: 'file-id',
+    errorType: 'Error',
+    errorCategory: 'spreadsheet',
+    failureStage: 'spreadsheet-write-and-verify'
   }]);
+  assert.deepEqual(consoleErrors, [
+    'Catalog file processing failed for file ID file-id (spreadsheet).'
+  ]);
+  const cloudText = JSON.stringify({ cloudPayloads, consoleErrors });
+  [
+    extraction.supplier,
+    extraction.identifier,
+    extraction.period_start,
+    String(extraction.total),
+    '12.34',
+    'Spreadsheet formula total verification failed for: Total cost'
+  ].forEach((sensitiveValue) => {
+    assert.equal(cloudText.includes(sensitiveValue), false);
+  });
+
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/it.gs'), 'utf8'),
+    context,
+    { filename: 'locales/it.gs' }
+  );
+  context.getLocalization_ = () => context.getItalianLocalization_();
+  const italianReport = context.formatResult_(result);
+  assert.match(italianReport, /Fase errore: Scrittura e verifica riga del foglio/);
+  assert.match(italianReport, /Dati estratti da Gemini: disponibili, non importati/);
+  assert.match(italianReport,
+    /Stato importazione: nessun import persistito; rollback completato/);
+  assert.match(italianReport,
+    /Verifica quadratura: superata: 14\.64 EUR \/ 14\.64 EUR/);
+  assert.match(italianReport,
+    /Verifica formula totale: colonna Total cost; atteso 14\.64 EUR; riscontrato 12\.34 EUR; tolleranza 0\.02 EUR/);
+
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = ['Spreadsheet rollback failed: service unavailable'];
+  };
+  const incompleteRollbackResult = context.processIntakeFile_(file, {}, 'policy');
+  assert.equal(incompleteRollbackResult.rollbackCompleted, false);
+  assert.equal(incompleteRollbackResult.keepMutationJournal, true);
+  assert.match(context.formatResult_(incompleteRollbackResult),
+    /Stato importazione: rollback incompleto; verifica manuale necessaria/);
+}
+
+function testPreExtractionErrorReportKeepsDataUnavailable() {
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const context = loadCataloger({ Logger: { log: () => {} } });
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.sha256ForFile_ = () => {
+    throw new Error('Gemini network error');
+  };
+  context.attachMutationJournal_ = (result) => result;
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+  const report = context.formatResult_(result);
+
+  assert.equal(result.status, 'ERROR');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.extracted)), {});
+  assert.equal(result.extractionValidated, false);
+  assert.equal(result.failureStage, 'extracting-document-data');
+  assert.match(report, /Gemini extracted data: not available/);
+  assert.match(report, /Reconciliation check: not applicable/);
 }
 
 function testGenericRateLimitStaysOnDeveloperApi() {
@@ -1308,6 +1392,53 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   assert.ok(calls.includes('queue-report'));
   assert.ok(calls.includes('save-state'));
   assert.ok(calls.includes('log-recovered'));
+}
+
+function testAccessibleRecoveryFailureRequiresManualReview() {
+  const context = loadCataloger();
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const alertPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX', context
+  );
+  const fileId = 'recoverable-file-id';
+  const store = {
+    [`${journalPrefix}${fileId}`]: JSON.stringify({
+      originalName: 'original.pdf',
+      stage: 'sheet-written'
+    })
+  };
+  const file = {
+    getId: () => fileId,
+    getName: () => 'original.pdf',
+    getUrl: () => 'https://drive.test/recoverable-file-id'
+  };
+  const properties = {
+    getProperty: (key) => store[key] || '',
+    setProperty: (key, value) => {
+      store[key] = value;
+    }
+  };
+  context.PropertiesService = { getScriptProperties: () => properties };
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => {
+    throw new Error('source marker is missing');
+  };
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.recoverMutationJournalForFile_(
+    {}, fileId, store[`${journalPrefix}${fileId}`], {}, properties
+  );
+
+  assert.equal(result.status, 'ERROR');
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /spreadsheet row may remain/);
+  assert.ok(store[`${alertPrefix}${fileId}`]);
 }
 
 function testFormulaAndStyleCopySources() {
@@ -1998,8 +2129,9 @@ function testFormulaTotalMustReconcileWithExtraction() {
   const extracted = validInvoice();
   extracted.sheet_values = [];
 
-  assert.throws(
-    () => context.verifyImportedRow_(
+  let error = null;
+  try {
+    context.verifyImportedRow_(
       sheet,
       3,
       {
@@ -2009,9 +2141,17 @@ function testFormulaTotalMustReconcileWithExtraction() {
       },
       { getUrl: () => 'https://drive.test/file-id' },
       extracted
-    ),
-    /formula total verification failed/
-  );
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(error.message, /formula total verification failed/);
+  assert.deepEqual(JSON.parse(JSON.stringify(error.formulaVerification)), {
+    column: 'Cost total',
+    expected: 14.64,
+    actual: 42.55,
+    tolerance: 0.02
+  });
 }
 
 function testPendingReportOutboxRetriesAndRepairsMalformedEntries() {
@@ -2359,6 +2499,7 @@ testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
+testPreExtractionErrorReportKeepsDataUnavailable();
 testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
@@ -2371,6 +2512,7 @@ testMutationRecoveryStages();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
+testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();

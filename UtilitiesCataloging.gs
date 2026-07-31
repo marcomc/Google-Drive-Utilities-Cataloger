@@ -178,6 +178,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     extracted: null,
     extractionValidated: false,
     failureStage: 'extracting-document-data',
+    formulaVerification: null,
     rollbackErrors: []
   };
 
@@ -298,6 +299,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     );
   } catch (error) {
     rollbackProcessingMutations_(file, rootFolder, originalName, state);
+    state.formulaVerification = error.formulaVerification || null;
     if (error.mutationRollbackIncomplete) {
       state.rollbackErrors.push(
         'A spreadsheet row may require journal recovery.'
@@ -1995,14 +1997,19 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     }
   });
 
-  if (totalColumn && rowFormulas[totalColumn - 1] &&
-    !sheetValuesMatch_(
-      sheet.getRange(row, totalColumn).getValue(),
-      extracted.total,
-      extracted.issue_date
-    )) {
-    throw new Error('Spreadsheet formula total verification failed for: ' +
-      layout.headers[totalColumn - 1]);
+  if (totalColumn && rowFormulas[totalColumn - 1]) {
+    const actualTotal = sheet.getRange(row, totalColumn).getValue();
+    if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date)) {
+      const error = new Error('Spreadsheet formula total verification failed for: ' +
+        layout.headers[totalColumn - 1]);
+      error.formulaVerification = {
+        column: layout.headers[totalColumn - 1],
+        expected: extracted.total,
+        actual: actualTotal,
+        tolerance: CONFIG.MONEY_TOLERANCE
+      };
+      throw error;
+    }
   }
 
   const firstDataRow = layout.headerRow + 1;
@@ -2781,7 +2788,8 @@ function buildErrorResult_(file, problem, action, originalName, state) {
     sheetLink: reached.sheetLink || '',
     failureStage: reached.failureStage || '',
     extractionValidated: reached.extractionValidated === true,
-    rollbackCompleted: rollbackProblems.length === 0,
+    rollbackCompleted: rollbackProblems.length === 0 && changes.length === 0,
+    formulaVerification: reached.formulaVerification || null,
     actions: actions,
     problem: problem + (rollbackProblems.length > 0 ?
       ' ' + rollbackProblems.join(' ') : ''),
@@ -2980,9 +2988,10 @@ function formatResult_(result) {
     labels.failureStage + ': ' + localizeFailureStage_(result.failureStage, labels),
     labels.extractedData + ': ' + (extractedDataAvailable ?
       labels.availableNotImported : labels.notAvailable),
-    labels.persistence + ': ' + (result.rollbackCompleted ?
-      labels.rollbackCompleted : labels.rollbackRequiresManualReview)
-  ] : [];
+    labels.persistence + ': ' + (result.rollbackCompleted === true ?
+      labels.rollbackCompleted : result.rollbackCompleted === false ?
+        labels.rollbackRequiresManualReview : labels.notAvailable)
+  ].concat(formatFormulaVerification_(result.formulaVerification, labels)) : [];
   const issue = [
     result.problem || labels.noIssue,
     result.recommendedAction || '',
@@ -3024,6 +3033,27 @@ function formatResult_(result) {
 function localizeFailureStage_(failureStage, labels) {
   const stages = labels.failureStages || {};
   return stages[failureStage] || failureStage || labels.notAvailable;
+}
+
+function formatFormulaVerification_(verification, labels) {
+  if (!verification) {
+    return [];
+  }
+  return [
+    labels.formulaTotalDetails + ': ' +
+      labels.formulaColumn + ' ' + oneLineReportText_(verification.column || labels.notAvailable) +
+      '; ' + labels.expectedValue + ' ' +
+      formatFormulaVerificationAmount_(verification.expected, labels) +
+      '; ' + labels.observedValue + ' ' +
+      formatFormulaVerificationAmount_(verification.actual, labels) +
+      '; ' + labels.tolerance + ' ' +
+      formatFormulaVerificationAmount_(verification.tolerance, labels)
+  ];
+}
+
+function formatFormulaVerificationAmount_(value, labels) {
+  return typeof value === 'number' && isFinite(value) ?
+    value.toFixed(2) + ' EUR' : oneLineReportText_(value || labels.notAvailable);
 }
 
 function oneLineReportText_(value) {

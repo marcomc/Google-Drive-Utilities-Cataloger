@@ -244,9 +244,13 @@ retried later from the durable outbox.
 When a later Drive or spreadsheet step fails after Gemini has returned a valid
 extraction, the configured-recipient email preserves that extracted snapshot
 as **available, not imported**. It also names the failed phase, confirms
-whether the extraction reconciliation passed, and reports rollback state. The
-corresponding Cloud Logging event carries only the opaque file ID, error
-category, and phase; it never includes extracted values.
+whether the extraction reconciliation passed, and reports rollback state. A
+formula-total mismatch also reports the formula column, expected value, observed
+value, and tolerance so the spreadsheet template can be diagnosed after the
+rollback. The
+corresponding Cloud Logging event carries the opaque file ID, error type and
+category, failure stage, and standard event/component/version metadata; it
+never includes extracted values.
 
 Apps Script can take a short time to display log entries. For a reliable view,
 open **View in Cloud Logging** from an execution, or query the linked Cloud
