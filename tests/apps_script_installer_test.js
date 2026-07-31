@@ -247,6 +247,7 @@ function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
   context.bootstrapCatalogerInstallation({});
 
   assert.deepEqual(operations, [
+    'installation-supplier-profile-initialization',
     'installation-spreadsheet-initialization',
     'spreadsheet',
     'installation-bootstrap'

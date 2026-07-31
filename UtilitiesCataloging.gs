@@ -613,7 +613,7 @@ function getManualRetryUrl_() {
 }
 
 function addOperatorLinksToResult_(result, rootFolder) {
-  result.retryUrl = getManualRetryUrl_();
+  result.retryUrl = result.status === 'ERROR' ? getManualRetryUrl_() : '';
   result.supplierProfilesUrl = getSupplierProfilesFolderUrl_(rootFolder);
   return result;
 }

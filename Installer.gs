@@ -22,9 +22,12 @@ function bootstrapCatalogerInstallation(options) {
     properties.getProperty(CONFIG.PROPERTY_KEYS.SPREADSHEET_ID) : '';
   const rootFolder = DriveApp.getFolderById(validated.rootFolderId);
   const policyFile = ensureInstallerPolicyFile_(rootFolder, validated.agentsPolicy);
-  ensureInstallerSupplierProfileTemplate_(
-    rootFolder, validated.automationConfig.locale || 'en'
-  );
+  withCatalogLifecycleLock_('installation-supplier-profile-initialization',
+    function () {
+      return ensureInstallerSupplierProfileTemplate_(
+        rootFolder, validated.automationConfig.locale || 'en'
+      );
+    });
   const spreadsheet = withCatalogLifecycleLock_(
     'installation-spreadsheet-initialization', function () {
       return ensureInstallerSpreadsheet_(
@@ -747,6 +750,15 @@ function getSupplierProfileTemplateState_(properties) {
   }
   if (!state || typeof state !== 'object' || Array.isArray(state)) {
     throw new Error('The supplier profile template state is malformed.');
+  }
+  if (['planned', 'managed', 'updating'].indexOf(state.status) < 0 ||
+    ['rootFolderId', 'templateFolderId', 'locale', 'fileName'].some(
+      function (key) { return typeof state[key] !== 'string' || !state[key]; }
+    ) || (state.status !== 'planned' &&
+      (typeof state.fileId !== 'string' || !state.fileId)) ||
+    (state.status === 'planned' &&
+      (typeof state.targetContent !== 'string' || !state.targetContent))) {
+    throw new Error('The supplier profile template state is incomplete.');
   }
   return state;
 }
