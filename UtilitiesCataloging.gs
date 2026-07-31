@@ -1433,7 +1433,8 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem) {
 function isInformationalTaxInclusionProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
   if (!isStandaloneInformationalProblem_(text) ||
-    !/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text)) {
+    !/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text) ||
+    /\b(?:unclear|uncertain|unknown|ambiguous|cannot|can't)\b|\bnot\s+(?:clear|known|specified)\b|\b(?:non\s+)?(?:chiaro|incerto|ambiguo)\b/.test(text)) {
     return false;
   }
   const values = [

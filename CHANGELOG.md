@@ -58,6 +58,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Keep the reconciled invoice total authoritative when a supplementary
   `sheet_values` entry conflicts with it.
 - Preserve `false` boolean values in failed-import discrepancy reports.
+- Keep an explicit uncertainty about whether VAT is included blocking even if
+  the extracted numeric totals happen to reconcile.
+- Fail closed when an installer-managed supplier-profile template was renamed
+  or moved, preserving the recorded resource identity rather than replacing it.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

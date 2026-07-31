@@ -370,6 +370,10 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ['IVA inclusa nei dettagli. Il periodo di fatturazione è ambiguo.']
   };
   assert.equal(context.validateExtraction_(mixedVatProblem).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Non è chiaro se le voci di dettaglio siano comprensive di IVA.']
+  }).valid, false);
 
   const duplicateSheetValues = {
     ...raw,

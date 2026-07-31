@@ -652,6 +652,10 @@ function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
   if (matches.length > 1) {
     throw new Error('More than one supplier profile template exists.');
   }
+  if (matches.length === 0 && state && state.fileId) {
+    throw new Error('The installer-managed supplier profile template is missing ' +
+      'or was moved; refusing to create a replacement.');
+  }
   if (matches.length === 1) {
     return reconcileInstallerSupplierProfileTemplate_(matches[0], rootFolder,
       templateFolder, locale, names.templateFile, template, properties, state);

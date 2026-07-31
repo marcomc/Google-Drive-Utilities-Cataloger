@@ -328,6 +328,33 @@ function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
   assert.equal(state.content, fixture.template);
 }
 
+function testMissingManagedSupplierProfileTemplateIsNotReplaced() {
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const fixture = createSupplierProfileTemplateFixture(undefined, {
+    status: 'managed',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: 'template-file-id',
+    content: template
+  });
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /missing or was moved/
+  );
+  assert.deepEqual(fixture.writes, []);
+}
+
 function testSupplierProfileWorkspaceRejectsUnmanagedFoldersAndJournalsCreation() {
   const unmanaged = createSupplierProfileWorkspaceFixture(true);
   assert.throws(
@@ -846,6 +873,7 @@ testBootstrapInitializesSpreadsheetUnderLifecycleLock();
 testSupplierProfileTemplatePreservesManualContent();
 testSupplierProfileTemplateCreationAndRecoveryAreJournaled();
 testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
+testMissingManagedSupplierProfileTemplateIsNotReplaced();
 testSupplierProfileWorkspaceRejectsUnmanagedFoldersAndJournalsCreation();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
