@@ -77,7 +77,7 @@ function getItalianLocalization_() {
       supplierKey: 'fornitore'
     }),
     supplierProfileTemplate: Object.freeze([
-      '---', 'stato: approvato', 'fornitore: NOME FORNITORE',
+      '---', 'managed_by: Google Drive Utilities Cataloger', 'stato: approvato', 'fornitore: NOME FORNITORE',
       'forniture: [fornitura]', 'verificato_il: YYYY-MM-DD', '---', '',
       '# Profilo fornitore: NOME FORNITORE', '', '## Fonti', '',
       '- Sito ufficiale: <https://example.invalid/>',

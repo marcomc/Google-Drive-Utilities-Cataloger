@@ -36,6 +36,83 @@ function loadInstaller(fetchImplementation) {
   return context;
 }
 
+function iteratorFor(items) {
+  let index = 0;
+  return {
+    hasNext: () => index < items.length,
+    next: () => items[index++]
+  };
+}
+
+function createSupplierProfileTemplateFixture(initialContent, initialState) {
+  const stored = initialState ? {
+    SUPPLIER_PROFILE_TEMPLATE_STATE: JSON.stringify(initialState)
+  } : {};
+  const writes = [];
+  const files = [];
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const makeFile = (content) => {
+    let fileContent = content;
+    return {
+      getId: () => 'template-file-id',
+      getName: () => 'PROFILE.example.md',
+      isTrashed: () => false,
+      getBlob: () => ({ getDataAsString: () => fileContent }),
+      setContent: (nextContent) => {
+        writes.push(nextContent);
+        fileContent = nextContent;
+      },
+      getContent: () => fileContent
+    };
+  };
+  if (initialContent !== undefined) {
+    files.push(makeFile(initialContent));
+  }
+  const templateFolder = {
+    getId: () => 'template-folder-id',
+    getFilesByName: () => iteratorFor(files),
+    createFile: (_name, content) => {
+      const file = makeFile(content);
+      files.push(file);
+      return file;
+    }
+  };
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  context.CONFIG = { PROPERTY_KEYS: {
+    SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE'
+  } };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => { stored[key] = value; }
+    })
+  };
+  context.MimeType = { PLAIN_TEXT: 'text/plain' };
+  context.getSupplierProfileNamesForLocale_ = () => ({
+    folder: 'Supplier Profiles', templateFolder: '_template',
+    templateFile: 'PROFILE.example.md'
+  });
+  context.getLocalizedSupplierProfileTemplate_ = () => template;
+  context.ensureSingleInstallerFolder_ = (_parent, name) =>
+    name === 'Supplier Profiles' ? { getId: () => 'profile-root-id' } : templateFolder;
+  return {
+    context,
+    rootFolder: { getId: () => 'root-folder-id' },
+    files,
+    stored,
+    template,
+    writes
+  };
+}
+
 function testSecretManagerBootstrapHandoff() {
   const requests = [];
   const privateOptions = {
@@ -127,6 +204,81 @@ function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
     'spreadsheet',
     'installation-bootstrap'
   ]);
+}
+
+function testSupplierProfileTemplatePreservesManualContent() {
+  const fixture = createSupplierProfileTemplateFixture('# Operator-maintained template');
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /not installer-managed or pristine/
+  );
+  assert.deepEqual(fixture.writes, []);
+  assert.equal(fixture.files[0].getContent(), '# Operator-maintained template');
+}
+
+function testSupplierProfileTemplateCreationAndRecoveryAreJournaled() {
+  const fixture = createSupplierProfileTemplateFixture();
+  const created = fixture.context.ensureInstallerSupplierProfileTemplate_(
+    fixture.rootFolder, 'en'
+  );
+  const managedState = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
+  assert.equal(created.getId(), 'template-file-id');
+  assert.equal(managedState.status, 'managed');
+  assert.equal(managedState.fileId, 'template-file-id');
+  assert.equal(managedState.content, fixture.template);
+
+  created.setContent('# Operator-maintained template');
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /was modified/
+  );
+  assert.equal(created.getContent(), '# Operator-maintained template');
+
+  const interrupted = createSupplierProfileTemplateFixture(fixture.template, {
+    status: 'planned',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: '',
+    targetContent: fixture.template
+  });
+  const adopted = interrupted.context.ensureInstallerSupplierProfileTemplate_(
+    interrupted.rootFolder, 'en'
+  );
+  const recoveredState = JSON.parse(
+    interrupted.stored.SUPPLIER_PROFILE_TEMPLATE_STATE
+  );
+  assert.equal(adopted.getId(), 'template-file-id');
+  assert.equal(recoveredState.status, 'managed');
+  assert.equal(recoveredState.fileId, 'template-file-id');
+  assert.deepEqual(interrupted.writes, []);
+}
+
+function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const legacy = template.replace(
+    '\nmanaged_by: Google Drive Utilities Cataloger\n', '\n'
+  );
+  const fixture = createSupplierProfileTemplateFixture(legacy);
+
+  fixture.context.ensureInstallerSupplierProfileTemplate_(fixture.rootFolder, 'en');
+
+  assert.deepEqual(fixture.writes, [fixture.template]);
+  const state = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
+  assert.equal(state.status, 'managed');
+  assert.equal(state.content, fixture.template);
 }
 
 function testSecretManagerScopeIsRestricted() {
@@ -612,6 +764,9 @@ function testTimeZoneTransactionLifecycle() {
 
 testSecretManagerBootstrapHandoff();
 testBootstrapInitializesSpreadsheetUnderLifecycleLock();
+testSupplierProfileTemplatePreservesManualContent();
+testSupplierProfileTemplateCreationAndRecoveryAreJournaled();
+testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();

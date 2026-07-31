@@ -150,6 +150,12 @@ version/date, source tier (`official` or `external`), and verification date.
 An external guide is reference material only and needs manual approval before
 it appears in the approved profile.
 
+The installer records the localized template it creates. It can update only
+that exact, unmodified managed template (including the known pre-marker
+template from an earlier installation). If a template has been edited or was
+not created by the installer, setup stops and preserves it; copy it into a
+supplier profile instead of editing the shared template.
+
 ## Localization
 
 Locale data is separated from the automation logic:

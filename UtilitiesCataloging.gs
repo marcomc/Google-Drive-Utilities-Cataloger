@@ -2142,15 +2142,20 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   // Google Sheets can preserve a copied numeric cell type when a template row
   // is filled. Reassert text formatting after all ordinary writes so a purely
   // numeric identifier or `mm` reference month cannot be coerced to a number.
-  setTextValueForHeaders_(sheet, row, layout, getHeaderAliases_('supplier'),
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('supplier'),
     extracted.supplier);
-  setTextValueForHeaders_(sheet, row, layout, getHeaderAliases_('identifier'),
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('identifier'),
     extracted.identifier);
-  setTextValueForHeaders_(sheet, row, layout, getHeaderAliases_('contractNumber'),
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('contractNumber'),
     extracted.contract_number);
-  setTextValueForHeaders_(sheet, row, layout, getHeaderAliases_('customerCode'),
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('customerCode'),
     extracted.customer_code);
-  setTextValueForHeaders_(sheet, row, layout, getHeaderAliases_('month'),
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('month'),
     extracted.reference_month);
 
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
@@ -2194,9 +2199,11 @@ function setLiteralSheetValue_(range, value) {
   range.setValue(value);
 }
 
-function setTextValueForHeaders_(sheet, row, layout, aliases, value) {
+function setTextValueForHeaders_(sheet, row, layout, formulaColumns, aliases,
+  value) {
   const column = findHeaderIndex_(layout.lookup, aliases);
-  if (!column || value === null || value === undefined) {
+  if (!column || formulaColumns[column - 1] || value === null ||
+    value === undefined) {
     return;
   }
   const range = sheet.getRange(row, column);

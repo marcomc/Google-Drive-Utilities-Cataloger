@@ -637,6 +637,8 @@ function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
   const profileRoot = ensureSingleInstallerFolder_(rootFolder, names.folder);
   const templateFolder = ensureSingleInstallerFolder_(profileRoot, names.templateFolder);
   const template = getLocalizedSupplierProfileTemplate_(locale);
+  const properties = PropertiesService.getScriptProperties();
+  let state = getSupplierProfileTemplateState_(properties);
   const files = templateFolder.getFilesByName(names.templateFile);
   const matches = [];
   while (files.hasNext()) {
@@ -649,11 +651,132 @@ function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
     throw new Error('More than one supplier profile template exists.');
   }
   if (matches.length === 1) {
-    matches[0].setContent(template);
-    return matches[0];
+    return reconcileInstallerSupplierProfileTemplate_(matches[0], rootFolder,
+      templateFolder, locale, names.templateFile, template, properties, state);
   }
-  return templateFolder.createFile(
+  state = buildSupplierProfileTemplateState_('planned', rootFolder,
+    templateFolder, locale, names.templateFile, '', '');
+  state.targetContent = template;
+  delete state.content;
+  saveSupplierProfileTemplateState_(properties, state);
+  const created = templateFolder.createFile(
     names.templateFile, template, MimeType.PLAIN_TEXT
+  );
+  state.status = 'managed';
+  state.fileId = created.getId();
+  state.content = template;
+  delete state.targetContent;
+  saveSupplierProfileTemplateState_(properties, state);
+  return created;
+}
+
+function reconcileInstallerSupplierProfileTemplate_(file, rootFolder,
+  templateFolder, locale, fileName, template, properties, state) {
+  const currentContent = file.getBlob().getDataAsString('UTF-8');
+  if (!state) {
+    if (!isPristineInstallerSupplierProfileTemplate_(currentContent, template)) {
+      throw new Error('The existing supplier profile template is not installer-managed ' +
+        'or pristine; refusing to overwrite it.');
+    }
+    state = buildSupplierProfileTemplateState_('managed', rootFolder,
+      templateFolder, locale, fileName, file.getId(), currentContent);
+    saveSupplierProfileTemplateState_(properties, state);
+  } else {
+    assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
+      templateFolder, fileName);
+    if (state.status === 'planned') {
+      if (currentContent !== state.targetContent) {
+        throw new Error('The planned supplier profile template is not pristine; ' +
+          'refusing to adopt it.');
+      }
+      state.status = 'managed';
+      state.fileId = file.getId();
+      state.content = currentContent;
+      delete state.targetContent;
+      saveSupplierProfileTemplateState_(properties, state);
+    } else if (state.status === 'updating') {
+      if (currentContent === state.targetContent) {
+        state.status = 'managed';
+        state.content = state.targetContent;
+        delete state.targetContent;
+        saveSupplierProfileTemplateState_(properties, state);
+        return file;
+      }
+      if (currentContent !== state.content) {
+        throw new Error('The managed supplier profile template was modified; ' +
+          'refusing to overwrite it.');
+      }
+    } else if (state.status !== 'managed' || currentContent !== state.content) {
+      throw new Error('The managed supplier profile template was modified; ' +
+        'refusing to overwrite it.');
+    }
+  }
+
+  if (currentContent === template) {
+    return file;
+  }
+  state.status = 'updating';
+  state.targetContent = template;
+  saveSupplierProfileTemplateState_(properties, state);
+  file.setContent(template);
+  state.status = 'managed';
+  state.content = template;
+  delete state.targetContent;
+  saveSupplierProfileTemplateState_(properties, state);
+  return file;
+}
+
+function getSupplierProfileTemplateState_(properties) {
+  const raw = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_TEMPLATE_STATE
+  );
+  if (!raw) {
+    return null;
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The supplier profile template state is malformed.');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The supplier profile template state is malformed.');
+  }
+  return state;
+}
+
+function saveSupplierProfileTemplateState_(properties, state) {
+  properties.setProperty(CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_TEMPLATE_STATE,
+    JSON.stringify(state));
+}
+
+function buildSupplierProfileTemplateState_(status, rootFolder, templateFolder,
+  locale, fileName, fileId, content) {
+  return {
+    status: status,
+    rootFolderId: rootFolder.getId(),
+    templateFolderId: templateFolder.getId(),
+    locale: locale,
+    fileName: fileName,
+    fileId: fileId,
+    content: content
+  };
+}
+
+function assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
+  templateFolder, fileName) {
+  if (state.rootFolderId !== rootFolder.getId() ||
+    state.templateFolderId !== templateFolder.getId() ||
+    state.fileName !== fileName ||
+    (state.fileId && state.fileId !== file.getId())) {
+    throw new Error('The supplier profile template identity does not match the ' +
+      'installer-managed resource.');
+  }
+}
+
+function isPristineInstallerSupplierProfileTemplate_(content, template) {
+  return content === template || content === template.replace(
+    '\nmanaged_by: Google Drive Utilities Cataloger\n', '\n'
   );
 }
 

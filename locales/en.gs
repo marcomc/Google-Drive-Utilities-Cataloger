@@ -80,7 +80,7 @@ function getEnglishLocalization_() {
       supplierKey: 'supplier'
     }),
     supplierProfileTemplate: Object.freeze([
-      '---', 'status: approved', 'supplier: SUPPLIER NAME',
+      '---', 'managed_by: Google Drive Utilities Cataloger', 'status: approved', 'supplier: SUPPLIER NAME',
       'supplies: [supply]', 'verified_on: YYYY-MM-DD', '---', '',
       '# Supplier profile: SUPPLIER NAME', '', '## Sources', '',
       '- Official website: <https://example.invalid/>',

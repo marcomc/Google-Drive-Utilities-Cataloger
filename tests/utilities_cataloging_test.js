@@ -1658,19 +1658,22 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
   context.buildDrivePathLabel_ = () => 'invoice.pdf';
   const layout = {
     headerRow: 1,
-    headers: ['Issue date', 'Source file', 'Calculated value'],
+    headers: ['Issue date', 'Supplier', 'Source file', 'Calculated value'],
     lookup: {
       'issue date': 1,
-      'source file': 2,
-      'calculated value': 3
+      supplier: 2,
+      'source file': 3,
+      'calculated value': 4
     }
   };
   const sheet = {
     getLastRow: () => 3,
     getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
     getRange: (row, column, _rows, width) => {
-      if (column === 1 && width === 3) {
-        return { getFormulas: () => [['', '=HYPERLINK("url","text")', '=A3*2']] };
+      if (column === 1 && width === 4) {
+        return { getFormulas: () => [[
+          '', '=UPPER("supplier")', '=HYPERLINK("url","text")', '=A3*2'
+        ]] };
       }
       return {
         setFormula: (value) => writes.push([row, column, 'formula', value]),
@@ -1683,9 +1686,10 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
   context.writeInvoiceRow_(sheet, 3, layout,
     { getUrl: () => 'https://drive.test/file' }, validInvoice());
 
-  assert.equal(writes.some((entry) => entry[1] === 3), false);
+  assert.equal(writes.some((entry) => entry[1] === 2), false);
+  assert.equal(writes.some((entry) => entry[1] === 4), false);
   assert.equal(writes.some((entry) => entry[1] === 1), true);
-  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+  assert.equal(writes.some((entry) => entry[1] === 3 && entry[2] === 'formula'),
     true);
 }
 

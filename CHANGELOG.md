@@ -36,6 +36,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   customer code nor a contract number.
 - Apply the reviewed ILIAD Internet default of numeric `0.00` for absent
   `Spese d'incasso`/`Collection charges`, while preserving any printed amount.
+- Preserve formula-backed identifier and month columns during invoice imports.
+- Record the installer-owned supplier-profile template identity before creation
+  and refuse to overwrite an existing template unless it is a known pristine
+  installer template.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 
