@@ -251,6 +251,10 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ['Numero di contratto assente nel documento.']
   };
   assert.equal(context.validateExtraction_(onlyCustomerCode).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Numero contratto non presente nel documento.']
+  }).valid, true);
 
   const onlyContractNumber = {
     ...raw,

@@ -25,6 +25,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Let detailed non-formula `sheet_values` cost entries override broad
   reconciliation fields, preserving spreadsheet formulas that aggregate the
   detailed invoice charges.
+- Require Gemini to inspect every visible non-formula invoice field, including
+  recurring-service unit, quantity, and unit cost, instead of returning only
+  the broad reconciliation totals.
+- Preserve identifiers and the two-character reference month as literal text
+  in Sheets, even when their values contain digits only or the template cell
+  previously had a numeric format.
+- Ignore a reported missing secondary identifier when the other ownership
+  identifier is present, while continuing to block invoices with neither a
+  customer code nor a contract number.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

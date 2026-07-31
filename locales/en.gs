@@ -61,7 +61,7 @@ function getEnglishLocalization_() {
       contratto: 'Contract', report: 'Report'
     }),
     subscriberIdentifierProblemPatterns: Object.freeze([
-      '\\b(?:assente|mancante|missing|absent)\\b',
+      '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
       '(?:contract(?:\\s+number)?|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|numero\\s+(?:di\\s+)?contratto|id\\s*utente|codice\\s+(?:cliente|utente))'
     ]),
     supplierProfiles: Object.freeze({
