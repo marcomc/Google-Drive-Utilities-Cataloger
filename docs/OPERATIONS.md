@@ -190,6 +190,12 @@ applied to invoice, contract, or customer identifiers.
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
 
+When a report contains the localized supplier-profile link, open that folder to
+review a pending profile or the approved profile. The localized retry-import
+link opens the Apps Script project at
+`retryFailedUtilitiesCataloging`; it is deliberately an owner-controlled manual
+execution, not a public retry endpoint.
+
 After a transport repair, run `installAutomationTriggers` to restore all three
 triggers. It preserves matching schedules, removes duplicates, and refreshes
 only handlers whose stored cadence differs from the deployed source.

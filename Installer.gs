@@ -22,6 +22,9 @@ function bootstrapCatalogerInstallation(options) {
     properties.getProperty(CONFIG.PROPERTY_KEYS.SPREADSHEET_ID) : '';
   const rootFolder = DriveApp.getFolderById(validated.rootFolderId);
   const policyFile = ensureInstallerPolicyFile_(rootFolder, validated.agentsPolicy);
+  ensureInstallerSupplierProfileTemplate_(
+    rootFolder, validated.automationConfig.locale || 'en'
+  );
   const spreadsheet = withCatalogLifecycleLock_(
     'installation-spreadsheet-initialization', function () {
       return ensureInstallerSpreadsheet_(
@@ -331,7 +334,7 @@ function validateInstallerTimeZoneTransaction_(options) {
 function validateCatalogerInstallation() {
   assertCatalogConfiguration_();
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-  loadDriveAgentsPolicy_(rootFolder);
+  loadTrustedExtractionPolicy_(rootFolder);
   validateInstallerConfiguredSheets_();
   getSheetHeadersBySupply_();
 
@@ -627,6 +630,54 @@ function ensureInstallerPolicyFile_(rootFolder, policyText) {
     policyText,
     MimeType.PLAIN_TEXT
   );
+}
+
+function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
+  const names = getSupplierProfileNamesForLocale_(locale);
+  const profileRoot = ensureSingleInstallerFolder_(rootFolder, names.folder);
+  const templateFolder = ensureSingleInstallerFolder_(profileRoot, names.templateFolder);
+  const template = getLocalizedSupplierProfileTemplate_(locale);
+  const files = templateFolder.getFilesByName(names.templateFile);
+  const matches = [];
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!file.isTrashed()) {
+      matches.push(file);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error('More than one supplier profile template exists.');
+  }
+  if (matches.length === 1) {
+    matches[0].setContent(template);
+    return matches[0];
+  }
+  return templateFolder.createFile(
+    names.templateFile, template, MimeType.PLAIN_TEXT
+  );
+}
+
+function ensureSingleInstallerFolder_(parent, name) {
+  const folders = parent.getFoldersByName(name);
+  const matches = [];
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    if (!folder.isTrashed()) {
+      matches.push(folder);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error('More than one folder exists: ' + name + '.');
+  }
+  return matches.length === 1 ? matches[0] : parent.createFolder(name);
+}
+
+function getLocalizedSupplierProfileTemplate_(locale) {
+  const localization = getLocalizationRegistry_()[locale];
+  if (!localization || !localization.supplierProfileTemplate) {
+    throw new Error('Unsupported supplier-profile locale: ' + locale);
+  }
+  return localization.supplierProfileTemplate.join('\n');
 }
 
 function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,

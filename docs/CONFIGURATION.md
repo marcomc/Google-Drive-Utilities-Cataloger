@@ -137,6 +137,19 @@ The policy can guide classification and extraction. It cannot extend the
 configured resource scope, change the required JSON result, or make PDF content
 trusted.
 
+## Supplier profiles
+
+The optional localized supplier-profile folder is a separate policy layer
+inside the intake folder. A supplier subfolder contributes guidance only when
+it contains the exact approved profile file for the installation locale. The
+importer ignores every pending proposal folder.
+
+Use [the canonical profile template](../supplier-profiles/PROFILE.example.md) for each
+supplier. Record the official website and each bill-reading guide with its
+version/date, source tier (`official` or `external`), and verification date.
+An external guide is reference material only and needs manual approval before
+it appears in the approved profile.
+
 ## Localization
 
 Locale data is separated from the automation logic:

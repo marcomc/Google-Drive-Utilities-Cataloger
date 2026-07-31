@@ -56,6 +56,37 @@ function getEnglishLocalization_() {
       })
     }),
     documentLabels: Object.freeze({ Invoice: 'Invoice', Contract: 'Contract', Report: 'Report' }),
+    documentTypeAliases: Object.freeze({
+      invoice: 'Invoice', fattura: 'Invoice', contract: 'Contract',
+      contratto: 'Contract', report: 'Report'
+    }),
+    subscriberIdentifierProblemPatterns: Object.freeze([
+      '\\b(?:assente|mancante|missing|absent)\\b',
+      '(?:contract(?:\\s+number)?|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|numero\\s+(?:di\\s+)?contratto|id\\s*utente|codice\\s+(?:cliente|utente))'
+    ]),
+    supplierProfiles: Object.freeze({
+      folder: 'Supplier Profiles', pendingFolder: 'Pending approval',
+      templateFolder: '_template', profileFile: 'PROFILE.md',
+      templateFile: 'PROFILE.example.md', statusKey: 'status', approvedStatus: 'approved',
+      supplierKey: 'supplier'
+    }),
+    supplierProfileTemplate: Object.freeze([
+      '---', 'status: approved', 'supplier: SUPPLIER NAME',
+      'supplies: [supply]', 'verified_on: YYYY-MM-DD', '---', '',
+      '# Supplier profile: SUPPLIER NAME', '', '## Sources', '',
+      '- Official website: <https://example.invalid/>',
+      '- Bill-reading guides: version/date, source tier, URL, verification date.', '',
+      '## Document structure', '',
+      '- Invoice: stable visual sections, required evidence, and known variants.',
+      '- Report: stable visual sections, required evidence, and known variants.',
+      '- Version history: describe changes and their effective date/range.', '',
+      '## Navigation', '',
+      '- Classify from printed evidence and structure together; do not use filename alone.',
+      '- After classification, inspect the documented sections in order and reconcile totals.',
+      '- A structural mismatch is evidence for review or a pending proposal, never to invent data.', '',
+      '## Maintenance', '',
+      '- Put a revised profile in `Pending approval` for review; never overwrite this approved profile automatically.', ''
+    ]),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVED WITHOUT IMPORT',
@@ -92,6 +123,8 @@ function getEnglishLocalization_() {
       tolerance: 'tolerance',
       actions: 'Actions taken',
       issue: 'Issue and recommended action',
+      supplierProfiles: 'Supplier profiles and proposals',
+      retryImport: 'Retry import',
       notAvailable: 'not available',
       notChanged: 'not changed',
       notIdentified: 'not identified',

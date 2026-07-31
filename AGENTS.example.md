@@ -130,3 +130,20 @@ review when provenance is ambiguous.
 Send email only for a new outcome or a recovered pending outcome. Each outcome
 must include status, original file, assigned name, destination, extracted data,
 costs, reconciliation, actions taken, and one recommended next action.
+
+## Supplier profiles
+
+- Store supplier-specific guidance only in the localized supplier-profile
+  workspace created by the installer. Only the exact approved profile file is
+  trusted at run time; pending proposals are review material and must never
+  influence an import.
+- A profile must identify the official supplier site and every known bill-reading
+  guide URL, with the bill-version or date covered by each guide. Mark a guide
+  as `official` or `external`, record the verification date, and say explicitly
+  when no official guide was found.
+- When an official guide is unavailable, create a proposal for human review;
+  research official domains first and label any external fallback as untrusted.
+  Never promote, overwrite, or follow a proposed profile automatically.
+- To approve a proposal, manually review it and replace the supplier's approved
+  profile file; retain the previous file as an archive. The next import reads
+  only that reviewed profile.

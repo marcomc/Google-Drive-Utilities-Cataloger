@@ -8,7 +8,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
-const sources = ['Config.gs', 'UtilitiesCataloging.gs'].map((file) =>
+const sources = ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs',
+  'UtilitiesCataloging.gs'].map((file) =>
   fs.readFileSync(path.join(projectRoot, file), 'utf8')
 );
 
@@ -60,7 +61,8 @@ function loadCataloger(overrides = {}) {
   });
   sources.forEach((source, index) => {
     vm.runInContext(source, context, {
-      filename: index === 0 ? 'Config.gs' : 'UtilitiesCataloging.gs'
+      filename: ['Config.gs', 'locales/en.gs', 'locales/it.gs',
+        'Localization.gs', 'UtilitiesCataloging.gs'][index]
     });
   });
   return context;
@@ -664,6 +666,15 @@ function testEmailReportIncludesSoftwareVersion() {
   );
   assert.match(report, /Failure stage: not available/);
   assert.match(report, /Persistence: not available/);
+
+  const linkedReport = context.formatResult_(Object.assign({}, {
+    status: 'ERROR', originalName: 'invoice.pdf', fileUrl: 'https://drive.test/file-id',
+    extracted: {}, actions: 'No changes.', problem: 'Provider unavailable.',
+    recommendedAction: 'Retry later.', supplierProfilesUrl: 'https://drive.test/profiles',
+    retryUrl: 'https://script.google.com/home/projects/script-id/edit?function=retryFailedUtilitiesCataloging'
+  }));
+  assert.match(linkedReport, /Supplier profiles and proposals: https:\/\/drive\.test\/profiles/);
+  assert.match(linkedReport, /Retry import: https:\/\/script\.google\.com\/home\/projects\/script-id/);
 }
 
 function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
@@ -984,6 +995,7 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /Never substitute one for the other/);
   assert.match(prompt, /one of contract_number or customer_code is sufficient/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
+  assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
 }

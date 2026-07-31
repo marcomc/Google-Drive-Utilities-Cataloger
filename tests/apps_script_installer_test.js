@@ -104,6 +104,7 @@ function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
   });
   context.validateInstallerGeminiAccess_ = () => {};
   context.ensureInstallerPolicyFile_ = () => ({ getUrl: () => 'https://drive.test/policy' });
+  context.ensureInstallerSupplierProfileTemplate_ = () => {};
   context.ensureInstallerSpreadsheet_ = () => {
     operations.push('spreadsheet');
     return spreadsheet;
