@@ -178,7 +178,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     extracted: null,
     extractionValidated: false,
     failureStage: 'extracting-document-data',
-    formulaVerification: null,
+    verificationDiscrepancies: [],
     rollbackErrors: []
   };
 
@@ -299,7 +299,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     );
   } catch (error) {
     rollbackProcessingMutations_(file, rootFolder, originalName, state);
-    state.formulaVerification = error.formulaVerification || null;
+    state.verificationDiscrepancies = error.verificationDiscrepancies ||
+      (error.formulaVerification ? [error.formulaVerification] : []);
     if (error.mutationRollbackIncomplete) {
       state.rollbackErrors.push(
         'A spreadsheet row may require journal recovery.'
@@ -861,7 +862,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "issue_date": "YYYY-MM-DD or null",',
     '  "identifier": "invoice number, optional contract/report identifier, or null",',
     '  "contract_number": "printed contract number or null",',
-    '  "customer_code": "printed customer/client/account code or null",',
+    '  "customer_code": "printed customer/client/account code (ID UTENTE is a customer code), or null",',
     '  "contract_object": "at most four words or null",',
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
@@ -876,9 +877,9 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date"}],',
     '  "problems": ["observed problems"]',
     '}',
-    'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies.',
+    'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
-    'For an Invoice, extract contract_number and customer_code independently from their printed labels. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
       String(automationConfig.address_missing_type || 'unknown') + '.',
@@ -1083,10 +1084,6 @@ function normalizeElectricityBandConsumption_(value) {
 }
 
 function validateExtraction_(extracted) {
-  if (extracted.problems.length > 0) {
-    return invalidExtraction_('Gemini reported: ' + extracted.problems.join('; '),
-      'Manually verify the PDF and correct missing or ambiguous data.');
-  }
   if (['Invoice', 'Contract', 'Report'].indexOf(extracted.document_type) === -1) {
     return invalidExtraction_('Document type cannot be identified.',
       'Verify whether the PDF is an invoice, contract, or report.');
@@ -1111,6 +1108,18 @@ function validateExtraction_(extracted) {
       'Verify the service address in the PDF.');
   }
   if (extracted.document_type === 'Invoice') {
+    if (!extracted.contract_number && !extracted.customer_code) {
+      return invalidExtraction_('Contract number and customer code are both missing.',
+        'Verify that the invoice belongs to this account before importing it.');
+    }
+    const blockingProblems = extracted.problems.filter(function (problem) {
+      return !isMissingOptionalSubscriberIdentifierProblem_(problem) &&
+        !isInformationalTaxInclusionProblem_(problem, extracted);
+    });
+    if (blockingProblems.length > 0) {
+      return invalidExtraction_('Gemini reported: ' + blockingProblems.join('; '),
+        'Manually verify the PDF and correct missing or ambiguous data.');
+    }
     if (!extracted.identifier ||
       !sanitizeFileNamePart_(extracted.identifier)) {
       return invalidExtraction_('Invoice identifier is missing.',
@@ -1143,6 +1152,10 @@ function validateExtraction_(extracted) {
         'Verify the cost, VAT, and total breakdown in the PDF.');
     }
   }
+  if (extracted.document_type !== 'Invoice' && extracted.problems.length > 0) {
+    return invalidExtraction_('Gemini reported: ' + extracted.problems.join('; '),
+      'Manually verify the PDF and correct missing or ambiguous data.');
+  }
   if (extracted.document_type === 'Contract' &&
     !sanitizeContractObject_(
       extracted.contract_object || extracted.identifier
@@ -1162,6 +1175,33 @@ function validateExtraction_(extracted) {
       'Retry the document or enter the affected value manually.');
   }
   return { valid: true };
+}
+
+function isMissingOptionalSubscriberIdentifierProblem_(problem) {
+  const text = String(problem || '').toLowerCase();
+  const missing = /\b(?:assente|mancante|missing|absent)\b/.test(text);
+  const identifier = /(?:numero\s+(?:di\s+)?contratto|contract(?:\s+number)?|id\s*utente|user\s*id|(?:customer|client|account)\s*(?:code|id)|codice\s+(?:cliente|utente))/.test(text);
+  return missing && identifier;
+}
+
+function isInformationalTaxInclusionProblem_(problem, extracted) {
+  const text = String(problem || '').toLowerCase();
+  if (!/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text)) {
+    return false;
+  }
+  const values = [
+    extracted.cost_consumption,
+    extracted.cost_non_consumption,
+    extracted.vat,
+    extracted.total
+  ];
+  if (values.some(function (value) { return typeof value !== 'number'; })) {
+    return false;
+  }
+  return Math.abs(
+    extracted.cost_consumption + extracted.cost_non_consumption + extracted.vat -
+    extracted.total
+  ) <= CONFIG.MONEY_TOLERANCE;
 }
 
 function invalidExtraction_(problem, action) {
@@ -1419,7 +1459,12 @@ function buildAssignedName_(extracted) {
 
 function verifyMovedFile_(file, destinationFolder, assignedName) {
   if (file.getName() !== assignedName) {
-    throw new Error('Rename verification failed.');
+    throw verificationError_('Rename verification failed.', {
+      field: 'File name',
+      expected: assignedName,
+      actual: file.getName(),
+      valueType: 'text'
+    });
   }
   const parents = file.getParents();
   let inDestination = false;
@@ -1430,7 +1475,12 @@ function verifyMovedFile_(file, destinationFolder, assignedName) {
     }
   }
   if (!inDestination) {
-    throw new Error('Move verification failed.');
+    throw verificationError_('Move verification failed.', {
+      field: 'Drive destination',
+      expected: 'file is in the selected destination',
+      actual: 'file is not in the selected destination',
+      valueType: 'text'
+    });
   }
 }
 
@@ -1992,23 +2042,29 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
       referenceMonthValuesMatch_(actual, expected[normalizedHeader]) :
       sheetValuesMatch_(actual, expected[normalizedHeader], extracted.issue_date);
     if (column && !rowFormulas[column - 1] && !matches) {
-      throw new Error('Spreadsheet value verification failed for: ' +
-        layout.headers[column - 1]);
+      throw verificationError_('Spreadsheet value verification failed for: ' +
+        layout.headers[column - 1], {
+        field: layout.headers[column - 1],
+        expected: expected[normalizedHeader],
+        actual: actual,
+        valueType: verificationValueType_(expected[normalizedHeader]),
+        tolerance: typeof expected[normalizedHeader] === 'number' ?
+          CONFIG.MONEY_TOLERANCE : null
+      });
     }
   });
 
   if (totalColumn && rowFormulas[totalColumn - 1]) {
     const actualTotal = sheet.getRange(row, totalColumn).getValue();
     if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date)) {
-      const error = new Error('Spreadsheet formula total verification failed for: ' +
-        layout.headers[totalColumn - 1]);
-      error.formulaVerification = {
-        column: layout.headers[totalColumn - 1],
+      throw verificationError_('Spreadsheet formula total verification failed for: ' +
+        layout.headers[totalColumn - 1], {
+        field: layout.headers[totalColumn - 1],
         expected: extracted.total,
         actual: actualTotal,
+        valueType: 'money',
         tolerance: CONFIG.MONEY_TOLERANCE
-      };
-      throw error;
+      });
     }
   }
 
@@ -2020,8 +2076,13 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
       .getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0];
     referenceFormulas.forEach(function (formula, index) {
       if (formula && !rowFormulas[index]) {
-        throw new Error('Spreadsheet formula was not preserved for: ' +
-          layout.headers[index]);
+        throw verificationError_('Spreadsheet formula was not preserved for: ' +
+          layout.headers[index], {
+          field: layout.headers[index],
+          expected: 'formula present',
+          actual: 'formula missing',
+          valueType: 'text'
+        });
       }
     });
   }
@@ -2035,8 +2096,29 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   const hasFormulaError = /^#(?:ERROR|REF|NAME|VALUE|N\/A|DIV\/0)!?$/
     .test(sourceDisplayValue);
   if ((!hasNativeLink && !hasHyperlinkFormula) || hasFormulaError) {
-    throw new Error('Source file link verification failed.');
+    throw verificationError_('Source file link verification failed.', {
+      field: 'Source file link',
+      expected: 'valid link to the source PDF',
+      actual: hasFormulaError ? 'spreadsheet formula error' : 'link missing or incorrect',
+      valueType: 'text'
+    });
   }
+}
+
+function verificationError_(message, discrepancy) {
+  const error = new Error(message);
+  error.verificationDiscrepancies = [discrepancy];
+  return error;
+}
+
+function verificationValueType_(value) {
+  if (typeof value === 'number') {
+    return 'money';
+  }
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return 'date';
+  }
+  return 'text';
 }
 
 function sheetValuesMatch_(actual, expected, issueDate) {
@@ -2789,7 +2871,7 @@ function buildErrorResult_(file, problem, action, originalName, state) {
     failureStage: reached.failureStage || '',
     extractionValidated: reached.extractionValidated === true,
     rollbackCompleted: rollbackProblems.length === 0 && changes.length === 0,
-    formulaVerification: reached.formulaVerification || null,
+    verificationDiscrepancies: reached.verificationDiscrepancies || [],
     actions: actions,
     problem: problem + (rollbackProblems.length > 0 ?
       ' ' + rollbackProblems.join(' ') : ''),
@@ -2991,7 +3073,7 @@ function formatResult_(result) {
     labels.persistence + ': ' + (result.rollbackCompleted === true ?
       labels.rollbackCompleted : result.rollbackCompleted === false ?
         labels.rollbackRequiresManualReview : labels.notAvailable)
-  ].concat(formatFormulaVerification_(result.formulaVerification, labels)) : [];
+  ].concat(formatVerificationDiscrepancies_(result.verificationDiscrepancies, labels)) : [];
   const issue = [
     result.problem || labels.noIssue,
     result.recommendedAction || '',
@@ -3035,25 +3117,35 @@ function localizeFailureStage_(failureStage, labels) {
   return stages[failureStage] || failureStage || labels.notAvailable;
 }
 
-function formatFormulaVerification_(verification, labels) {
-  if (!verification) {
+function formatVerificationDiscrepancies_(discrepancies, labels) {
+  if (!Array.isArray(discrepancies) || discrepancies.length === 0) {
     return [];
   }
-  return [
-    labels.formulaTotalDetails + ': ' +
-      labels.formulaColumn + ' ' + oneLineReportText_(verification.column || labels.notAvailable) +
-      '; ' + labels.expectedValue + ' ' +
-      formatFormulaVerificationAmount_(verification.expected, labels) +
-      '; ' + labels.observedValue + ' ' +
-      formatFormulaVerificationAmount_(verification.actual, labels) +
-      '; ' + labels.tolerance + ' ' +
-      formatFormulaVerificationAmount_(verification.tolerance, labels)
-  ];
+  return discrepancies.map(function (discrepancy) {
+    const details = [
+      labels.discrepancyField + ' ' +
+        oneLineReportText_(discrepancy.field || labels.notAvailable),
+      labels.expectedValue + ' ' +
+        formatVerificationValue_(discrepancy.expected, discrepancy.valueType, labels),
+      labels.observedValue + ' ' +
+        formatVerificationValue_(discrepancy.actual, discrepancy.valueType, labels)
+    ];
+    if (typeof discrepancy.tolerance === 'number') {
+      details.push(labels.tolerance + ' ' +
+        formatVerificationValue_(discrepancy.tolerance, 'money', labels));
+    }
+    return labels.discrepancyDetails + ': ' + details.join('; ');
+  });
 }
 
-function formatFormulaVerificationAmount_(value, labels) {
-  return typeof value === 'number' && isFinite(value) ?
-    value.toFixed(2) + ' EUR' : oneLineReportText_(value || labels.notAvailable);
+function formatVerificationValue_(value, valueType, labels) {
+  if (valueType === 'money' && typeof value === 'number' && isFinite(value)) {
+    return value.toFixed(2) + ' EUR';
+  }
+  if (valueType === 'date' && Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return oneLineReportText_(value || labels.notAvailable);
 }
 
 function oneLineReportText_(value) {

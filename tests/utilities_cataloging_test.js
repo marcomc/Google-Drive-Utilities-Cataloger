@@ -231,6 +231,46 @@ function testExtractionSchemaAndCalendarValidation() {
   const invalidSupplier = { ...raw, supplier: '|||***' };
   assert.equal(context.validateExtraction_(invalidSupplier).valid, false);
 
+  const onlyCustomerCode = {
+    ...raw,
+    contract_number: '',
+    customer_code: 'ID-UTENTE-1',
+    problems: ['Numero di contratto assente nel documento.']
+  };
+  assert.equal(context.validateExtraction_(onlyCustomerCode).valid, true);
+
+  const onlyContractNumber = {
+    ...raw,
+    contract_number: 'CONTRACT-ONLY',
+    customer_code: '',
+    problems: ['ID utente missing from the document.']
+  };
+  assert.equal(context.validateExtraction_(onlyContractNumber).valid, true);
+
+  const noOwnershipIdentifier = {
+    ...raw,
+    contract_number: '',
+    customer_code: '',
+    problems: []
+  };
+  const noOwnershipValidation = context.validateExtraction_(noOwnershipIdentifier);
+  assert.equal(noOwnershipValidation.valid, false);
+  assert.match(noOwnershipValidation.problem, /Contract number and customer code are both missing/);
+
+  const otherProblemRemainsBlocking = {
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente nel documento.', 'VAT cannot be verified.']
+  };
+  assert.equal(context.validateExtraction_(otherProblemRemainsBlocking).valid, false);
+
+  const informationalVatInclusion = {
+    ...onlyCustomerCode,
+    problems: [
+      'Gli importi delle singole voci nel dettaglio servizi sono riportati nel documento comprensivi di IVA al 22%.'
+    ]
+  };
+  assert.equal(context.validateExtraction_(informationalVatInclusion).valid, true);
+
   const report = {
     ...raw,
     document_type: 'Report',
@@ -658,12 +698,13 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   context.getDestinationCollision_ = () => ({ status: 'none' });
   context.importUtilityInvoiceToSheet_ = () => {
     const error = new Error('Spreadsheet formula total verification failed for: Total cost');
-    error.formulaVerification = {
-      column: 'Total cost',
+    error.verificationDiscrepancies = [{
+      field: 'Total cost',
       expected: 14.64,
       actual: 12.34,
+      valueType: 'money',
       tolerance: 0.02
-    };
+    }];
     throw error;
   };
   context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
@@ -688,7 +729,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(report, /Total: 14\.64 EUR/);
   assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
   assert.match(report,
-    /Formula total verification: column Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
+    /Detected discrepancy: field Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
     message: 'catalog-file-processing-error',
     component: 'drive-utilities-cataloger',
@@ -728,7 +769,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(italianReport,
     /Verifica quadratura: superata: 14\.64 EUR \/ 14\.64 EUR/);
   assert.match(italianReport,
-    /Verifica formula totale: colonna Total cost; atteso 14\.64 EUR; riscontrato 12\.34 EUR; tolleranza 0\.02 EUR/);
+    /Discrepanza rilevata: campo Total cost; atteso 14\.64 EUR; riscontrato 12\.34 EUR; tolleranza 0\.02 EUR/);
 
   context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
     state.rollbackErrors = ['Spreadsheet rollback failed: service unavailable'];
@@ -938,8 +979,11 @@ function testPromptKeepsHeadersScopedBySupply() {
 
   assert.match(prompt, /matching canonical supply entry/);
   assert.match(prompt, /"contract_number": "printed contract number or null"/);
-  assert.match(prompt, /"customer_code": "printed customer\/client\/account code or null"/);
+  assert.match(prompt,
+    /"customer_code": "printed customer\/client\/account code \(ID UTENTE is a customer code\), or null"/);
   assert.match(prompt, /Never substitute one for the other/);
+  assert.match(prompt, /one of contract_number or customer_code is sufficient/);
+  assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
 }
@@ -2146,12 +2190,72 @@ function testFormulaTotalMustReconcileWithExtraction() {
     error = caught;
   }
   assert.match(error.message, /formula total verification failed/);
-  assert.deepEqual(JSON.parse(JSON.stringify(error.formulaVerification)), {
-    column: 'Cost total',
+  assert.deepEqual(JSON.parse(JSON.stringify(error.verificationDiscrepancies)), [{
+    field: 'Cost total',
     expected: 14.64,
     actual: 42.55,
+    valueType: 'money',
     tolerance: 0.02
+  }]);
+}
+
+function testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues() {
+  const context = loadCataloger();
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.getHeaderAliases_ = (key) => ({
+    supplier: ['Supplier'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  const sheet = {
+    getRange: (_row, column) => ({
+      getFormulas: () => [['', '=HYPERLINK("url";"text")']],
+      getFormula: () => column === 2 ?
+        '=HYPERLINK("https://drive.test/file-id";"text")' : '',
+      getDisplayValue: () => column === 2 ? 'text' : 'OTHER SUPPLIER',
+      getValue: () => column === 1 ? 'OTHER SUPPLIER' : 'text',
+      getRichTextValue: () => null
+    })
+  };
+  const extracted = validInvoice();
+  extracted.sheet_values = [];
+
+  let error = null;
+  try {
+    context.verifyImportedRow_(
+      sheet,
+      3,
+      {
+        headerRow: 1,
+        headers: ['Supplier', 'Source file'],
+        lookup: { supplier: 1, 'source file': 2 }
+      },
+      { getUrl: () => 'https://drive.test/file-id' },
+      extracted
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(error.message, /value verification failed/);
+  assert.deepEqual(JSON.parse(JSON.stringify(error.verificationDiscrepancies)), [{
+    field: 'Supplier',
+    expected: extracted.supplier,
+    actual: 'OTHER SUPPLIER',
+    valueType: 'text',
+    tolerance: null
+  }]);
+  const report = context.formatResult_({
+    status: 'ERROR',
+    extracted,
+    rollbackCompleted: true,
+    verificationDiscrepancies: error.verificationDiscrepancies
   });
+  assert.match(report,
+    /Detected discrepancy: field Supplier; expected SUPPLIER; observed OTHER SUPPLIER/);
 }
 
 function testPendingReportOutboxRetriesAndRepairsMalformedEntries() {
@@ -2534,6 +2638,7 @@ testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
 testReferenceMonthVerificationAcceptsSheetNumericCoercion();
 testFormulaTotalMustReconcileWithExtraction();
+testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();
 testLockAndLogContracts();

@@ -15,6 +15,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Include the failed processing phase, extraction-reconciliation outcome,
   rollback state, and formula-total expected/observed values in error reports
   without adding invoice data to Cloud logs.
+- Report every verification mismatch with its field and expected/observed
+  values; failures without a comparison retain their stage, reason, and action.
+- Treat `ID UTENTE` as a customer-code label for invoice ownership.
+  A missing contract number or user ID alone no longer blocks an otherwise
+  valid import; both identifiers must be unavailable to require identity review.
+- Treat an otherwise reconciled note that line items include VAT as
+  informational rather than a blocking extraction problem.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

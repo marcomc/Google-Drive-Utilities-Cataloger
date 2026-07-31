@@ -171,7 +171,10 @@ each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
 headers, and business rules before any Drive or Sheet mutation.
 Post-write verification treats `6`, `06`, and the numeric value `6` as the same
-reference month, because Sheets can coerce that field; this equivalence is not
+reference month. When a verification comparison fails, the recipient report
+includes the affected field and the expected and observed values (plus a money
+tolerance where applicable). Other failures report the phase, reason, and
+recommended action rather than inventing a comparison. This equivalence is not
 applied to invoice, contract, or customer identifiers.
 
 ## Operations
