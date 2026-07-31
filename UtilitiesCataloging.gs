@@ -1434,7 +1434,7 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
   if (!isStandaloneInformationalProblem_(text) ||
     !/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text) ||
-    /\b(?:unclear|uncertain|unknown|ambiguous|cannot|can't)\b|\bnot\s+(?:clear|known|specified)\b|\b(?:non\s+)?(?:chiar[oa]|incert[oa]|ambigu[oa])\b/.test(text)) {
+    /\b(?:unclear|uncertain|unknown|ambiguous|cannot|can't)\b|\bnot\s+(?:clear|known|specified|certain|sure|confirmed|verified)\b|\b(?:non\s+)?(?:chiar[oa]|incert[oa]|ambigu[oa])\b/.test(text)) {
     return false;
   }
   const values = [
@@ -2337,6 +2337,14 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
   const monthColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('month'));
+  const discrepancies = [];
+  let firstVerificationMessage = '';
+  const recordDiscrepancy = function (message, discrepancy) {
+    if (!firstVerificationMessage) {
+      firstVerificationMessage = message;
+    }
+    discrepancies.push(discrepancy);
+  };
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
     const actual = column ? sheet.getRange(row, column).getValue() : null;
@@ -2344,7 +2352,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
       referenceMonthValuesMatch_(actual, expected[normalizedHeader]) :
       sheetValuesMatch_(actual, expected[normalizedHeader], extracted.issue_date);
     if (column && !rowFormulas[column - 1] && !matches) {
-      throw verificationError_('Spreadsheet value verification failed for: ' +
+      recordDiscrepancy('Spreadsheet value verification failed for: ' +
         layout.headers[column - 1], {
         field: layout.headers[column - 1],
         expected: expected[normalizedHeader],
@@ -2360,7 +2368,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   if (totalColumn && rowFormulas[totalColumn - 1]) {
     const actualTotal = sheet.getRange(row, totalColumn).getValue();
     if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date)) {
-      throw verificationError_('Spreadsheet formula total verification failed for: ' +
+      recordDiscrepancy('Spreadsheet formula total verification failed for: ' +
         layout.headers[totalColumn - 1], {
         field: layout.headers[totalColumn - 1],
         expected: extracted.total,
@@ -2379,7 +2387,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
       .getRange(referenceRow, 1, 1, layout.headers.length).getFormulas()[0];
     referenceFormulas.forEach(function (formula, index) {
       if (formula && !rowFormulas[index]) {
-        throw verificationError_('Spreadsheet formula was not preserved for: ' +
+        recordDiscrepancy('Spreadsheet formula was not preserved for: ' +
           layout.headers[index], {
           field: layout.headers[index],
           expected: 'formula present',
@@ -2399,12 +2407,17 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   const hasFormulaError = /^#(?:ERROR|REF|NAME|VALUE|N\/A|DIV\/0)!?$/
     .test(sourceDisplayValue);
   if ((!hasNativeLink && !hasHyperlinkFormula) || hasFormulaError) {
-    throw verificationError_('Source file link verification failed.', {
+    recordDiscrepancy('Source file link verification failed.', {
       field: 'Source file link',
       expected: 'valid link to the source PDF',
       actual: hasFormulaError ? 'spreadsheet formula error' : 'link missing or incorrect',
       valueType: 'text'
     });
+  }
+  if (discrepancies.length > 0) {
+    const error = new Error(firstVerificationMessage);
+    error.verificationDiscrepancies = discrepancies;
+    throw error;
   }
 }
 

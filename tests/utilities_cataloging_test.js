@@ -382,6 +382,10 @@ function testExtractionSchemaAndCalendarValidation() {
     ...onlyCustomerCode,
     problems: ["Non è chiara l'inclusione dell'IVA."]
   }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['It is not certain whether VAT is included.']
+  }).valid, false);
 
   const duplicateSheetValues = {
     ...raw,

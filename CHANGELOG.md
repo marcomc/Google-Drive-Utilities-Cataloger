@@ -65,6 +65,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Recognize the Italian `Codice contratto` label as an optional ownership
   identifier when a customer code is present, while preserving VAT ambiguities
   in both grammatical genders as blocking conditions.
+- Include every detected spreadsheet, formula, total, and source-link mismatch
+  in a failed-import report instead of stopping at the first discrepancy.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 
