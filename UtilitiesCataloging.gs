@@ -605,7 +605,9 @@ function extractUtilityData_(file, driveAgentsPolicy) {
   validateRawExtractionShape_(extracted);
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
-  return normalizeExtraction_(extracted);
+  const normalized = normalizeExtraction_(extracted);
+  applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
+  return normalized;
 }
 
 function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file) {
@@ -1133,21 +1135,37 @@ function normalizeExtraction_(extracted) {
   applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ? normalized.problems : [];
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
-  applySupplierFieldDefaults_(normalized);
   return normalized;
 }
 
-function applySupplierFieldDefaults_(extracted) {
+function applySupplierFieldDefaults_(extracted, availableHeaders) {
+  if (!extracted || extracted.document_type !== 'Invoice' ||
+    !Array.isArray(availableHeaders)) {
+    return;
+  }
+  const normalizedAvailableHeaders = availableHeaders.map(normalizeHeader_);
   const defaults = getLocalization_().supplierFieldDefaults || [];
   defaults.forEach(function (defaultValue) {
     if (!defaultValue || defaultValue.supplier !== extracted.supplier ||
-      defaultValue.supply_type !== extracted.supply_type ||
-      !defaultValue.header) {
+      defaultValue.supply_type !== extracted.supply_type || !defaultValue.header) {
+      return;
+    }
+    const defaultHeader = normalizeHeader_(defaultValue.header);
+    const headerIsAvailable = normalizedAvailableHeaders.indexOf(defaultHeader) >= 0;
+    if (defaultValue.absencePattern) {
+      const absencePattern = new RegExp(defaultValue.absencePattern, 'i');
+      extracted.problems = extracted.problems.filter(function (problem) {
+        return !(absencePattern.test(String(problem)) &&
+          /(?:assente|mancante|non\s+presente|missing|absent|not\s+present)/i
+            .test(String(problem)));
+      });
+    }
+    if (!headerIsAvailable) {
       return;
     }
     const matching = extracted.sheet_values.filter(function (entry) {
       return entry && normalizeHeader_(entry.header) ===
-        normalizeHeader_(defaultValue.header);
+        defaultHeader;
     });
     if (matching.length === 0) {
       extracted.sheet_values.push({
@@ -1157,16 +1175,6 @@ function applySupplierFieldDefaults_(extracted) {
     } else if (matching[0].value === null || matching[0].value === undefined ||
       (typeof matching[0].value === 'string' && !matching[0].value.trim())) {
       matching[0].value = defaultValue.value;
-    }
-    // A model note that merely reports this reviewed absence must not turn a
-    // safe, documented zero into a blocking extraction failure.
-    if (defaultValue.absencePattern) {
-      const absencePattern = new RegExp(defaultValue.absencePattern, 'i');
-      extracted.problems = extracted.problems.filter(function (problem) {
-        return !(absencePattern.test(String(problem)) &&
-          /(?:assente|mancante|non\s+presente|missing|absent|not\s+present)/i
-            .test(String(problem)));
-      });
     }
   });
 }

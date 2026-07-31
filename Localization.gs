@@ -1,6 +1,7 @@
 /**
- * Return all bundled localization data. Locale files contain labels and
- * spreadsheet-header aliases only; processing logic stays elsewhere.
+ * Return all bundled localization data. Locale files contain labels, aliases,
+ * and locale-specific extraction/report/profile data; processing logic stays
+ * elsewhere.
  */
 function getLocalizationRegistry_() {
   return Object.freeze({

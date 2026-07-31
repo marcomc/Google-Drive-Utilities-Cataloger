@@ -177,6 +177,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ["Spese d'incasso non presente nel documento."],
     sheet_values: []
   });
+  context.applySupplierFieldDefaults_(iliadDefault, ["Spese d'incasso"]);
   assert.equal(JSON.stringify(iliadDefault.sheet_values), JSON.stringify([
     { header: "Spese d'incasso", value: 0 }
   ]));
@@ -188,6 +189,7 @@ function testExtractionSchemaAndCalendarValidation() {
     supply_type: 'Internet',
     sheet_values: [{ header: "Spese d'incasso", value: 1.25 }]
   });
+  context.applySupplierFieldDefaults_(iliadPrintedCharge, ["Spese d'incasso"]);
   assert.equal(JSON.stringify(iliadPrintedCharge.sheet_values), JSON.stringify([
     { header: "Spese d'incasso", value: 1.25 }
   ]));
@@ -198,7 +200,29 @@ function testExtractionSchemaAndCalendarValidation() {
     supply_type: 'Internet',
     sheet_values: [{ header: "Spese d'incasso", value: null }]
   });
+  context.applySupplierFieldDefaults_(iliadEmptyCharge, ["Spese d'incasso"]);
   assert.equal(iliadEmptyCharge.sheet_values[0].value, 0);
+
+  const iliadWithoutConfiguredChargeColumn = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(iliadWithoutConfiguredChargeColumn, []);
+  assert.deepEqual(iliadWithoutConfiguredChargeColumn.sheet_values, []);
+  assert.deepEqual(iliadWithoutConfiguredChargeColumn.problems, []);
+
+  const iliadReport = context.normalizeExtraction_({
+    ...raw,
+    document_type: 'Report',
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(iliadReport, ["Spese d'incasso"]);
+  assert.deepEqual(iliadReport.sheet_values, []);
 
   const energygas = context.normalizeExtraction_({
     ...raw,
@@ -338,6 +362,42 @@ function testExtractionSchemaAndCalendarValidation() {
     contract_object: ''
   };
   assert.equal(context.validateExtraction_(contract).valid, false);
+}
+
+function testSupplierDefaultsUseRuntimeTargetHeaders() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'it',
+    canonical_suppliers: ['ILIAD'],
+    supplier_aliases: {},
+    canonical_supplies: ['Internet'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  context.getSheetHeadersBySupply_ = () => ({
+    Internet: ["Spese d'incasso"]
+  });
+  context.callGeminiForPdf_ = () => 'model-response';
+  context.parseGeminiJson_ = () => ({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."]
+  });
+  context.validateRawExtractionShape_ = () => {};
+
+  const extracted = context.extractUtilityData_({
+    getBlob: () => ({}),
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf'
+  }, '');
+
+  assert.equal(JSON.stringify(extracted.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 0 }
+  ]));
+  assert.equal(JSON.stringify(extracted.problems), JSON.stringify([]));
 }
 
 function testAmbiguousAddressRulesFailClosed() {
@@ -2815,6 +2875,7 @@ function testSingleFileStopsWhenTargetJournalRemains() {
 
 testFormulaLikeTextIsWrittenLiterally();
 testExtractionSchemaAndCalendarValidation();
+testSupplierDefaultsUseRuntimeTargetHeaders();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
