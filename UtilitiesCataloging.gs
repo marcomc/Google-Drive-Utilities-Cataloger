@@ -2187,7 +2187,8 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
     }
     const normalized = normalizeHeader_(entry.header);
     if (allowedHeaders[normalized] && !formulaColumns[layout.lookup[normalized] - 1] &&
-      (values[normalized] === undefined || isReconciliationCostHeader_(normalized))) {
+      (values[normalized] === undefined ||
+      isOverridableReconciliationCostHeader_(normalized))) {
       values[normalized] = entry.value;
     }
   });
@@ -2324,7 +2325,8 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   extracted.sheet_values.forEach(function (entry) {
     const normalized = normalizeHeader_(entry.header);
     if (layout.lookup[normalized] &&
-      (expected[normalized] === undefined || isReconciliationCostHeader_(normalized))) {
+      (expected[normalized] === undefined ||
+      isOverridableReconciliationCostHeader_(normalized))) {
       expected[normalized] = entry.value;
     }
   });
@@ -2416,6 +2418,13 @@ function isReconciliationCostHeader_(normalizedHeader) {
       return normalizeHeader_(header) === normalizedHeader;
     });
   });
+}
+
+function isOverridableReconciliationCostHeader_(normalizedHeader) {
+  return isReconciliationCostHeader_(normalizedHeader) &&
+    !getHeaderAliases_('total').some(function (header) {
+      return normalizeHeader_(header) === normalizedHeader;
+    });
 }
 
 function verificationError_(message, discrepancy) {
@@ -3460,7 +3469,8 @@ function formatVerificationValue_(value, valueType, labels) {
   if (valueType === 'date' && Object.prototype.toString.call(value) === '[object Date]') {
     return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
   }
-  return oneLineReportText_(value || labels.notAvailable);
+  return oneLineReportText_(value === null || value === undefined ?
+    labels.notAvailable : value);
 }
 
 function oneLineReportText_(value) {

@@ -53,6 +53,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   rather than suppressing them as one informational note.
 - Label non-monetary verification discrepancies as numbers without an `EUR`
   suffix or money tolerance.
+- Journal the supplier-profile workspace folders before creation and refuse to
+  adopt same-named operator folders without exact managed ownership state.
+- Keep the reconciled invoice total authoritative when a supplementary
+  `sheet_values` entry conflicts with it.
+- Preserve `false` boolean values in failed-import discrepancy reports.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

@@ -634,10 +634,12 @@ function ensureInstallerPolicyFile_(rootFolder, policyText) {
 
 function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
   const names = getSupplierProfileNamesForLocale_(locale);
-  const profileRoot = ensureSingleInstallerFolder_(rootFolder, names.folder);
-  const templateFolder = ensureSingleInstallerFolder_(profileRoot, names.templateFolder);
-  const template = getLocalizedSupplierProfileTemplate_(locale);
   const properties = PropertiesService.getScriptProperties();
+  const workspace = ensureInstallerSupplierProfileWorkspace_(rootFolder, names,
+    properties);
+  const profileRoot = workspace.profileRoot;
+  const templateFolder = workspace.templateFolder;
+  const template = getLocalizedSupplierProfileTemplate_(locale);
   let state = getSupplierProfileTemplateState_(properties);
   const files = templateFolder.getFilesByName(names.templateFile);
   const matches = [];
@@ -780,7 +782,65 @@ function isPristineInstallerSupplierProfileTemplate_(content, template) {
   );
 }
 
-function ensureSingleInstallerFolder_(parent, name) {
+function ensureInstallerSupplierProfileWorkspace_(rootFolder, names, properties) {
+  let state = getSupplierProfileWorkspaceState_(properties);
+  if (!state) {
+    state = migrateLegacySupplierProfileWorkspaceState_(rootFolder, names,
+      properties);
+  }
+  const profileRoot = ensureInstallerManagedSupplierProfileFolder_(rootFolder,
+    names.folder, 'profileRoot', properties, state);
+  state = getSupplierProfileWorkspaceState_(properties);
+  const templateFolder = ensureInstallerManagedSupplierProfileFolder_(
+    profileRoot, names.templateFolder, 'templateFolder', properties, state
+  );
+  return { profileRoot: profileRoot, templateFolder: templateFolder };
+}
+
+function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
+  properties, state) {
+  const matches = getSingleNamedInstallerFolder_(parent, name);
+  const idKey = key + 'Id';
+  const nameKey = key + 'Name';
+  const parentKey = key + 'ParentId';
+  const statusKey = key + 'Status';
+  if (!state || state[statusKey] === undefined) {
+    if (matches.length > 0) {
+      throw new Error('The existing supplier profile folder is not installer-managed; ' +
+        'refusing to adopt it.');
+    }
+    state = state || { rootFolderId: parent.getId() };
+    state[parentKey] = parent.getId();
+    state[nameKey] = name;
+    state[statusKey] = 'planned';
+    state[idKey] = '';
+    saveSupplierProfileWorkspaceState_(properties, state);
+  } else {
+    assertInstallerSupplierProfileFolderState_(state, parent, name, key);
+  }
+  if (state[statusKey] === 'managed') {
+    if (matches.length !== 1 || matches[0].getId() !== state[idKey]) {
+      throw new Error('The installer-managed supplier profile folder identity ' +
+        'does not match the recorded resource.');
+    }
+    return matches[0];
+  }
+  if (state[statusKey] !== 'planned') {
+    throw new Error('The supplier profile folder state is invalid.');
+  }
+  if (matches.length > 1 || (matches.length === 1 &&
+    !isPristineInstallerSupplierProfileFolder_(matches[0]))) {
+    throw new Error('The planned supplier profile folder is not pristine; ' +
+      'refusing to adopt it.');
+  }
+  const folder = matches.length === 1 ? matches[0] : parent.createFolder(name);
+  state[idKey] = folder.getId();
+  state[statusKey] = 'managed';
+  saveSupplierProfileWorkspaceState_(properties, state);
+  return folder;
+}
+
+function getSingleNamedInstallerFolder_(parent, name) {
   const folders = parent.getFoldersByName(name);
   const matches = [];
   while (folders.hasNext()) {
@@ -792,7 +852,76 @@ function ensureSingleInstallerFolder_(parent, name) {
   if (matches.length > 1) {
     throw new Error('More than one folder exists: ' + name + '.');
   }
-  return matches.length === 1 ? matches[0] : parent.createFolder(name);
+  return matches;
+}
+
+function isPristineInstallerSupplierProfileFolder_(folder) {
+  return !folder.getFiles().hasNext() && !folder.getFolders().hasNext();
+}
+
+function getSupplierProfileWorkspaceState_(properties) {
+  const raw = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_WORKSPACE_STATE
+  );
+  if (!raw) {
+    return null;
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  return state;
+}
+
+function saveSupplierProfileWorkspaceState_(properties, state) {
+  properties.setProperty(CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_WORKSPACE_STATE,
+    JSON.stringify(state));
+}
+
+function assertInstallerSupplierProfileFolderState_(state, parent, name, key) {
+  if ((key === 'profileRoot' && state.rootFolderId !== parent.getId()) ||
+    state[key + 'ParentId'] !== parent.getId() ||
+    state[key + 'Name'] !== name) {
+    throw new Error('The supplier profile folder state does not match the ' +
+      'configured parent and name.');
+  }
+}
+
+function migrateLegacySupplierProfileWorkspaceState_(rootFolder, names,
+  properties) {
+  const templateState = getSupplierProfileTemplateState_(properties);
+  if (!templateState || templateState.status !== 'managed' ||
+    templateState.rootFolderId !== rootFolder.getId()) {
+    return null;
+  }
+  const profileRoots = getSingleNamedInstallerFolder_(rootFolder, names.folder);
+  if (profileRoots.length !== 1) {
+    return null;
+  }
+  const templateFolders = getSingleNamedInstallerFolder_(profileRoots[0],
+    names.templateFolder);
+  if (templateFolders.length !== 1 ||
+    templateFolders[0].getId() !== templateState.templateFolderId) {
+    return null;
+  }
+  const state = {
+    rootFolderId: rootFolder.getId(),
+    profileRootParentId: rootFolder.getId(),
+    profileRootName: names.folder,
+    profileRootStatus: 'managed',
+    profileRootId: profileRoots[0].getId(),
+    templateFolderParentId: profileRoots[0].getId(),
+    templateFolderName: names.templateFolder,
+    templateFolderStatus: 'managed',
+    templateFolderId: templateFolders[0].getId()
+  };
+  saveSupplierProfileWorkspaceState_(properties, state);
+  return state;
 }
 
 function getLocalizedSupplierProfileTemplate_(locale) {

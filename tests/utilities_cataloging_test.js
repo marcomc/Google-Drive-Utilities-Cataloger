@@ -399,6 +399,10 @@ function testExtractionSchemaAndCalendarValidation() {
   }], context.getLocalization_().reportLabels);
   assert.match(discrepancy[0], /atteso 2; riscontrato 1/);
   assert.doesNotMatch(discrepancy[0], /EUR/);
+  const booleanDiscrepancy = context.formatVerificationDiscrepancies_([{
+    field: 'Direct debit', expected: false, actual: true, valueType: 'text'
+  }], context.getLocalization_().reportLabels);
+  assert.match(booleanDiscrepancy[0], /atteso false; riscontrato true/);
 
   const report = {
     ...raw,
@@ -2543,6 +2547,43 @@ function testFormulaTotalMustReconcileWithExtraction() {
   }]);
 }
 
+function testSupplementaryValuesCannotOverrideValidatedInvoiceTotal() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    total: ['Cost total'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  let actualTotal = 14.64;
+  const sheet = {
+    getRange: (_row, column, _rows, width) => {
+      if (column === 1 && width === 2) {
+        return { getFormulas: () => [['', '=HYPERLINK("url";"text")']] };
+      }
+      return {
+        getValue: () => column === 1 ? actualTotal : 'text',
+        getRichTextValue: () => null,
+        getFormula: () => column === 2 ?
+          '=HYPERLINK("https://drive.test/file-id";"text")' : '',
+        getDisplayValue: () => 'text'
+      };
+    }
+  };
+  const extracted = validInvoice();
+  extracted.sheet_values = [{ header: 'Cost total', value: 99 }];
+  const layout = {
+    headerRow: 1,
+    headers: ['Cost total', 'Source file'],
+    lookup: { 'cost total': 1, 'source file': 2 }
+  };
+
+  assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted));
+  actualTotal = 99;
+  assert.throws(() => context.verifyImportedRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted),
+  /Spreadsheet value verification failed/);
+}
+
 function testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues() {
   const context = loadCataloger();
   vm.runInContext(
@@ -2985,6 +3026,7 @@ testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
 testReferenceMonthVerificationAcceptsSheetNumericCoercion();
 testFormulaTotalMustReconcileWithExtraction();
+testSupplementaryValuesCannotOverrideValidatedInvoiceTotal();
 testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();

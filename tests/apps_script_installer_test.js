@@ -87,6 +87,7 @@ function createSupplierProfileTemplateFixture(initialContent, initialState) {
     throw new Error('network must not run');
   });
   context.CONFIG = { PROPERTY_KEYS: {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
     SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE'
   } };
   context.PropertiesService = {
@@ -101,8 +102,10 @@ function createSupplierProfileTemplateFixture(initialContent, initialState) {
     templateFile: 'PROFILE.example.md'
   });
   context.getLocalizedSupplierProfileTemplate_ = () => template;
-  context.ensureSingleInstallerFolder_ = (_parent, name) =>
-    name === 'Supplier Profiles' ? { getId: () => 'profile-root-id' } : templateFolder;
+  context.ensureInstallerSupplierProfileWorkspace_ = () => ({
+    profileRoot: { getId: () => 'profile-root-id' },
+    templateFolder: templateFolder
+  });
   return {
     context,
     rootFolder: { getId: () => 'root-folder-id' },
@@ -111,6 +114,50 @@ function createSupplierProfileTemplateFixture(initialContent, initialState) {
     template,
     writes
   };
+}
+
+function createSupplierProfileWorkspaceFixture(existingProfileRoot) {
+  const stored = {};
+  const createOperations = [];
+  const makeFolder = (id, name) => {
+    const folders = [];
+    const files = [];
+    return {
+      getId: () => id,
+      isTrashed: () => false,
+      getFoldersByName: (requestedName) => iteratorFor(
+        folders.filter((folder) => folder.getName() === requestedName)
+      ),
+      getFolders: () => iteratorFor(folders),
+      getFiles: () => iteratorFor(files),
+      getName: () => name,
+      createFolder: (childName) => {
+        const child = makeFolder(id + '/' + childName, childName);
+        folders.push(child);
+        createOperations.push([id, childName]);
+        return child;
+      }
+    };
+  };
+  const rootFolder = makeFolder('root-folder-id', 'root');
+  if (existingProfileRoot) {
+    rootFolder.createFolder('Supplier Profiles');
+    createOperations.length = 0;
+  }
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  context.CONFIG = { PROPERTY_KEYS: {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
+    SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE'
+  } };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => { stored[key] = value; }
+    })
+  };
+  return { context, rootFolder, stored, createOperations };
 }
 
 function testSecretManagerBootstrapHandoff() {
@@ -279,6 +326,38 @@ function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
   const state = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
   assert.equal(state.status, 'managed');
   assert.equal(state.content, fixture.template);
+}
+
+function testSupplierProfileWorkspaceRejectsUnmanagedFoldersAndJournalsCreation() {
+  const unmanaged = createSupplierProfileWorkspaceFixture(true);
+  assert.throws(
+    () => unmanaged.context.ensureInstallerSupplierProfileWorkspace_(
+      unmanaged.rootFolder,
+      { folder: 'Supplier Profiles', templateFolder: '_template' },
+      unmanaged.context.PropertiesService.getScriptProperties()
+    ),
+    /not installer-managed/
+  );
+  assert.deepEqual(unmanaged.createOperations, []);
+
+  const fresh = createSupplierProfileWorkspaceFixture(false);
+  const workspace = fresh.context.ensureInstallerSupplierProfileWorkspace_(
+    fresh.rootFolder,
+    { folder: 'Supplier Profiles', templateFolder: '_template' },
+    fresh.context.PropertiesService.getScriptProperties()
+  );
+  const state = JSON.parse(fresh.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(workspace.profileRoot.getId(), 'root-folder-id/Supplier Profiles');
+  assert.equal(
+    workspace.templateFolder.getId(),
+    'root-folder-id/Supplier Profiles/_template'
+  );
+  assert.equal(state.profileRootStatus, 'managed');
+  assert.equal(state.templateFolderStatus, 'managed');
+  assert.deepEqual(fresh.createOperations, [
+    ['root-folder-id', 'Supplier Profiles'],
+    ['root-folder-id/Supplier Profiles', '_template']
+  ]);
 }
 
 function testSecretManagerScopeIsRestricted() {
@@ -767,6 +846,7 @@ testBootstrapInitializesSpreadsheetUnderLifecycleLock();
 testSupplierProfileTemplatePreservesManualContent();
 testSupplierProfileTemplateCreationAndRecoveryAreJournaled();
 testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
+testSupplierProfileWorkspaceRejectsUnmanagedFoldersAndJournalsCreation();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
