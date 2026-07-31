@@ -1583,8 +1583,16 @@ ensure_api_executable_deployment() {
     creation_description="Owner-only installer bootstrap $(date -u +%Y%m%dT%H%M%SZ)-$$"
     state_set "deploymentCreationDescription" "${creation_description}"
   fi
-  deployments_json="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
-    --json deployments)"
+  deployments_json=""
+  # Helpers explicitly check failures; this branch adds installer guidance.
+  # shellcheck disable=SC2310
+  if ! run_apps_script_clasp_json \
+    "${AUTH_DIR}/.clasprc.json" \
+    deployments_json \
+    deployments; then
+    die "Could not list Apps Script API deployments." \
+      "${INSTALL_DOC}#api-executable"
+  fi
   deployment_count="$(jq -er --arg description "${creation_description}" '
     [.[] | select(.description == $description)] | length
   ' <<<"${deployments_json}")"
@@ -1599,9 +1607,17 @@ ensure_api_executable_deployment() {
     debug "Recovered pending owner-only Apps Script API deployment"
   else
     debug "Creating owner-only Apps Script API deployment"
-    deployment_output="$("${CLASP[@]}" -A "${AUTH_DIR}/.clasprc.json" \
-      --json deploy \
-      --description "${creation_description}")"
+    deployment_output=""
+    # Helpers explicitly check failures; this branch adds installer guidance.
+    # shellcheck disable=SC2310
+    if ! run_apps_script_clasp_json \
+      "${AUTH_DIR}/.clasprc.json" \
+      deployment_output \
+      deploy \
+      --description "${creation_description}"; then
+      die "Could not create the Apps Script API deployment." \
+        "${INSTALL_DOC}#api-executable"
+    fi
     deployment_id="$(printf '%s' "${deployment_output}" |
       jq -r '.deploymentId // empty' 2>/dev/null || true)"
   fi

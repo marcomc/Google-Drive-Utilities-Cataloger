@@ -53,10 +53,16 @@ fi
 case "${command_name}" in
   deployments)
     [[ "$*" == "-A ${auth_file} --json deployments" ]] || exit 6
-    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'oauth-invalid-grant' ]]; then
-      printf '%s\n' 'invalid_grant' >&2
-      exit 9
-    fi
+    case "${TEST_DEPLOYMENT_SCENARIO}" in
+      oauth-invalid-grant)
+        printf '%s\n' 'invalid_grant' >&2
+        exit 9
+        ;;
+      oauth-refresh-failure)
+        printf '%s\n' 'authorization refresh failed' >&2
+        exit 9
+        ;;
+    esac
     ;;
   pull)
     [[ "$*" == "-A ${auth_file} pull" ]] || exit 6
@@ -66,9 +72,17 @@ case "${command_name}" in
     ;;
   version)
     [[ "$*" == "-A ${auth_file} --json version main-111111111111" ]] || exit 6
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'oauth-invalid-grant-on-version' ]]; then
+      printf '%s\n' 'invalid_grant' >&2
+      exit 9
+    fi
     ;;
   deploy)
     [[ "$*" == "-A ${auth_file} --json deploy --deploymentId ${TEST_LISTED_DEPLOYMENT_ID} --versionNumber 5 --description main-111111111111" ]] || exit 6
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'oauth-invalid-grant-on-deploy' ]]; then
+      printf '%s\n' 'invalid_grant' >&2
+      exit 9
+    fi
     ;;
   *)
     exit 2
@@ -175,7 +189,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid)
+  valid | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     ;;
   missing)
     http_status=404
@@ -376,6 +390,55 @@ require_fixture_failure \
 assert_failure_before_push "${invalid_grant_dir}"
 grep -q 'OAuth refresh token is invalid or expired' \
   "${invalid_grant_dir}/output.log"
+
+oauth_refresh_failure_dir="${TEST_ROOT}/oauth-refresh-failure"
+mkdir -p "${oauth_refresh_failure_dir}"
+require_fixture_failure \
+  'An unclassified OAuth refresh failure was accepted.' \
+  "${oauth_refresh_failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "oauth-refresh-failure"
+assert_failure_before_push "${oauth_refresh_failure_dir}"
+grep -q 'Could not refresh authorization for Apps Script deployment operation' \
+  "${oauth_refresh_failure_dir}/output.log"
+
+post_push_invalid_grant_dir="${TEST_ROOT}/oauth-invalid-grant-on-deploy"
+post_push_invalid_grant_commands=""
+mkdir -p "${post_push_invalid_grant_dir}"
+require_fixture_failure \
+  'An OAuth refresh failure after source upload was accepted.' \
+  "${post_push_invalid_grant_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "oauth-invalid-grant-on-deploy"
+post_push_invalid_grant_commands="$(tr '\n' ' ' <"${post_push_invalid_grant_dir}/commands.log")"
+if [[ "${post_push_invalid_grant_commands}" != \
+  'clasp-deployments api-get-1 clasp-pull clasp-push clasp-version ' ]]; then
+  printf 'Unexpected commands before OAuth deployment failure: %s\n' \
+    "${post_push_invalid_grant_commands}" >&2
+  sed -n '1,160p' "${post_push_invalid_grant_dir}/output.log" >&2
+  exit 1
+fi
+grep -q 'OAuth refresh token is invalid or expired' \
+  "${post_push_invalid_grant_dir}/output.log"
+grep -q 'deployment update failed after source upload' \
+  "${post_push_invalid_grant_dir}/output.log"
+
+post_push_version_invalid_grant_dir="${TEST_ROOT}/oauth-invalid-grant-on-version"
+mkdir -p "${post_push_version_invalid_grant_dir}"
+require_fixture_failure \
+  'An OAuth refresh failure during version creation was accepted.' \
+  "${post_push_version_invalid_grant_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "oauth-invalid-grant-on-version"
+post_push_version_invalid_grant_commands="$(tr '\n' ' ' <"${post_push_version_invalid_grant_dir}/commands.log")"
+if [[ "${post_push_version_invalid_grant_commands}" != \
+  'clasp-deployments api-get-1 clasp-pull clasp-push ' ]]; then
+  printf 'Unexpected commands before OAuth version failure: %s\n' \
+    "${post_push_version_invalid_grant_commands}" >&2
+  sed -n '1,160p' "${post_push_version_invalid_grant_dir}/output.log" >&2
+  exit 1
+fi
+grep -q 'OAuth refresh token is invalid or expired' \
+  "${post_push_version_invalid_grant_dir}/output.log"
+grep -q 'version creation failed after source upload' \
+  "${post_push_version_invalid_grant_dir}/output.log"
 
 for scenario in missing wrong-script missing-entry-point wrong-access mixed-public; do
   failure_dir="${TEST_ROOT}/${scenario}"

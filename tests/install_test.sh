@@ -952,6 +952,105 @@ test_invalid_stored_deployment_blocks_source_push() {
   fi
 }
 
+test_invalid_authorization_blocks_pending_deployment_creation() {
+  local activity_log="${TEST_STATE_DIR}/invalid-authorization-pending-deployment-activity"
+  local output_file="${TEST_STATE_DIR}/invalid-authorization-pending-deployment-output"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '\n' ;;
+        .deploymentCreationDescription)
+          printf '%s\n' "Owner-only installer bootstrap test-marker"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    state_set() {
+      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      printf '%s\n' 'invalid_grant' >&2
+      return 9
+    }
+    CLASP=(clasp_fixture)
+    ensure_api_executable_deployment
+  ) >"${output_file}" 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 ]] ||
+    grep -q -- '--json deploy --description' "${activity_log}" ||
+    grep -q '^state-set deploymentId' "${activity_log}" ||
+    ! grep -q 'OAuth refresh token is invalid or expired' "${output_file}"; then
+    printf 'FAIL: invalid authorization did not block pending deployment creation\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_invalid_authorization_blocks_new_deployment_creation() {
+  local activity_log="${TEST_STATE_DIR}/invalid-authorization-new-deployment-activity"
+  local output_file="${TEST_STATE_DIR}/invalid-authorization-new-deployment-output"
+  local test_status
+
+  : >"${activity_log}"
+  set +e
+  (
+    state_get() {
+      case "$1" in
+        .scriptId) printf '%s\n' "test-script" ;;
+        .deploymentId) printf '\n' ;;
+        .deploymentCreationDescription)
+          printf '%s\n' "Owner-only installer bootstrap test-marker"
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    state_set() {
+      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
+    }
+    read_apps_script_deployment() {
+      printf '%s\n' 'unexpected-read' >>"${activity_log}"
+      return 96
+    }
+    # Invoked indirectly through the CLASP command array.
+    # shellcheck disable=SC2329
+    clasp_fixture() {
+      printf 'clasp %s\n' "$*" >>"${activity_log}"
+      case "$*" in
+        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments")
+          printf '%s\n' '[]'
+          ;;
+        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deploy --description Owner-only installer bootstrap test-marker")
+          printf '%s\n' 'invalid_grant' >&2
+          return 9
+          ;;
+        *) return 97 ;;
+      esac
+    }
+    CLASP=(clasp_fixture)
+    ensure_api_executable_deployment
+  ) >"${output_file}" 2>&1
+  test_status=$?
+  set -e
+
+  if [[ "${test_status}" -eq 0 ]] ||
+    ! grep -q -- '--json deploy --description' "${activity_log}" ||
+    grep -q '^state-set deploymentId' "${activity_log}" ||
+    grep -q '^unexpected-read$' "${activity_log}" ||
+    ! grep -q 'OAuth refresh token is invalid or expired' "${output_file}"; then
+    printf 'FAIL: invalid authorization did not block new deployment creation\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
 test_drive_id_extraction
 test_input_validation
 test_version_parsing
@@ -973,6 +1072,8 @@ test_owner_only_api_deployment_validation
 test_invalid_stored_deployment_is_not_recreated
 test_invalid_new_deployment_is_stored_for_safe_resume
 test_invalid_stored_deployment_blocks_source_push
+test_invalid_authorization_blocks_pending_deployment_creation
+test_invalid_authorization_blocks_new_deployment_creation
 test_pending_deployment_creation_is_reconciled_without_duplicate
 test_ambiguous_pending_deployment_creation_fails_closed
 test_valid_stored_deployment_skips_source_push

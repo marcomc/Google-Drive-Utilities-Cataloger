@@ -261,7 +261,11 @@ function testDeploymentContract() {
   assert.match(deployScript, /A newer main revision exists; skipping stale deployment/);
   assert.match(deployScript, /read_apps_script_deployment/);
   assert.match(deployScript, /validate_owner_only_api_deployment/);
-  assert.match(deploymentHelper, /--json deployments/);
+  assert.match(deploymentHelper, /run_apps_script_clasp_json/);
+  assert.match(
+    deploymentHelper,
+    /run_apps_script_clasp_json[\s\S]{0,160}deployments/
+  );
   assert.match(
     deploymentHelper,
     /script\.googleapis\.com\/v1\/projects\/.+\/deployments\//
@@ -269,8 +273,15 @@ function testDeploymentContract() {
   assert.match(deploymentHelper, /EXECUTION_API/);
   assert.match(deploymentHelper, /MYSELF/);
   assert.match(deployScript, /remote_time_zone=/);
-  assert.match(deployScript, /--json version/);
-  assert.match(deployScript, /--json deploy/);
+  assert.match(deployScript, /run_apps_script_clasp_json/);
+  assert.match(
+    deployScript,
+    /run_apps_script_clasp_json[\s\S]{0,160}version/
+  );
+  assert.match(
+    deployScript,
+    /run_apps_script_clasp_json[\s\S]{0,240}deploy/
+  );
   assert.doesNotMatch(deployScript, /installAutomationTriggers/);
   assert.ok(
     deployScript.indexOf('read_apps_script_deployment') <

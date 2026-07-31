@@ -105,6 +105,10 @@
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
   command name.
+  Route every installer or CI `clasp --json` deployment list, creation, and
+  inspection operation through the shared authorization-aware helper. Preserve
+  the actionable `invalid_grant` remediation without relaying provider stderr,
+  and test each path before it can mutate a deployment.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
 - Journal planned ownership before creating a remote resource, then persist its

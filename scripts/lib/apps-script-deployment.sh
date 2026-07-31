@@ -4,6 +4,40 @@
 
 declare -a CLASP
 
+run_apps_script_clasp_json() {
+  local auth_file="$1"
+  local result_variable="$2"
+  local clasp_output
+  local clasp_refresh_error_file
+
+  shift 2
+  if ! clasp_output="$(
+    clasp_refresh_error_file="$(mktemp)" || {
+      printf '%s\n' \
+        'Could not create temporary authorization-inspection state.' >&2
+      exit 1
+    }
+    trap 'rm -f "${clasp_refresh_error_file}"' EXIT
+    if ! "${CLASP[@]}" -A "${auth_file}" --json "$@" \
+      2>"${clasp_refresh_error_file}"; then
+      if grep -Fq 'invalid_grant' "${clasp_refresh_error_file}"; then
+        printf '%s\n' \
+          'OAuth refresh token is invalid or expired; reauthorize the owner Desktop OAuth client and replace CLASP_AUTH_JSON.' >&2
+      else
+        printf '%s\n' \
+          'Could not refresh authorization for Apps Script deployment operation.' >&2
+      fi
+      exit 1
+    fi
+  )"; then
+    return 1
+  fi
+
+  if [[ -n "${result_variable}" ]]; then
+    printf -v "${result_variable}" '%s' "${clasp_output}"
+  fi
+}
+
 read_apps_script_deployment() {
   local auth_file="$1"
   local script_id="$2"
@@ -15,8 +49,6 @@ read_apps_script_deployment() {
   local http_response
   local http_status
   local curl_status
-  local clasp_refresh_error
-  local clasp_refresh_error_file
 
   if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
     ! "${deployment_id}" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -24,20 +56,10 @@ read_apps_script_deployment() {
     return 1
   fi
 
-  clasp_refresh_error_file="$(mktemp)"
-  if "${CLASP[@]}" -A "${auth_file}" --json deployments \
-    >/dev/null 2>"${clasp_refresh_error_file}"; then
-    rm -f "${clasp_refresh_error_file}"
-  else
-    clasp_refresh_error="$(<"${clasp_refresh_error_file}")"
-    rm -f "${clasp_refresh_error_file}"
-    if grep -Fq 'invalid_grant' <<<"${clasp_refresh_error}"; then
-      printf '%s\n' \
-        'OAuth refresh token is invalid or expired; reauthorize the owner Desktop OAuth client and replace CLASP_AUTH_JSON.' >&2
-    else
-      printf '%s\n' \
-        "Could not refresh authorization for Apps Script deployment inspection." >&2
-    fi
+  if ! run_apps_script_clasp_json \
+    "${auth_file}" \
+    "" \
+    deployments; then
     return 1
   fi
   access_token="$(jq -er '

@@ -76,15 +76,35 @@ mv "${manifest_tmp}" appsscript.json
 
 version_label="main-${DEPLOY_COMMIT_SHA::12}"
 "${CLASP[@]}" -A "${auth_file}" push --force
-version_json="$("${CLASP[@]}" -A "${auth_file}" --json version \
-  "${version_label}")"
+version_json=""
+# Helpers explicitly check failures; this branch adds post-push recovery guidance.
+# shellcheck disable=SC2310
+if ! run_apps_script_clasp_json \
+  "${auth_file}" \
+  version_json \
+  version \
+  "${version_label}"; then
+  printf '%s\n' \
+    "Apps Script version creation failed after source upload; rerun the current deployment workflow to reconcile project HEAD and the API executable." >&2
+  exit 1
+fi
 version_id="$(jq -er '
   .versionNumber | select(type == "number")
 ' <<<"${version_json}")"
-deployment_json="$("${CLASP[@]}" -A "${auth_file}" --json deploy \
+deployment_json=""
+# Helpers explicitly check failures; this branch adds post-push recovery guidance.
+# shellcheck disable=SC2310
+if ! run_apps_script_clasp_json \
+  "${auth_file}" \
+  deployment_json \
+  deploy \
   --deploymentId "${APPS_SCRIPT_DEPLOYMENT_ID}" \
   --versionNumber "${version_id}" \
-  --description "${version_label}")"
+  --description "${version_label}"; then
+  printf '%s\n' \
+    "Apps Script deployment update failed after source upload; rerun the current deployment workflow to reconcile project HEAD and the API executable." >&2
+  exit 1
+fi
 jq -e \
   --arg id "${APPS_SCRIPT_DEPLOYMENT_ID}" \
   --argjson version "${version_id}" '
