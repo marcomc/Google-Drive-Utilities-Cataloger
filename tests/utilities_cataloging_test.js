@@ -1565,6 +1565,106 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
     true);
 }
 
+function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier'],
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    year: ['Reference year'],
+    month: ['Reference month'],
+    frequency: ['Frequency'],
+    consumptionCost: ['Total consumption costs'],
+    nonConsumptionCosts: ['Total non-consumption costs'],
+    vat: ['VAT'],
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: [
+      'Total consumption costs', 'Collection charges', 'Discounts',
+      'Wi-Fi extender', 'Total non-consumption costs', 'VAT', 'Total cost',
+      'Source file'
+    ],
+    lookup: {
+      'total consumption costs': 1,
+      'collection charges': 2,
+      discounts: 3,
+      'wi fi extender': 4,
+      'total non-consumption costs': 5,
+      vat: 6,
+      'total cost': 7,
+      'source file': 8
+    }
+  };
+  const formulas = ['', '', '', '', '=B3+C3+D3', '', '=A3+E3+F3', ''];
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 8) {
+        return { getFormulas: () => [formulas] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    cost_consumption: 0,
+    cost_non_consumption: 21.29,
+    vat: 4.68,
+    total: 25.97,
+    sheet_values: [
+      { header: 'Total consumption costs', value: 25.99 },
+      { header: 'Collection charges', value: 0 },
+      { header: 'Discounts', value: -4 },
+      { header: 'Wi-Fi extender', value: 3.98 },
+      { header: 'VAT', value: 0 }
+    ]
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, extracted);
+
+  assert.deepEqual(writes.filter((entry) => entry[2] === 'value').sort(
+    (left, right) => left[1] - right[1]
+  ), [
+    [3, 1, 'value', 25.99],
+    [3, 2, 'value', 0],
+    [3, 3, 'value', -4],
+    [3, 4, 'value', 3.98],
+    [3, 6, 'value', 0]
+  ]);
+
+  const actualValues = [25.99, 0, -4, 3.98, -0.02, 0, 25.97, 'invoice'];
+  const verificationSheet = {
+    getLastRow: () => 3,
+    getRange: (_row, column, _rows, width) => {
+      if (column === 1 && width === 8) {
+        return { getFormulas: () => [formulas] };
+      }
+      return {
+        getValue: () => actualValues[column - 1],
+        getRichTextValue: () => null,
+        getFormula: () => column === 8 ?
+          '=HYPERLINK("https://drive.test/file";"invoice")' : formulas[column - 1],
+        getDisplayValue: () => 'invoice'
+      };
+    }
+  };
+  assert.doesNotThrow(() => context.verifyImportedRow_(verificationSheet, 3,
+    layout, { getUrl: () => 'https://drive.test/file' }, extracted));
+}
+
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
   const writes = [];
   const context = loadCataloger();
@@ -2619,6 +2719,7 @@ testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
+testDetailedCostSheetValuesOverrideBroadReconciliationValues();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();

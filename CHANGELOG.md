@@ -22,6 +22,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   valid import; both identifiers must be unavailable to require identity review.
 - Treat an otherwise reconciled note that line items include VAT as
   informational rather than a blocking extraction problem.
+- Let detailed non-formula `sheet_values` cost entries override broad
+  reconciliation fields, preserving spreadsheet formulas that aggregate the
+  detailed invoice charges.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

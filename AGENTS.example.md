@@ -99,6 +99,10 @@ manual review.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
+- Treat top-level consumption, non-consumption, VAT, and total values as
+  reconciliation data. For a non-formula detailed cost header, return the
+  printed line item in `sheet_values`; that exact row value is authoritative
+  over a broad reconciliation total for the same destination cell.
 - For electricity invoices, inspect every consumption and cost table for
   time-of-use bands. When the document reports F1, F2, and F3 separately,
   import three separate consumption values and three separate cost values into

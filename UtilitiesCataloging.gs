@@ -878,6 +878,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds.',
+    'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each printed line item in sheet_values using its exact header. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'Classify a printed address only with these configured rules: ' +
@@ -1934,7 +1935,8 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
       return;
     }
     const normalized = normalizeHeader_(entry.header);
-    if (allowedHeaders[normalized] && values[normalized] === undefined && !formulaColumns[layout.lookup[normalized] - 1]) {
+    if (allowedHeaders[normalized] && !formulaColumns[layout.lookup[normalized] - 1] &&
+      (values[normalized] === undefined || isReconciliationCostHeader_(normalized))) {
       values[normalized] = entry.value;
     }
   });
@@ -2025,7 +2027,8 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('total'), extracted.total);
   extracted.sheet_values.forEach(function (entry) {
     const normalized = normalizeHeader_(entry.header);
-    if (layout.lookup[normalized] && expected[normalized] === undefined) {
+    if (layout.lookup[normalized] &&
+      (expected[normalized] === undefined || isReconciliationCostHeader_(normalized))) {
       expected[normalized] = entry.value;
     }
   });
@@ -2103,6 +2106,19 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
       valueType: 'text'
     });
   }
+}
+
+function isReconciliationCostHeader_(normalizedHeader) {
+  return [
+    'consumptionCost',
+    'nonConsumptionCosts',
+    'vat',
+    'total'
+  ].some(function (key) {
+    return getHeaderAliases_(key).some(function (header) {
+      return normalizeHeader_(header) === normalizedHeader;
+    });
+  });
 }
 
 function verificationError_(message, discrepancy) {
