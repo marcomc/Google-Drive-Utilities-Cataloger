@@ -1690,6 +1690,63 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
     layout, { getUrl: () => 'https://drive.test/file' }, extracted));
 }
 
+function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    month: ['Reference month'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Invoice number', 'Contract number', 'Customer code',
+      'Reference month', 'Source file'],
+    lookup: {
+      'invoice number': 1,
+      'contract number': 2,
+      'customer code': 3,
+      'reference month': 4,
+      'source file': 5
+    }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 5) {
+        return { getFormulas: () => [['', '', '', '', '']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    identifier: 'INV-01',
+    contract_number: 'CON-01',
+    customer_code: '00053009296',
+    reference_month: '09',
+    sheet_values: [
+      { header: 'Customer code', value: 53009296 },
+      { header: 'Reference month', value: 9 }
+    ]
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, extracted);
+
+  assert.deepEqual(writes.filter((entry) => entry[2] === 'rich').map(
+    (entry) => [entry[1], entry[3].text]
+  ), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
+}
+
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
   const writes = [];
   const context = loadCataloger();
@@ -2745,6 +2802,7 @@ testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testDetailedCostSheetValuesOverrideBroadReconciliationValues();
+testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();

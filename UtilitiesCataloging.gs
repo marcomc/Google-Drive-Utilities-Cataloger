@@ -2072,6 +2072,18 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
     }
   });
 
+  // `sheet_values` carries supplementary line items. It must never replace a
+  // canonical field merely because the model also returned a matching header.
+  // In particular, keep identifiers and the reference month as literal text.
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'),
+    extracted.identifier);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('contractNumber'),
+    extracted.contract_number);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'),
+    extracted.customer_code);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'),
+    extracted.reference_month);
+
   Object.keys(values).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
     if (column && !formulaColumns[column - 1] &&
