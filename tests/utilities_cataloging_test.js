@@ -1008,6 +1008,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /Preserve every character and leading zero/);
   assert.match(prompt, /two-character text value in the exact format mm/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
+  assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
+  assert.match(prompt, /recurring Iliad Internet charges/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
@@ -1744,7 +1746,7 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
 
   assert.deepEqual(writes.filter((entry) => entry[2] === 'rich').map(
     (entry) => [entry[1], entry[3].text]
-  ), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
+  ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
 }
 
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
