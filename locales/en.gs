@@ -70,7 +70,8 @@ function getEnglishLocalization_() {
         supply_type: 'Internet',
         header: 'Collection charges',
         value: 0,
-        absencePattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b'
+        fieldPattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present)|absent)\\b'
       })
     ]),
     supplierProfiles: Object.freeze({

@@ -198,10 +198,22 @@ function testExtractionSchemaAndCalendarValidation() {
     ...raw,
     supplier: 'ILIAD',
     supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
     sheet_values: [{ header: "Spese d'incasso", value: null }]
   });
   context.applySupplierFieldDefaults_(iliadEmptyCharge, ["Spese d'incasso"]);
   assert.equal(iliadEmptyCharge.sheet_values[0].value, 0);
+
+  const iliadUnreadableCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso amount missing or unreadable."],
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  context.applySupplierFieldDefaults_(iliadUnreadableCharge, ["Spese d'incasso"]);
+  assert.equal(iliadUnreadableCharge.sheet_values[0].value, null);
+  assert.equal(context.validateExtraction_(iliadUnreadableCharge).valid, false);
 
   const iliadWithoutConfiguredChargeColumn = context.normalizeExtraction_({
     ...raw,
@@ -335,6 +347,12 @@ function testExtractionSchemaAndCalendarValidation() {
   };
   assert.equal(context.validateExtraction_(otherProblemRemainsBlocking).valid, false);
 
+  const mixedIdentifierProblem = {
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente nel documento; periodo ambiguo.']
+  };
+  assert.equal(context.validateExtraction_(mixedIdentifierProblem).valid, false);
+
   const informationalVatInclusion = {
     ...onlyCustomerCode,
     problems: [
@@ -342,6 +360,23 @@ function testExtractionSchemaAndCalendarValidation() {
     ]
   };
   assert.equal(context.validateExtraction_(informationalVatInclusion).valid, true);
+
+  const mixedVatProblem = {
+    ...onlyCustomerCode,
+    problems: ['IVA inclusa nei dettagli. Il periodo di fatturazione è ambiguo.']
+  };
+  assert.equal(context.validateExtraction_(mixedVatProblem).valid, false);
+
+  const duplicateSheetValues = {
+    ...raw,
+    sheet_values: [
+      { header: 'Total consumption costs', value: 10 },
+      { header: ' Total consumption costs ', value: 11 }
+    ]
+  };
+  const duplicateValidation = context.validateExtraction_(duplicateSheetValues);
+  assert.equal(duplicateValidation.valid, false);
+  assert.match(duplicateValidation.problem, /duplicate spreadsheet values/);
 
   const report = {
     ...raw,
@@ -1848,6 +1883,8 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
   assert.deepEqual(writes.filter((entry) => entry[2] === 'rich').map(
     (entry) => [entry[1], entry[3].text]
   ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
+  assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 4),
+    false);
 }
 
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {

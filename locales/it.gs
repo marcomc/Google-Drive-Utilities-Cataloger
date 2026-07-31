@@ -67,7 +67,8 @@ function getItalianLocalization_() {
         supply_type: 'Internet',
         header: "Spese d'incasso",
         value: 0,
-        absencePattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b"
+        fieldPattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b",
+        explicitAbsencePattern: "\\b(?:non\\s+presente|non\\s+stampat[oa]e?|assente)\\b"
       })
     ]),
     supplierProfiles: Object.freeze({

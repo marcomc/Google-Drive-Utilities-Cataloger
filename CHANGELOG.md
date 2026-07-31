@@ -40,6 +40,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Record the installer-owned supplier-profile template identity before creation
   and refuse to overwrite an existing template unless it is a known pristine
   installer template.
+- Retain formula-safe literal text writes when applying text formatting to
+  identifiers and supplier values.
+- Require explicit evidence that an ILIAD collection charge is absent before
+  applying the reviewed zero default; unreadable amounts remain blocking.
+- Keep mixed extraction concerns blocking and reject duplicate normalized
+  `sheet_values` before spreadsheet writes.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

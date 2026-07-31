@@ -1152,31 +1152,67 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
     }
     const defaultHeader = normalizeHeader_(defaultValue.header);
     const headerIsAvailable = normalizedAvailableHeaders.indexOf(defaultHeader) >= 0;
-    if (defaultValue.absencePattern) {
-      const absencePattern = new RegExp(defaultValue.absencePattern, 'i');
-      extracted.problems = extracted.problems.filter(function (problem) {
-        return !(absencePattern.test(String(problem)) &&
-          /(?:assente|mancante|non\s+presente|missing|absent|not\s+present)/i
-            .test(String(problem)));
-      });
-    }
+    const explicitAbsence = hasExplicitSupplierFieldAbsence_(extracted.problems,
+      defaultValue);
     if (!headerIsAvailable) {
+      extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+        extracted.problems, defaultValue
+      );
       return;
     }
     const matching = extracted.sheet_values.filter(function (entry) {
       return entry && normalizeHeader_(entry.header) ===
         defaultHeader;
     });
+    const valueIsMissing = matching.length === 0 || matching[0].value === null ||
+      matching[0].value === undefined ||
+      (typeof matching[0].value === 'string' && !matching[0].value.trim());
+    if (!valueIsMissing) {
+      if (matching[0].value === defaultValue.value && explicitAbsence) {
+        extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+          extracted.problems, defaultValue
+        );
+      }
+      return;
+    }
+    if (!explicitAbsence) {
+      extracted.problems.push('The absence of ' + defaultValue.header +
+        ' was not established explicitly.');
+      return;
+    }
     if (matching.length === 0) {
       extracted.sheet_values.push({
         header: defaultValue.header,
         value: defaultValue.value
       });
-    } else if (matching[0].value === null || matching[0].value === undefined ||
-      (typeof matching[0].value === 'string' && !matching[0].value.trim())) {
+    } else {
       matching[0].value = defaultValue.value;
     }
+    extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+      extracted.problems, defaultValue
+    );
   });
+}
+
+function hasExplicitSupplierFieldAbsence_(problems, defaultValue) {
+  return problems.some(function (problem) {
+    return isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue);
+  });
+}
+
+function removeExplicitSupplierFieldAbsenceProblems_(problems, defaultValue) {
+  return problems.filter(function (problem) {
+    return !isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue);
+  });
+}
+
+function isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue) {
+  if (!defaultValue.fieldPattern || !defaultValue.explicitAbsencePattern ||
+    !isStandaloneInformationalProblem_(problem)) {
+    return false;
+  }
+  return new RegExp(defaultValue.fieldPattern, 'i').test(String(problem)) &&
+    new RegExp(defaultValue.explicitAbsencePattern, 'i').test(String(problem));
 }
 
 function normalizeSheetValues_(sheetValues) {
@@ -1351,11 +1387,27 @@ function validateExtraction_(extracted) {
     return invalidExtraction_('Gemini returned an invalid spreadsheet value.',
       'Retry the document or enter the affected value manually.');
   }
+  const seenSheetValueHeaders = Object.create(null);
+  const duplicateSheetValue = extracted.sheet_values.some(function (entry) {
+    const header = normalizeHeader_(entry.header);
+    if (seenSheetValueHeaders[header]) {
+      return true;
+    }
+    seenSheetValueHeaders[header] = true;
+    return false;
+  });
+  if (duplicateSheetValue) {
+    return invalidExtraction_('Gemini returned duplicate spreadsheet values.',
+      'Retry the document or enter the conflicting value manually.');
+  }
   return { valid: true };
 }
 
 function isMissingOptionalSubscriberIdentifierProblem_(problem) {
   const text = String(problem || '').toLowerCase();
+  if (!isStandaloneInformationalProblem_(text)) {
+    return false;
+  }
   const patterns = getLocalization_().subscriberIdentifierProblemPatterns;
   const missing = new RegExp(patterns[0]).test(text);
   const identifier = new RegExp(patterns[1]).test(text);
@@ -1364,7 +1416,8 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem) {
 
 function isInformationalTaxInclusionProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
-  if (!/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text)) {
+  if (!isStandaloneInformationalProblem_(text) ||
+    !/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text)) {
     return false;
   }
   const values = [
@@ -1380,6 +1433,10 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
     extracted.cost_consumption + extracted.cost_non_consumption + extracted.vat -
     extracted.total
   ) <= CONFIG.MONEY_TOLERANCE;
+}
+
+function isStandaloneInformationalProblem_(problem) {
+  return !/[;]|(?:[.!?])\s+\S/.test(String(problem || '').trim());
 }
 
 function invalidExtraction_(problem, action) {
@@ -2210,7 +2267,7 @@ function setTextValueForHeaders_(sheet, row, layout, formulaColumns, aliases,
   if (typeof range.setNumberFormat === 'function') {
     range.setNumberFormat('@');
   }
-  range.setValue(String(value));
+  setLiteralSheetValue_(range, String(value));
 }
 
 function setValueForHeaders_(values, lookup, aliases, value) {
