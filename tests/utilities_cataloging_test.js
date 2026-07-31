@@ -352,6 +352,10 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ['Numero di contratto assente nel documento; periodo ambiguo.']
   };
   assert.equal(context.validateExtraction_(mixedIdentifierProblem).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente, importo illeggibile.']
+  }).valid, false);
 
   const informationalVatInclusion = {
     ...onlyCustomerCode,
@@ -377,6 +381,24 @@ function testExtractionSchemaAndCalendarValidation() {
   const duplicateValidation = context.validateExtraction_(duplicateSheetValues);
   assert.equal(duplicateValidation.valid, false);
   assert.match(duplicateValidation.problem, /duplicate spreadsheet values/);
+
+  const names = { statusKey: 'status', approvedStatus: 'approved',
+    supplierKey: 'supplier' };
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: approved\nsupplier: ILIAD\n---\n# Profile', names
+  ), true);
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: approved\nsupplier: ILIAD\n---', names
+  ), true);
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: pending\nsupplier: ILIAD\n---\nchange status: approved', names
+  ), false);
+
+  const discrepancy = context.formatVerificationDiscrepancies_([{
+    field: 'Consumption quantity', expected: 2, actual: 1, valueType: 'number'
+  }], context.getLocalization_().reportLabels);
+  assert.match(discrepancy[0], /atteso 2; riscontrato 1/);
+  assert.doesNotMatch(discrepancy[0], /EUR/);
 
   const report = {
     ...raw,

@@ -550,8 +550,24 @@ function loadApprovedSupplierProfiles_(rootFolder) {
 }
 
 function isApprovedSupplierProfile_(text, names) {
-  return text.indexOf(names.statusKey + ': ' + names.approvedStatus) >= 0 &&
-    text.indexOf(names.supplierKey + ':') >= 0 && text.indexOf('\u0000') < 0;
+  if (text.indexOf('\u0000') >= 0 || text.indexOf('---\n') !== 0) {
+    return false;
+  }
+  const metadataBlock = text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!metadataBlock) {
+    return false;
+  }
+  const metadata = Object.create(null);
+  const lines = metadataBlock[1].split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(\S(?:.*\S)?)$/);
+    if (!match || metadata[match[1]] !== undefined) {
+      return false;
+    }
+    metadata[match[1]] = match[2];
+  }
+  return metadata[names.statusKey] === names.approvedStatus &&
+    Boolean(metadata[names.supplierKey]);
 }
 
 function getSupplierProfilesFolderUrl_(rootFolder) {
@@ -1436,7 +1452,8 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
 }
 
 function isStandaloneInformationalProblem_(problem) {
-  return !/[;]|(?:[.!?])\s+\S/.test(String(problem || '').trim());
+  return !/[;,]|\b(?:and|or|but|e|o|ma)\b|(?:[.!?])\s+\S/i
+    .test(String(problem || '').trim());
 }
 
 function invalidExtraction_(problem, action) {
@@ -2329,8 +2346,9 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
         field: layout.headers[column - 1],
         expected: expected[normalizedHeader],
         actual: actual,
-        valueType: verificationValueType_(expected[normalizedHeader]),
-        tolerance: typeof expected[normalizedHeader] === 'number' ?
+        valueType: verificationValueType_(expected[normalizedHeader],
+          normalizedHeader),
+        tolerance: isReconciliationCostHeader_(normalizedHeader) ?
           CONFIG.MONEY_TOLERANCE : null
       });
     }
@@ -2406,9 +2424,9 @@ function verificationError_(message, discrepancy) {
   return error;
 }
 
-function verificationValueType_(value) {
+function verificationValueType_(value, normalizedHeader) {
   if (typeof value === 'number') {
-    return 'money';
+    return isReconciliationCostHeader_(normalizedHeader) ? 'money' : 'number';
   }
   if (Object.prototype.toString.call(value) === '[object Date]') {
     return 'date';
@@ -3425,7 +3443,8 @@ function formatVerificationDiscrepancies_(discrepancies, labels) {
     ];
     if (typeof discrepancy.tolerance === 'number') {
       details.push(labels.tolerance + ' ' +
-        formatVerificationValue_(discrepancy.tolerance, 'money', labels));
+        formatVerificationValue_(discrepancy.tolerance,
+          discrepancy.valueType, labels));
     }
     return labels.discrepancyDetails + ': ' + details.join('; ');
   });
@@ -3434,6 +3453,9 @@ function formatVerificationDiscrepancies_(discrepancies, labels) {
 function formatVerificationValue_(value, valueType, labels) {
   if (valueType === 'money' && typeof value === 'number' && isFinite(value)) {
     return value.toFixed(2) + ' EUR';
+  }
+  if (valueType === 'number' && typeof value === 'number' && isFinite(value)) {
+    return String(value);
   }
   if (valueType === 'date' && Object.prototype.toString.call(value) === '[object Date]') {
     return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');

@@ -46,6 +46,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
   applying the reviewed zero default; unreadable amounts remain blocking.
 - Keep mixed extraction concerns blocking and reject duplicate normalized
   `sheet_values` before spreadsheet writes.
+- Trust a supplier profile only when its exact front-matter metadata declares
+  the approved status and supplier, never because the body contains matching
+  text.
+- Keep comma- or conjunction-separated mixed extraction problems blocking,
+  rather than suppressing them as one informational note.
+- Label non-monetary verification discrepancies as numbers without an `EUR`
+  suffix or money tolerance.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

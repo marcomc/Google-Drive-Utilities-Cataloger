@@ -129,6 +129,12 @@ pair remained `ACTIVE`, and final installation validation completed. No test
 document identifiers, installation IDs, or extracted private values are kept
 in this repository.
 
+On 2026-07-31, the `0.3.1` supplier-profile, ownership, literal-value,
+reference-month, and reconciliation policy changes were applied to the existing
+Drive `AGENTS.md` and read back successfully. The update preserved the
+installation-specific policy content and did not deploy source code or alter
+processing triggers.
+
 ## Cadence and cost
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
