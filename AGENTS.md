@@ -105,6 +105,10 @@
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
   command name.
+  Route every installer or CI `clasp --json` deployment list, creation, and
+  inspection operation through the shared authorization-aware helper. Preserve
+  the actionable `invalid_grant` remediation without relaying provider stderr,
+  and test each path before it can mutate a deployment.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
 - Journal planned ownership before creating a remote resource, then persist its
@@ -125,6 +129,10 @@
   takes precedence over cover notices, regulations, annexes, and embedded
   reports; reserve blocking problem output for uncertainties that prevent safe
   import.
+- Before supporting automated report archival, define trusted report-specific
+  date semantics and an explicit destination in the runtime policy; never
+  infer either from invoice-only requirements or address routing. Cover reports
+  without issue dates and their destination selection with fixtures.
 - Do not allocate credential files inside command substitutions: subshell
   cleanup registrations do not reach the parent process. Stream secrets over
   stdin when possible; otherwise create and track temporary files in the
