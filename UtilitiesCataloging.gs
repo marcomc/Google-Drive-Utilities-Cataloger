@@ -174,7 +174,11 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     sheetOriginalRow: 0,
     sheetLink: '',
     mutationJournalStarted: false,
-    createdFolderPath: ''
+    createdFolderPath: '',
+    extracted: null,
+    extractionValidated: false,
+    failureStage: 'extracting-document-data',
+    rollbackErrors: []
   };
 
   try {
@@ -186,11 +190,15 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     const binaryHash = sha256ForFile_(file);
     const extracted = extractUtilityData_(file, driveAgentsPolicy);
+    state.extracted = extracted;
+    state.failureStage = 'validating-extracted-data';
     const validation = validateExtraction_(extracted);
 
     if (!validation.valid) {
       return buildVerifyResult_(file, extracted, validation.problem, validation.action);
     }
+    state.extractionValidated = true;
+    state.failureStage = 'validating-target-spreadsheet';
     const sheetValueValidation = validateTargetSheetValues_(extracted);
     if (!sheetValueValidation.valid) {
       return buildVerifyResult_(
@@ -201,6 +209,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       );
     }
 
+    state.failureStage = 'checking-duplicates';
     const duplicate = findDuplicate_(extracted, binaryHash, file.getId());
     if (duplicate.status === 'duplicate') {
       return buildDuplicateResult_(file, extracted, duplicate);
@@ -217,6 +226,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       updatedAt: Date.now()
     });
     state.mutationJournalStarted = true;
+    state.failureStage = 'preparing-drive-destination';
     const destination = getDestinationFolder_(rootFolder, extracted);
     state.createdFolderPath = (destination.createdFolders || []).join(', ');
     updateMutationJournal_(file.getId(), {
@@ -247,6 +257,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     let sheetLink = '';
     if (extracted.address_type === 'import' && extracted.document_type === 'Invoice') {
+      state.failureStage = 'spreadsheet-write-and-verify';
       const sheetImport = importUtilityInvoiceToSheet_(file, extracted);
       sheetLink = sheetImport.link;
       state.sheetLink = sheetImport.link;
@@ -262,6 +273,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
         sheetImport.electricityDashboardLayouts || null;
     }
 
+    state.failureStage = 'renaming-and-moving-pdf';
     updateMutationJournal_(file.getId(), { stage: 'renaming' });
     file.setName(assignedName);
     state.renamed = true;
@@ -272,6 +284,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     updateMutationJournal_(file.getId(), { stage: 'moved' });
     verifyMovedFile_(file, destination.folder, assignedName);
     if (state.imported) {
+      state.failureStage = 'verifying-imported-row';
       refreshImportedSourceLink_(state.sheet, state.sheetRow, file);
       verifyImportedRow_(state.sheet, state.sheetRow,
         getSheetLayout_(state.sheet), file, extracted);
@@ -297,7 +310,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     logCatalogEvent_('catalog-file-processing-error', {
       fileId: file.getId(),
       errorType: error.name || 'Error',
-      errorCategory: errorCategory
+      errorCategory: errorCategory,
+      failureStage: state.failureStage || 'unknown'
     });
     const errorResult = buildErrorResult_(file, errorMessage,
         'No further automatic changes were attempted. Verify the file state using the supplied link.',
@@ -2734,6 +2748,10 @@ function buildVerifyResult_(file, extracted, problem, action) {
 
 function buildErrorResult_(file, problem, action, originalName, state) {
   const reached = state || { renamed: false, moved: false, imported: false };
+  const extracted = reached.extracted || {};
+  const supplySupplier = [extracted.supply_type, extracted.supplier]
+    .filter(Boolean)
+    .join(' / ');
   const changes = [];
   if (reached.renamed) {
     changes.push('the PDF may remain renamed');
@@ -2758,9 +2776,12 @@ function buildErrorResult_(file, problem, action, originalName, state) {
     assignedName: reached.renamed ? file.getName() : '',
     fileUrl: file.getUrl(),
     destination: '',
-    supplySupplier: '',
-    extracted: {},
+    supplySupplier: supplySupplier,
+    extracted: extracted,
     sheetLink: reached.sheetLink || '',
+    failureStage: reached.failureStage || '',
+    extractionValidated: reached.extractionValidated === true,
+    rollbackCompleted: rollbackProblems.length === 0,
     actions: actions,
     problem: problem + (rollbackProblems.length > 0 ?
       ' ' + rollbackProblems.join(' ') : ''),
@@ -2952,6 +2973,16 @@ function formatResult_(result) {
   const calculated = [data.cost_consumption, data.cost_non_consumption, data.vat]
     .every(function (value) { return value !== null && value !== undefined; }) ?
     (data.cost_consumption + data.cost_non_consumption + data.vat).toFixed(2) : '';
+  const extractedDataAvailable = Boolean(
+    data && Object.keys(data).length > 0
+  );
+  const errorContext = result.status === 'ERROR' ? [
+    labels.failureStage + ': ' + localizeFailureStage_(result.failureStage, labels),
+    labels.extractedData + ': ' + (extractedDataAvailable ?
+      labels.availableNotImported : labels.notAvailable),
+    labels.persistence + ': ' + (result.rollbackCompleted ?
+      labels.rollbackCompleted : labels.rollbackRequiresManualReview)
+  ] : [];
   const issue = [
     result.problem || labels.noIssue,
     result.recommendedAction || '',
@@ -2960,6 +2991,7 @@ function formatResult_(result) {
   return [
     labels.softwareVersion + ': ' + CONFIG.APP_VERSION,
     labels.status + ': ' + localizeStatus_(result.status, localization),
+    errorContext.join('\n'),
     labels.originalFile + ': ' +
       oneLineReportText_(result.originalName) + ' (' + fileLink + ')',
     labels.assignedName + ': ' +
@@ -2980,10 +3012,18 @@ function formatResult_(result) {
     labels.vat + ': ' + formatEuro_(data.vat),
     labels.total + ': ' + (total ? total + ' EUR' : labels.notAvailable),
     labels.reconciliation + ': ' +
-      (total && calculated ? calculated + ' EUR / ' + total + ' EUR' : labels.notApplicable),
+      (total && calculated ?
+        (result.status === 'ERROR' && result.extractionValidated ?
+          labels.reconciliationPassed + ': ' : '') +
+        calculated + ' EUR / ' + total + ' EUR' : labels.notApplicable),
     labels.actions + ': ' + oneLineReportText_(result.actions),
     labels.issue + ': ' + oneLineReportText_(issue)
-  ].join('\n');
+  ].filter(Boolean).join('\n');
+}
+
+function localizeFailureStage_(failureStage, labels) {
+  const stages = labels.failureStages || {};
+  return stages[failureStage] || failureStage || labels.notAvailable;
 }
 
 function oneLineReportText_(value) {

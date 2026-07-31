@@ -624,6 +624,68 @@ function testEmailReportIncludesSoftwareVersion() {
   );
 }
 
+function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
+  const events = [];
+  const extraction = validInvoice();
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const context = loadCataloger();
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.saveMutationJournal_ = () => {};
+  context.updateMutationJournal_ = () => {};
+  context.getDestinationFolder_ = () => ({ folder: {}, path: 'Water/2026' });
+  context.getDestinationCollision_ = () => ({ status: 'none' });
+  context.importUtilityInvoiceToSheet_ = () => {
+    throw new Error('Spreadsheet formula total verification failed for: Total cost');
+  };
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+  context.attachMutationJournal_ = (result) => result;
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+  const report = context.formatResult_(result);
+
+  assert.equal(result.status, 'ERROR');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.extracted)), extraction);
+  assert.equal(result.supplySupplier, 'Water / SUPPLIER');
+  assert.equal(result.failureStage, 'spreadsheet-write-and-verify');
+  assert.equal(result.extractionValidated, true);
+  assert.match(report, /Failure stage: Writing and verifying spreadsheet row/);
+  assert.match(report, /Gemini extracted data: available, not imported/);
+  assert.match(report, /Persistence: no import persisted; rollback completed/);
+  assert.match(report, /Supply \/ supplier: Water \/ SUPPLIER/);
+  assert.match(report, /Total: 14\.64 EUR/);
+  assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{
+    event: 'catalog-file-processing-error',
+    details: {
+      fileId: 'file-id',
+      errorType: 'Error',
+      errorCategory: 'spreadsheet',
+      failureStage: 'spreadsheet-write-and-verify'
+    }
+  }]);
+}
+
 function testGenericRateLimitStaysOnDeveloperApi() {
   const requests = [];
   const responses = [
@@ -2296,6 +2358,7 @@ testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
+testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
 testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();

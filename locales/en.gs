@@ -78,6 +78,13 @@ function getEnglishLocalization_() {
       vat: 'VAT',
       total: 'Total',
       reconciliation: 'Reconciliation check',
+      reconciliationPassed: 'passed',
+      failureStage: 'Failure stage',
+      extractedData: 'Gemini extracted data',
+      persistence: 'Persistence',
+      availableNotImported: 'available, not imported',
+      rollbackCompleted: 'no import persisted; rollback completed',
+      rollbackRequiresManualReview: 'rollback incomplete; manual review required',
       actions: 'Actions taken',
       issue: 'Issue and recommended action',
       notAvailable: 'not available',
@@ -85,6 +92,16 @@ function getEnglishLocalization_() {
       notIdentified: 'not identified',
       noIssue: 'No issue.',
       notApplicable: 'not applicable',
+      failureStages: Object.freeze({
+        'extracting-document-data': 'Extracting document data',
+        'validating-extracted-data': 'Validating extracted data',
+        'validating-target-spreadsheet': 'Validating target spreadsheet',
+        'checking-duplicates': 'Checking duplicates',
+        'preparing-drive-destination': 'Preparing Drive destination',
+        'spreadsheet-write-and-verify': 'Writing and verifying spreadsheet row',
+        'renaming-and-moving-pdf': 'Renaming and moving PDF',
+        'verifying-imported-row': 'Verifying imported row'
+      }),
       emailSubject: '[Utilities] {count} PDF(s) processed'
     }),
     headerAliases: Object.freeze({

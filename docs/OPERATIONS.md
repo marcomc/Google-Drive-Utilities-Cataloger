@@ -241,6 +241,13 @@ includes the running `MAJOR.MINOR.PATCH` application version. This identifies
 the exact source version that processed a PDF even when email delivery is
 retried later from the durable outbox.
 
+When a later Drive or spreadsheet step fails after Gemini has returned a valid
+extraction, the configured-recipient email preserves that extracted snapshot
+as **available, not imported**. It also names the failed phase, confirms
+whether the extraction reconciliation passed, and reports rollback state. The
+corresponding Cloud Logging event carries only the opaque file ID, error
+category, and phase; it never includes extracted values.
+
 Apps Script can take a short time to display log entries. For a reliable view,
 open **View in Cloud Logging** from an execution, or query the linked Cloud
 project:

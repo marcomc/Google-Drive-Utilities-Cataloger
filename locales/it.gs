@@ -75,6 +75,13 @@ function getItalianLocalization_() {
       vat: 'IVA',
       total: 'Totale',
       reconciliation: 'Verifica quadratura',
+      reconciliationPassed: 'superata',
+      failureStage: 'Fase errore',
+      extractedData: 'Dati estratti da Gemini',
+      persistence: 'Stato importazione',
+      availableNotImported: 'disponibili, non importati',
+      rollbackCompleted: 'nessun import persistito; rollback completato',
+      rollbackRequiresManualReview: 'rollback incompleto; verifica manuale necessaria',
       actions: 'Azioni eseguite',
       issue: 'Problema e azione consigliata',
       notAvailable: 'non disponibile',
@@ -82,6 +89,16 @@ function getItalianLocalization_() {
       notIdentified: 'non identificato',
       noIssue: 'Nessun problema.',
       notApplicable: 'non applicabile',
+      failureStages: Object.freeze({
+        'extracting-document-data': 'Estrazione dati documento',
+        'validating-extracted-data': 'Validazione dati estratti',
+        'validating-target-spreadsheet': 'Validazione foglio di destinazione',
+        'checking-duplicates': 'Controllo duplicati',
+        'preparing-drive-destination': 'Preparazione destinazione Drive',
+        'spreadsheet-write-and-verify': 'Scrittura e verifica riga del foglio',
+        'renaming-and-moving-pdf': 'Rinomina e spostamento PDF',
+        'verifying-imported-row': 'Verifica riga importata'
+      }),
       emailSubject: '[Utenze] {count} PDF elaborato/i'
     }),
     headerAliases: Object.freeze({

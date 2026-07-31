@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-07-31 - Actionable failed-import reports
+
+### Fixed
+
+- Preserve a successfully extracted invoice snapshot when a later Drive or
+  spreadsheet operation fails, and label it as available but not imported in
+  the configured-recipient email report.
+- Include the failed processing phase, extraction-reconciliation outcome, and
+  rollback state in error reports without adding invoice data to Cloud logs.
+
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 
 ### Added
