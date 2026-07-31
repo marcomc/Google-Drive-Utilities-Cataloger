@@ -148,6 +148,13 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
       const result = buildErrorResult_(file, 'Execution time is nearly exhausted.',
         'The document remains in intake and will be retried by the next daily run.');
       results.push(result);
+      try {
+        addOperatorLinksToResult_(result, rootFolder);
+      } catch (error) {
+        logCatalogEvent_('catalog-operator-links-failed', Object.assign(
+          describeFileForLog_(file), { reason: String(error.message || error) }
+        ));
+      }
       persistCatalogResult_(state, file, rootFolder, result);
       logCatalogResult_(file, result);
       return;
@@ -2924,6 +2931,7 @@ function buildUnavailableRecoveryResult_(fileId, journal, error) {
     supplySupplier: '',
     extracted: {},
     sheetLink: '',
+    rollbackCompleted: false,
     actions: 'No automatic cleanup was completed; the mutation journal remains.',
     problem: 'An interrupted mutation requires manual review: ' +
       describeError_(error),

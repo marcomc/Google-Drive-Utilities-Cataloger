@@ -1561,11 +1561,50 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
 
   assert.equal(firstResults.length, 1);
   assert.equal(firstResults[0].status, 'ERROR');
+  assert.equal(firstResults[0].rollbackCompleted, false);
   assert.match(firstResults[0].problem, /Drive file is unavailable/);
   assert.equal(queuedResults.length, 1);
   assert.equal(secondResults.length, 0);
   assert.ok(store[`${alertPrefix}${fileId}`]);
   assert.ok(store[`${journalPrefix}${fileId}`]);
+}
+
+function testRuntimeExhaustionPersistsOperatorLinks() {
+  const persisted = [];
+  const linked = [];
+  const context = loadCataloger();
+  vm.runInContext(
+    'let runtimeExhaustionClockReads = 0; ' +
+      'Date.now = () => runtimeExhaustionClockReads++ === 0 ? 0 : 280000;',
+    context
+  );
+  context.loadIntakeFileState_ = () => ({});
+  context.loadTrustedExtractionPolicy_ = () => 'policy';
+  context.shouldProcessIntakeFile_ = () => true;
+  context.persistCatalogResult_ = (_state, _file, _root, result) => {
+    persisted.push(result);
+  };
+  context.logCatalogEvent_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    linked.push(result);
+    return result;
+  };
+
+  const file = {
+    getId: () => 'timed-out-file',
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/timed-out-file'
+  };
+  const batch = context.processEligibleIntakeFiles_([file], {}, 'event');
+
+  assert.equal(batch.results.length, 1);
+  assert.equal(linked.length, 1);
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].retryUrl, 'https://script.test/retry');
+  assert.equal(persisted[0].supplierProfilesUrl, 'https://drive.test/profiles');
 }
 
 function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
@@ -3017,6 +3056,7 @@ testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
+testRuntimeExhaustionPersistsOperatorLinks();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
 testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
