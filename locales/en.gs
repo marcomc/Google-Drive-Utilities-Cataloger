@@ -62,7 +62,7 @@ function getEnglishLocalization_() {
     }),
     subscriberIdentifierProblemPatterns: Object.freeze([
       '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
-      '(?:contract(?:\\s+number)?|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|numero\\s+(?:di\\s+)?contratto|id\\s*utente|codice\\s+(?:cliente|utente))'
+      '(?:contract(?:\\s+number)?|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|id\\s*utente|codice\\s+(?:cliente|utente))'
     ]),
     supplierFieldDefaults: Object.freeze([
       Object.freeze({

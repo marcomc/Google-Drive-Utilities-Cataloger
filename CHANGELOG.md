@@ -67,6 +67,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   in both grammatical genders as blocking conditions.
 - Include every detected spreadsheet, formula, total, and source-link mismatch
   in a failed-import report instead of stopping at the first discrepancy.
+- Persist a successful outcome before generating optional report links, and
+  recognize Italian contract-code labels under either installation locale.
 
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 

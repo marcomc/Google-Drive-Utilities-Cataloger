@@ -156,11 +156,16 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
     logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
-    const result = addOperatorLinksToResult_(
-      processIntakeFile_(file, rootFolder, driveAgentsPolicy), rootFolder
-    );
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
     results.push(result);
     persistCatalogResult_(state, file, rootFolder, result);
+    try {
+      addOperatorLinksToResult_(result, rootFolder);
+    } catch (error) {
+      logCatalogEvent_('catalog-operator-links-failed', Object.assign(
+        describeFileForLog_(file), { reason: String(error.message || error) }
+      ));
+    }
     logCatalogResult_(file, result);
   });
 
