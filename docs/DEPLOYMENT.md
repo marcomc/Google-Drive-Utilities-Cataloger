@@ -12,6 +12,7 @@ This project deploys Apps Script only after a pull request has been merged into
 - [What the deployment installs](#what-the-deployment-installs)
 - [What the deployment does not install](#what-the-deployment-does-not-install)
 - [Deployment flow](#deployment-flow)
+- [Renew expired OAuth authorization](#renew-expired-oauth-authorization)
 - [Manual recovery](#manual-recovery)
 
 ## Required repository settings
@@ -249,6 +250,47 @@ updates.
 The `Validation / check` status from `.github/workflows/ci.yml` is the status
 check to require in the branch protection rule. The deployment workflow repeats
 the same validation after merge as a final guard before changing Apps Script.
+
+## Renew expired OAuth authorization
+
+If the deployment preflight reports `invalid_grant`, the stored refresh token is
+invalid or expired. This is commonly caused by an external OAuth consent app
+left in `Testing`: authorizations requesting non-basic scopes can expire after
+seven days. Do not replace the deployment ID or Apps Script source for this
+failure.
+
+1. In Google Cloud Console, open **Google Auth Platform > Audience** for the
+   installation project and move an external app to **In production**. This
+   changes OAuth consent publication status; it does not publish Apps Script
+   code or change Drive and spreadsheet sharing.
+2. Under **Google Auth Platform > Clients**, reuse the existing **Desktop** OAuth
+   client used by CI. If its secret is no longer downloadable, create a
+   replacement secret. Keep the old secret enabled until the replacement has
+   passed validation; then disable and delete the old secret if it is no longer
+   needed.
+3. Generate an isolated authorization with the owner account. Use a temporary
+   directory, `clasp -A` with the exact `.clasprc.json` path, and both
+   `--use-project-scopes` and `--include-clasp-scopes`. If Google shows the
+   unverified-app warning, the owner must explicitly approve the app through
+   the **Advanced** path.
+4. Before changing GitHub, run the same `read_apps_script_deployment` and
+   `validate_owner_only_api_deployment` checks used by CI. Confirm the script
+   ID, stable deployment ID, numbered version, `appsscript` manifest, single
+   `EXECUTION_API` entry point, and `MYSELF` access.
+5. Replace only the production environment secret:
+
+   ```bash
+   gh secret set CLASP_AUTH_JSON --env production <"$DEPLOY_AUTH_FILE"
+   gh secret list --env production --json name,updatedAt \
+     --jq '.[] | select(.name == "CLASP_AUTH_JSON")'
+   ```
+
+6. Remove temporary credential material, then rerun only the failed workflow
+   job with `gh run rerun <run-id> --failed`. The rerun may publish Apps Script
+   source, so obtain explicit operator approval before starting it.
+
+Never print the OAuth client secret, authorization code, refresh token, or full
+`.clasprc.json`. Do not pass credentials in command arguments or commit them.
 
 ## Manual recovery
 

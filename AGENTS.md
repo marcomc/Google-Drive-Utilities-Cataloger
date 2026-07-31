@@ -125,6 +125,10 @@
   takes precedence over cover notices, regulations, annexes, and embedded
   reports; reserve blocking problem output for uncertainties that prevent safe
   import.
+- Before supporting automated report archival, define trusted report-specific
+  date semantics and an explicit destination in the runtime policy; never
+  infer either from invoice-only requirements or address routing. Cover reports
+  without issue dates and their destination selection with fixtures.
 - Do not allocate credential files inside command substitutions: subshell
   cleanup registrations do not reach the parent process. Stream secrets over
   stdin when possible; otherwise create and track temporary files in the

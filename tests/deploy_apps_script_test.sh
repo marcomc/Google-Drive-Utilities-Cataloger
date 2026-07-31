@@ -53,6 +53,10 @@ fi
 case "${command_name}" in
   deployments)
     [[ "$*" == "-A ${auth_file} --json deployments" ]] || exit 6
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'oauth-invalid-grant' ]]; then
+      printf '%s\n' 'invalid_grant' >&2
+      exit 9
+    fi
     ;;
   pull)
     [[ "$*" == "-A ${auth_file} pull" ]] || exit 6
@@ -362,6 +366,16 @@ mkdir -p "${stale_dir}"
 run_fixture "${stale_dir}" "${STALE_SHA}" "${CURRENT_SHA}" \
   "deployment-1" "deployment-1" "valid"
 test ! -s "${stale_dir}/commands.log"
+
+invalid_grant_dir="${TEST_ROOT}/oauth-invalid-grant"
+mkdir -p "${invalid_grant_dir}"
+require_fixture_failure \
+  'An invalid OAuth refresh token was accepted.' \
+  "${invalid_grant_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "oauth-invalid-grant"
+assert_failure_before_push "${invalid_grant_dir}"
+grep -q 'OAuth refresh token is invalid or expired' \
+  "${invalid_grant_dir}/output.log"
 
 for scenario in missing wrong-script missing-entry-point wrong-access mixed-public; do
   failure_dir="${TEST_ROOT}/${scenario}"

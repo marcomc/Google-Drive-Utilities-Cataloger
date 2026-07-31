@@ -15,6 +15,8 @@ read_apps_script_deployment() {
   local http_response
   local http_status
   local curl_status
+  local clasp_refresh_error
+  local clasp_refresh_error_file
 
   if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
     ! "${deployment_id}" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -22,9 +24,20 @@ read_apps_script_deployment() {
     return 1
   fi
 
-  if ! "${CLASP[@]}" -A "${auth_file}" --json deployments >/dev/null; then
-    printf '%s\n' \
-      "Could not refresh authorization for Apps Script deployment inspection." >&2
+  clasp_refresh_error_file="$(mktemp)"
+  if "${CLASP[@]}" -A "${auth_file}" --json deployments \
+    >/dev/null 2>"${clasp_refresh_error_file}"; then
+    rm -f "${clasp_refresh_error_file}"
+  else
+    clasp_refresh_error="$(<"${clasp_refresh_error_file}")"
+    rm -f "${clasp_refresh_error_file}"
+    if grep -Fq 'invalid_grant' <<<"${clasp_refresh_error}"; then
+      printf '%s\n' \
+        'OAuth refresh token is invalid or expired; reauthorize the owner Desktop OAuth client and replace CLASP_AUTH_JSON.' >&2
+    else
+      printf '%s\n' \
+        "Could not refresh authorization for Apps Script deployment inspection." >&2
+    fi
     return 1
   fi
   access_token="$(jq -er '
