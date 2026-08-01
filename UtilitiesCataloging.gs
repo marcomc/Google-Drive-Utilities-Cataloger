@@ -1552,8 +1552,7 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem) {
 function isInformationalTaxInclusionProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
   if (!isStandaloneInformationalProblem_(text) ||
-    !/(?:iva|vat).*(?:inclus|includ|comprensiv)|(?:inclus|includ|comprensiv).*(?:iva|vat)/.test(text) ||
-    /\b(?:unclear|uncertain|unknown|ambiguous|cannot|can't)\b|\bnot\s+(?:clear|known|specified|certain|sure|confirmed|verified)\b|\b(?:non\s+)?(?:chiar[oa]|incert[oa]|ambigu[oa])\b/.test(text)) {
+    !isAffirmativeInformationalTaxInclusionFact_(text)) {
     return false;
   }
   const values = [
@@ -1569,6 +1568,12 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
     extracted.cost_consumption + extracted.cost_non_consumption + extracted.vat -
     extracted.total
   ) <= CONFIG.MONEY_TOLERANCE;
+}
+
+function isAffirmativeInformationalTaxInclusionFact_(text) {
+  return /^(?:gli\s+)?(?:importi|voci|dettagli).*?(?:sono\s+)?(?:riportati|indicati|espressi).*?(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:the\s+)?(?:line\s+items?|amounts?|charges?|details).*?(?:are\s+)?(?:shown|stated|listed|reported).*?(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:iva|vat)\s+(?:è|e|is|was)\s+(?:(?:già|already)\s+)?(?:inclus[ao]|included)\s+(?:nel(?:la)?\s+(?:totale|importo)|in\s+(?:the\s+)?(?:total|amount))[.!?]?$/i.test(text);
 }
 
 function isStandaloneInformationalProblem_(problem) {

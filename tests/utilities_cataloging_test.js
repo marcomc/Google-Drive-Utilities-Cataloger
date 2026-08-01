@@ -625,6 +625,17 @@ function testExtractionSchemaAndCalendarValidation() {
     ]
   };
   assert.equal(context.validateExtraction_(informationalVatInclusion).valid, true);
+  [
+    'VAT was included twice.',
+    'VAT was incorrectly included.',
+    'IVA inclusa erroneamente.',
+    'IVA inclusa due volte.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({
+      ...onlyCustomerCode,
+      problems: [problem]
+    }).valid, false);
+  });
 
   const mixedVatProblem = {
     ...onlyCustomerCode,

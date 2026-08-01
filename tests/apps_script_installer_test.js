@@ -314,15 +314,33 @@ function testSupplierProfileTemplateCreationAndRecoveryAreJournaled() {
   );
   assert.equal(created.getContent(), '# Operator-maintained template');
 
-  const interrupted = createSupplierProfileTemplateFixture(fixture.template, {
+  const token = '00000000-0000-4000-8000-000000000010';
+  const plannedState = {
     status: 'planned',
     rootFolderId: 'root-folder-id',
     templateFolderId: 'template-folder-id',
     locale: 'en',
     fileName: 'PROFILE.example.md',
     fileId: '',
-    targetContent: fixture.template
-  });
+    targetContent: fixture.template,
+    ownershipToken: token
+  };
+  const unmarked = createSupplierProfileTemplateFixture(fixture.template,
+    plannedState);
+  assert.throws(
+    () => unmarked.context.ensureInstallerSupplierProfileTemplate_(
+      unmarked.rootFolder, 'en'
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.deepEqual(unmarked.writes, []);
+
+  const interrupted = createSupplierProfileTemplateFixture(
+    fixture.context.getInstallerSupplierProfileTemplateStagingContent_(
+      fixture.template, token
+    ),
+    plannedState
+  );
   const adopted = interrupted.context.ensureInstallerSupplierProfileTemplate_(
     interrupted.rootFolder, 'en'
   );
@@ -332,7 +350,7 @@ function testSupplierProfileTemplateCreationAndRecoveryAreJournaled() {
   assert.equal(adopted.getId(), 'template-file-id');
   assert.equal(recoveredState.status, 'managed');
   assert.equal(recoveredState.fileId, 'template-file-id');
-  assert.deepEqual(interrupted.writes, []);
+  assert.deepEqual(interrupted.writes, [interrupted.template]);
 }
 
 function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
