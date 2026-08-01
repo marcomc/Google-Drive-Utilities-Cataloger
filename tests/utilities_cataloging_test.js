@@ -2120,6 +2120,11 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
     queuedResults.push(...results);
   };
   context.logCatalogEvent_ = () => {};
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    return result;
+  };
 
   const firstResults = context.recoverPendingMutations_({});
   const secondResults = context.recoverPendingMutations_({});
@@ -2132,7 +2137,11 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
   assert.equal(firstResults[0].extractionValidated, true);
   assert.equal(firstResults[0].failureStage, 'verifying-imported-row');
   assert.equal(firstResults[0].supplySupplier, 'Water / SUPPLIER');
+  assert.equal(firstResults[0].retryUrl, 'https://script.test/retry');
+  assert.equal(firstResults[0].supplierProfilesUrl, 'https://drive.test/profiles');
   assert.equal(queuedResults.length, 1);
+  assert.equal(queuedResults[0].retryUrl, 'https://script.test/retry');
+  assert.equal(queuedResults[0].supplierProfilesUrl, 'https://drive.test/profiles');
   assert.equal(secondResults.length, 0);
   assert.ok(store[`${alertPrefix}${fileId}`]);
   assert.ok(store[`${journalPrefix}${fileId}`]);
@@ -2231,6 +2240,11 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   context.queuePendingReports_ = () => calls.push('queue-report');
   context.saveIntakeFileState_ = () => calls.push('save-state');
   context.logCatalogEvent_ = () => calls.push('log-recovered');
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    return result;
+  };
 
   const result = context.recoverMutationJournalForFile_(
     {}, 'target-file'
@@ -2245,6 +2259,8 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   assert.ok(calls.includes('queue-report'));
   assert.ok(calls.includes('save-state'));
   assert.ok(calls.includes('log-recovered'));
+  assert.equal(result.retryUrl, 'https://script.test/retry');
+  assert.equal(result.supplierProfilesUrl, 'https://drive.test/profiles');
 }
 
 function testRecoveryMarksUnmarkedRowsAsIncomplete() {

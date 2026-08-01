@@ -3055,6 +3055,7 @@ function recoverMutationJournalForFile_(
       result.actions +=
         ' An unmarked spreadsheet row may remain at the planned position.';
     }
+    addRecoveryOperatorLinks_(result, rootFolder, fileId);
     recordIntakeFileOutcome_(state, file, result);
     queuePendingReports_([result]);
     saveIntakeFileState_(state);
@@ -3083,6 +3084,7 @@ function recoverMutationJournalForFile_(
     } else {
       result = buildUnavailableRecoveryResult_(fileId, journal, error);
     }
+    addRecoveryOperatorLinks_(result, rootFolder, fileId);
     queuePendingReports_([result]);
     properties.setProperty(recoveryAlertKey, String(Date.now()));
     logCatalogEvent_('catalog-mutation-recovery-failed', {
@@ -3092,6 +3094,18 @@ function recoverMutationJournalForFile_(
     });
     return result;
   }
+}
+
+function addRecoveryOperatorLinks_(result, rootFolder, fileId) {
+  try {
+    addOperatorLinksToResult_(result, rootFolder);
+  } catch (error) {
+    logCatalogEvent_('catalog-operator-links-failed', {
+      fileId: fileId,
+      reason: String(error.message || error)
+    });
+  }
+  return result;
 }
 
 function buildUnavailableRecoveryResult_(fileId, journal, error) {
