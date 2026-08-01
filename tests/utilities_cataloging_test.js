@@ -280,6 +280,46 @@ function testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot() {
     /recorded supplier profile root is unavailable, moved, or renamed/);
 }
 
+function testSupplierProfileContextLimitIncludesRenderedMetadata() {
+  const profileText = '---\nstatus: approved\nsupplier: ILIAD\n---\n' +
+    'x'.repeat(16340);
+  const profile = {
+    isTrashed: () => false,
+    getSize: () => Buffer.byteLength(profileText, 'utf8'),
+    getBlob: () => ({ getDataAsString: () => profileText })
+  };
+  const supplierFolders = ['a'.repeat(80) + '1', 'a'.repeat(80) + '2',
+    'a'.repeat(80) + '3'].map((name) => ({
+    isTrashed: () => false,
+    getName: () => name,
+    getFilesByName: () => driveIterator([profile])
+  }));
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getFolders: () => driveIterator(supplierFolders)
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([profileRoot])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => profileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.equal(profile.getSize() * supplierFolders.length, 49143);
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /Combined approved supplier profiles exceed the context limit/);
+}
+
 function testFormulaLikeTextIsWrittenLiterally() {
   const context = loadCataloger();
   [
@@ -3213,6 +3253,7 @@ testSupplierProfilesSkipStateLookupForMinimalRootAdapter();
 testSupplierProfileWorkspaceRejectsIncompleteState();
 testSupplierProfileWorkspaceRejectsSameNamedReplacement();
 testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
+testSupplierProfileContextLimitIncludesRenderedMetadata();
 testExtractionSchemaAndCalendarValidation();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testAmbiguousAddressRulesFailClosed();

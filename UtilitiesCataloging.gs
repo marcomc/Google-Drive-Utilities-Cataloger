@@ -539,13 +539,17 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     if (!isApprovedSupplierProfile_(text, names)) {
       throw new Error('Approved supplier profile is malformed or not explicitly approved.');
     }
-    totalBytes += approved[0].getSize();
+    const renderedProfile = '--- BEGIN APPROVED SUPPLIER PROFILE: ' +
+      supplierFolder.getName() + ' ---\n' + text +
+      '\n--- END APPROVED SUPPLIER PROFILE ---';
+    const separatorBytes = profiles.length > 0 ?
+      Utilities.newBlob('\n\n').getBytes().length : 0;
+    totalBytes += separatorBytes +
+      Utilities.newBlob(renderedProfile).getBytes().length;
     if (totalBytes > CONFIG.MAX_SUPPLIER_PROFILE_CONTEXT_BYTES) {
       throw new Error('Combined approved supplier profiles exceed the context limit.');
     }
-    profiles.push('--- BEGIN APPROVED SUPPLIER PROFILE: ' +
-      supplierFolder.getName() + ' ---\n' + text +
-      '\n--- END APPROVED SUPPLIER PROFILE ---');
+    profiles.push(renderedProfile);
   }
   return profiles.join('\n\n');
 }
