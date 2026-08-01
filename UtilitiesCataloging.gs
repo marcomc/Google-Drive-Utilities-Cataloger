@@ -255,7 +255,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     state.mutationJournalStarted = true;
     const destination = getDestinationFolder_(rootFolder, extracted);
     state.createdFolderPath = (destination.createdFolders || []).join(', ');
-    updateMutationJournal_(file.getId(), {
+    checkpointMutationJournal_(file.getId(), state, {
       destinationPath: destination.path,
       createdFolderPath: state.createdFolderPath
     });
@@ -283,8 +283,9 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     let sheetLink = '';
     if (extracted.address_type === 'import' && extracted.document_type === 'Invoice') {
-      state.failureStage = 'spreadsheet-write-and-verify';
-      const sheetImport = importUtilityInvoiceToSheet_(file, extracted);
+      advanceMutationFailureStage_(file.getId(), state,
+        'spreadsheet-write-and-verify');
+      const sheetImport = importUtilityInvoiceToSheet_(file, extracted, state);
       sheetLink = sheetImport.link;
       state.sheetLink = sheetImport.link;
       state.imported = true;
@@ -299,18 +300,19 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
         sheetImport.electricityDashboardLayouts || null;
     }
 
-    state.failureStage = 'renaming-and-moving-pdf';
-    updateMutationJournal_(file.getId(), { stage: 'renaming' });
+    advanceMutationFailureStage_(file.getId(), state,
+      'renaming-and-moving-pdf', { stage: 'renaming' });
     file.setName(assignedName);
     state.renamed = true;
-    updateMutationJournal_(file.getId(), { stage: 'renamed' });
-    updateMutationJournal_(file.getId(), { stage: 'moving' });
+    checkpointMutationJournal_(file.getId(), state, { stage: 'renamed' });
+    checkpointMutationJournal_(file.getId(), state, { stage: 'moving' });
     file.moveTo(destination.folder);
     state.moved = true;
-    updateMutationJournal_(file.getId(), { stage: 'moved' });
+    checkpointMutationJournal_(file.getId(), state, { stage: 'moved' });
     verifyMovedFile_(file, destination.folder, assignedName);
     if (state.imported) {
-      state.failureStage = 'verifying-imported-row';
+      advanceMutationFailureStage_(file.getId(), state,
+        'verifying-imported-row');
       refreshImportedSourceLink_(state.sheet, state.sheetRow, file);
       verifyImportedRow_(state.sheet, state.sheetRow,
         getSheetLayout_(state.sheet), file, extracted);
@@ -374,7 +376,7 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
     try {
       deleteSheetRowAndCheckpoint_(file, function () {
         rollbackImportedRow_(state.sheet, state.sheetRow, file);
-      });
+      }, state);
       state.imported = false;
       state.sheetRowCreated = false;
       state.sheetLink = '';
@@ -1846,7 +1848,7 @@ function verifyMovedFile_(file, destinationFolder, assignedName) {
   }
 }
 
-function importUtilityInvoiceToSheet_(file, extracted) {
+function importUtilityInvoiceToSheet_(file, extracted, state) {
   const automationConfig = getAutomationConfig_();
   const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
   const sheetName = automationConfig.sheet_by_supply[extracted.supply_type];
@@ -1856,7 +1858,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   }
   const electricityDashboardLayouts =
     captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
-  updateMutationJournal_(file.getId(), {
+  checkpointMutationJournal_(file.getId(), state, {
     electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
       electricityDashboardLayouts
     )
@@ -1866,7 +1868,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   if (existingRow) {
     const previousRowPayload = captureImportedRowPayload_(sheet, existingRow,
       layout);
-    updateMutationJournal_(file.getId(), {
+    checkpointMutationJournal_(file.getId(), state, {
       stage: 'sheet-existing',
       sheetName: sheetName,
       sheetRow: existingRow,
@@ -1885,7 +1887,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
       verifyImportedRow_(sheet, existingRow, layout, file, extracted);
       correctedRow = repositionImportedRow_(sheet, existingRow, layout,
         extracted.issue_date, file);
-      updateMutationJournal_(file.getId(), {
+      checkpointMutationJournal_(file.getId(), state, {
         stage: 'sheet-existing-written',
         sheetRow: correctedRow
       });
@@ -1917,7 +1919,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
-  updateMutationJournal_(file.getId(), {
+  checkpointMutationJournal_(file.getId(), state, {
     stage: 'sheet-insert-planned',
     sheetName: sheetName,
     sheetRow: targetRow,
@@ -1928,13 +1930,13 @@ function importUtilityInvoiceToSheet_(file, extracted) {
   try {
     copyRowStyleAndFormulas_(sheet, targetRow, layout);
     refreshImportedSourceLink_(sheet, targetRow, file);
-    updateMutationJournal_(file.getId(), {
+    checkpointMutationJournal_(file.getId(), state, {
       stage: 'sheet-marker-written',
       sheetRowCreated: true
     });
     writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
     verifyImportedRow_(sheet, targetRow, layout, file, extracted);
-    updateMutationJournal_(file.getId(), { stage: 'sheet-written' });
+    checkpointMutationJournal_(file.getId(), state, { stage: 'sheet-written' });
     refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
       sheet, extracted);
   } catch (error) {
@@ -1942,7 +1944,7 @@ function importUtilityInvoiceToSheet_(file, extracted) {
     try {
       deleteSheetRowAndCheckpoint_(file, function () {
         sheet.deleteRow(targetRow);
-      });
+      }, state);
       deletionCompleted = true;
     } catch (rollbackError) {
       error.mutationRollbackIncomplete = true;
@@ -2128,7 +2130,7 @@ function rollbackImportedRow_(sheet, row, file) {
   sheet.deleteRow(row);
 }
 
-function deleteSheetRowAndCheckpoint_(file, deleteRow) {
+function deleteSheetRowAndCheckpoint_(file, deleteRow, state) {
   const fileId = file.getId();
   const properties = PropertiesService.getScriptProperties();
   const key = CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX + fileId;
@@ -2148,11 +2150,15 @@ function deleteSheetRowAndCheckpoint_(file, deleteRow) {
     sheetRowDeleted: true
   };
   try {
-    updateMutationJournal_(fileId, deletionCheckpoint);
+    checkpointMutationJournal_(fileId, state, deletionCheckpoint);
   } catch (primaryError) {
     try {
+      const fallbackCheckpoint = Object.assign({}, deletionCheckpoint);
+      if (state && state.failureStage) {
+        fallbackCheckpoint.failureStage = state.failureStage;
+      }
       saveMutationJournal_(fileId, Object.assign({}, journal,
-        deletionCheckpoint, { updatedAt: Date.now() }));
+        fallbackCheckpoint, { updatedAt: Date.now() }));
     } catch (fallbackError) {
       throw new Error(
         'The spreadsheet row was deleted, but its mutation journal checkpoint ' +
@@ -2856,6 +2862,21 @@ function updateMutationJournal_(fileId, changes) {
   writeMutationJournal_(properties, fileId, journal);
 }
 
+function checkpointMutationJournal_(fileId, state, changes) {
+  const checkpoint = Object.assign({}, changes);
+  if (state && state.failureStage) {
+    checkpoint.failureStage = state.failureStage;
+  }
+  updateMutationJournal_(fileId, checkpoint);
+}
+
+function advanceMutationFailureStage_(fileId, state, failureStage, changes) {
+  state.failureStage = failureStage;
+  if (state.mutationJournalStarted) {
+    checkpointMutationJournal_(fileId, state, changes || {});
+  }
+}
+
 function writeMutationJournal_(properties, fileId, journal) {
   const stored = Object.assign({}, journal);
   if (stored.extracted) {
@@ -3004,19 +3025,10 @@ function recoverMutationJournalForFile_(
       'A previously interrupted mutation was recovered safely.',
       'Review the PDF in intake; the daily run can retry it on the next day.',
       journal.originalName || file.getName(),
-      {
-        renamed: false,
-        moved: false,
+      getMutationJournalRecoveryState_(journal, {
         imported: sheetRecovery.unmarkedRowMayRemain,
-        extracted: journal.extracted || {},
-        extractionValidated: journal.extractionValidated === true,
-        failureStage: journal.failureStage || ''
-      }
+      })
     );
-    if (journal.createdFolderPath) {
-      result.actions += ' Empty destination folders may remain at ' +
-        journal.createdFolderPath + '.';
-    }
     if (sheetRecovery.unmarkedRowMayRemain) {
       result.actions +=
         ' An unmarked spreadsheet row may remain at the planned position.';
@@ -3042,7 +3054,7 @@ function recoverMutationJournalForFile_(
           describeError_(error),
         'Inspect and resolve the journaled Drive and Sheet state before retrying this PDF.',
         (journal && journal.originalName) || file.getName(),
-        { renamed: false, moved: false, imported: true }
+        getMutationJournalRecoveryState_(journal, { imported: true })
       );
       recordIntakeFileOutcome_(state, file, result);
       saveIntakeFileState_(state);
@@ -3061,6 +3073,10 @@ function recoverMutationJournalForFile_(
 }
 
 function buildUnavailableRecoveryResult_(fileId, journal, error) {
+  const reached = getMutationJournalRecoveryState_(journal);
+  const supplySupplier = [reached.extracted.supply_type, reached.extracted.supplier]
+    .filter(Boolean)
+    .join(' / ');
   return {
     status: 'ERROR',
     originalName: journal && journal.originalName ?
@@ -3068,9 +3084,11 @@ function buildUnavailableRecoveryResult_(fileId, journal, error) {
     assignedName: '',
     fileUrl: 'https://drive.google.com/open?id=' + encodeURIComponent(fileId),
     destination: '',
-    supplySupplier: '',
-    extracted: {},
+    supplySupplier: supplySupplier,
+    extracted: reached.extracted,
     sheetLink: '',
+    failureStage: reached.failureStage,
+    extractionValidated: reached.extractionValidated,
     rollbackCompleted: false,
     actions: 'No automatic cleanup was completed; the mutation journal remains.',
     problem: 'An interrupted mutation requires manual review: ' +
@@ -3078,6 +3096,19 @@ function buildUnavailableRecoveryResult_(fileId, journal, error) {
     recommendedAction:
       'Restore or locate the Drive file, then reconcile its journaled Drive and Sheet state.'
   };
+}
+
+function getMutationJournalRecoveryState_(journal, changes) {
+  const stored = journal && typeof journal === 'object' ? journal : {};
+  return Object.assign({
+    renamed: false,
+    moved: false,
+    imported: false,
+    createdFolderPath: stored.createdFolderPath || '',
+    extracted: stored.extracted || {},
+    extractionValidated: stored.extractionValidated === true,
+    failureStage: stored.failureStage || ''
+  }, changes || {});
 }
 
 function rollbackJournalSheetRow_(journal, file) {
@@ -3333,14 +3364,14 @@ function buildErrorResult_(file, problem, action, originalName, state) {
   if (reached.imported) {
     changes.push('the spreadsheet row may remain');
   }
+  if (reached.createdFolderPath) {
+    changes.push('empty destination folders may remain at ' +
+      reached.createdFolderPath);
+  }
   const rollbackProblems = reached.rollbackErrors || [];
   let actions = changes.length > 0 ?
     'Automatic rollback was incomplete: ' + changes.join(', ') + '.' :
     'Any partial Drive or spreadsheet mutation was rolled back.';
-  if (reached.createdFolderPath) {
-    actions += ' Empty destination folders may remain at ' +
-      reached.createdFolderPath + '.';
-  }
   return {
     status: 'ERROR',
     originalName: originalName || file.getName(),

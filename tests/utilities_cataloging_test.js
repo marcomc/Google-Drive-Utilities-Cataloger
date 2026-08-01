@@ -1300,6 +1300,27 @@ function testPreExtractionErrorReportKeepsDataUnavailable() {
   assert.match(report, /Reconciliation check: not applicable/);
 }
 
+function testErrorResultMarksRetainedDestinationFoldersAsIncomplete() {
+  const context = loadCataloger();
+  const file = {
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/file-id'
+  };
+
+  const result = context.buildErrorResult_(
+    file,
+    'Drive destination creation failed.',
+    'Inspect the intake folder before retrying.',
+    'invoice.pdf',
+    { createdFolderPath: 'Water/2026', rollbackErrors: [] }
+  );
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /Automatic rollback was incomplete/);
+  assert.match(result.actions, /empty destination folders may remain at Water\/2026/);
+  assert.doesNotMatch(result.actions, /Any partial Drive or spreadsheet mutation was rolled back/);
+}
+
 function testGenericRateLimitStaysOnDeveloperApi() {
   const requests = [];
   const responses = [
@@ -1787,6 +1808,70 @@ function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
   assert.equal(recovered.failureStage, 'preparing-drive-destination');
 }
 
+function testMutationJournalPersistsFailureStageAtProcessingCheckpoints() {
+  const context = loadCataloger();
+  const extraction = validInvoice();
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + 'file-id';
+  let fileName = 'invoice.pdf';
+  const readJournal = () => JSON.parse(propertyStore.store[journalKey]);
+  const file = {
+    getId: () => 'file-id',
+    getName: () => fileName,
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id',
+    setName: (name) => {
+      assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+      assert.equal(readJournal().stage, 'renaming');
+      fileName = name;
+    },
+    moveTo: () => {
+      assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+      assert.equal(readJournal().stage, 'moving');
+    }
+  };
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.getDestinationFolder_ = () => ({
+    folder: {},
+    path: 'Water/2026',
+    createdFolders: []
+  });
+  context.getDestinationCollision_ = () => ({ status: 'none' });
+  context.importUtilityInvoiceToSheet_ = () => {
+    assert.equal(readJournal().failureStage, 'spreadsheet-write-and-verify');
+    return { link: '', sheet: {}, row: 2, created: false };
+  };
+  context.verifyMovedFile_ = () => {
+    assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+    assert.equal(readJournal().stage, 'moved');
+  };
+  context.refreshImportedSourceLink_ = () => {
+    assert.equal(readJournal().failureStage, 'verifying-imported-row');
+  };
+  context.verifyImportedRow_ = () => {
+    assert.equal(readJournal().failureStage, 'verifying-imported-row');
+    throw new Error('imported-row verification interrupted');
+  };
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+
+  assert.equal(result.failureStage, 'verifying-imported-row');
+  assert.equal(readJournal().failureStage, 'verifying-imported-row');
+}
+
 function testMutationJournalChunksLargeValidatedExtractionSnapshots() {
   const context = loadCataloger();
   const fileId = 'large-extraction-file-id';
@@ -1907,6 +1992,7 @@ function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
 
 function testMutationRecoveryReportsUnavailableFileOnce() {
   const context = loadCataloger();
+  const extraction = validInvoice();
   const journalPrefix = vm.runInContext(
     'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
     context
@@ -1916,11 +2002,18 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
     context
   );
   const fileId = 'unavailable-file-id';
+  const extractionPayloadPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+  ) + fileId + '_';
   const store = {
     [`${journalPrefix}${fileId}`]: JSON.stringify({
       originalName: 'unavailable.pdf',
-      stage: 'moved'
-    })
+      stage: 'moved',
+      extractedChunks: 1,
+      extractionValidated: true,
+      failureStage: 'verifying-imported-row'
+    }),
+    [`${extractionPayloadPrefix}0`]: JSON.stringify(extraction)
   };
   const queuedResults = [];
   const properties = {
@@ -1950,6 +2043,10 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
   assert.equal(firstResults[0].status, 'ERROR');
   assert.equal(firstResults[0].rollbackCompleted, false);
   assert.match(firstResults[0].problem, /Drive file is unavailable/);
+  assert.deepEqual(JSON.parse(JSON.stringify(firstResults[0].extracted)), extraction);
+  assert.equal(firstResults[0].extractionValidated, true);
+  assert.equal(firstResults[0].failureStage, 'verifying-imported-row');
+  assert.equal(firstResults[0].supplySupplier, 'Water / SUPPLIER');
   assert.equal(queuedResults.length, 1);
   assert.equal(secondResults.length, 0);
   assert.ok(store[`${alertPrefix}${fileId}`]);
@@ -3601,6 +3698,7 @@ testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
 testPreExtractionErrorReportKeepsDataUnavailable();
+testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
@@ -3611,6 +3709,7 @@ testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
 testMutationJournalCapturesValidatedReportingContextBeforeMutations();
+testMutationJournalPersistsFailureStageAtProcessingCheckpoints();
 testMutationJournalChunksLargeValidatedExtractionSnapshots();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
