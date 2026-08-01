@@ -62,6 +62,12 @@ case "${command_name}" in
         printf '%s\n' 'authorization refresh failed' >&2
         exit 9
         ;;
+      post-oauth-invalid-grant)
+        if grep -Fxq 'clasp-deployments' "${TEST_COMMAND_LOG}"; then
+          printf '%s\n' 'invalid_grant' >&2
+          exit 9
+        fi
+        ;;
     esac
     ;;
   pull)
@@ -186,6 +192,26 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
   transport-connect) exit 7 ;;
   transport-timeout) exit 28 ;;
   transport-tls) exit 60 ;;
+  post-transport-dns)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 6
+    fi
+    ;;
+  post-transport-connect)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 7
+    fi
+    ;;
+  post-transport-timeout)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 28
+    fi
+    ;;
+  post-transport-tls)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 60
+    fi
+    ;;
 esac
 
 script_id="test-script"
@@ -227,6 +253,11 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
       http_status=403
     fi
     ;;
+  post-api-missing)
+    if [[ "${call_count}" -gt 1 ]]; then
+      http_status=404
+    fi
+    ;;
   post-api-rate-limited)
     if [[ "${call_count}" -gt 1 ]]; then
       http_status=429
@@ -240,11 +271,26 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
   wrong-script)
     script_id="other-script"
     ;;
+  post-wrong-script)
+    if [[ "${call_count}" -gt 1 ]]; then
+      script_id="other-script"
+    fi
+    ;;
   missing-entry-point)
     entry_point_type="WEB_APP"
     ;;
+  post-missing-entry-point)
+    if [[ "${call_count}" -gt 1 ]]; then
+      entry_point_type="WEB_APP"
+    fi
+    ;;
   wrong-access)
     access="ANYONE"
+    ;;
+  post-wrong-access)
+    if [[ "${call_count}" -gt 1 ]]; then
+      access="ANYONE"
+    fi
     ;;
   mixed-public)
     extra_entry_point=true
@@ -367,6 +413,22 @@ require_fixture_failure() {
     printf '%s\n' "${failure_message}" >&2
     exit 1
   fi
+}
+
+assert_post_update_failure_is_not_retried() {
+  local fixture_dir="$1"
+  local expected_api_reads="$2"
+  local actual_api_reads
+  local actual_waits
+  local mutation_commands
+
+  actual_api_reads="$(grep -c '^api-get-' "${fixture_dir}/commands.log" || true)"
+  actual_waits="$(grep -c '^sleep-2$' "${fixture_dir}/commands.log" || true)"
+  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
+    "${fixture_dir}/commands.log" || true)"
+  test "${actual_api_reads}" -eq "${expected_api_reads}"
+  test "${actual_waits}" -eq 1
+  test "${mutation_commands}" -eq 3
 }
 
 CURRENT_SHA="1111111111111111111111111111111111111111"
@@ -534,6 +596,7 @@ done
 
 for scenario in \
   post-api-forbidden \
+  post-api-missing \
   post-api-rate-limited \
   post-api-unavailable; do
   failure_dir="${TEST_ROOT}/${scenario}"
@@ -542,12 +605,37 @@ for scenario in \
     "Post-update API failure was accepted: ${scenario}" \
     "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
     "deployment-1" "deployment-1" "${scenario}"
-  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
-    "${failure_dir}/commands.log")"
-  test "${mutation_commands}" -eq 3
+  assert_post_update_failure_is_not_retried "${failure_dir}" 2
   grep -q 'post-update API verification failed' \
     "${failure_dir}/output.log"
 done
+
+for scenario in \
+  post-transport-dns \
+  post-transport-connect \
+  post-transport-timeout \
+  post-transport-tls \
+  post-wrong-script \
+  post-missing-entry-point \
+  post-wrong-access; do
+  failure_dir="${TEST_ROOT}/${scenario}"
+  mkdir -p "${failure_dir}"
+  require_fixture_failure \
+    "Post-update terminal failure was retried or accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
+  assert_post_update_failure_is_not_retried "${failure_dir}" 2
+done
+
+post_oauth_invalid_grant_dir="${TEST_ROOT}/post-oauth-invalid-grant"
+mkdir -p "${post_oauth_invalid_grant_dir}"
+require_fixture_failure \
+  'A post-update OAuth refresh failure was accepted.' \
+  "${post_oauth_invalid_grant_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-oauth-invalid-grant"
+assert_post_update_failure_is_not_retried "${post_oauth_invalid_grant_dir}" 1
+grep -q 'OAuth refresh token is invalid or expired' \
+  "${post_oauth_invalid_grant_dir}/output.log"
 
 changed_dir="${TEST_ROOT}/changed-after"
 mkdir -p "${changed_dir}"
@@ -560,6 +648,8 @@ changed_deploy_count="$(grep -c '^clasp-deploy$' \
 test "${changed_deploy_count}" -eq 1
 changed_api_reads="$(grep -c '^api-get-' "${changed_dir}/commands.log" || true)"
 test "${changed_api_reads}" -eq 2
+changed_waits="$(grep -c '^sleep-2$' "${changed_dir}/commands.log" || true)"
+test "${changed_waits}" -eq 1
 
 mismatch_dir="${TEST_ROOT}/mismatch"
 mkdir -p "${mismatch_dir}"

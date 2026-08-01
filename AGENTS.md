@@ -31,6 +31,10 @@
   belongs to the target script, preserve installation-specific manifest values,
   and distinguish project HEAD used by installable triggers from the versioned
   API executable deployment.
+- After a versioned Apps Script deployment update, retry only a successful
+  identity-valid read whose version is temporarily stale. Treat authorization,
+  transport, identity, and entry-point failures as terminal, and test the exact
+  post-update read and wait counts for both the retryable and terminal paths.
 - Do not use Apps Script Execution API calls to create or remove installable
   triggers: that API cannot manage triggers, and existing installable triggers
   execute the project HEAD rather than the API executable's pinned version.
