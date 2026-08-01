@@ -281,15 +281,61 @@ function testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot() {
 }
 
 function testSupplierProfileContextLimitIncludesRenderedMetadata() {
-  const profileText = '---\nstatus: approved\nsupplier: ILIAD\n---\n' +
-    'x'.repeat(16340);
-  const profile = {
-    isTrashed: () => false,
-    getSize: () => Buffer.byteLength(profileText, 'utf8'),
-    getBlob: () => ({ getDataAsString: () => profileText })
-  };
+  const profiles = ['ALIAD', 'BLIAD', 'CLIAD'].map((supplier) => {
+    const profileText = '---\nstatus: approved\nsupplier: ' + supplier + '\n---\n' +
+      'x'.repeat(16340);
+    return {
+      isTrashed: () => false,
+      getSize: () => Buffer.byteLength(profileText, 'utf8'),
+      getBlob: () => ({ getDataAsString: () => profileText })
+    };
+  });
   const supplierFolders = ['a'.repeat(80) + '1', 'a'.repeat(80) + '2',
-    'a'.repeat(80) + '3'].map((name) => ({
+    'a'.repeat(80) + '3'].map((name, index) => ({
+    isTrashed: () => false,
+    getName: () => name,
+    getFilesByName: () => driveIterator([profiles[index]])
+  }));
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getFolders: () => driveIterator(supplierFolders)
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([profileRoot])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => profileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.equal(profiles.reduce((total, profile) => total + profile.getSize(), 0), 49143);
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /Combined approved supplier profiles exceed the context limit/);
+}
+
+function testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders() {
+  const makeProfile = (supplier) => {
+    const profileText = '---\nstatus: approved\nsupplier: ' + supplier +
+      '\n---\n# Profile';
+    return {
+      isTrashed: () => false,
+      getSize: () => Buffer.byteLength(profileText, 'utf8'),
+      getBlob: () => ({ getDataAsString: () => profileText })
+    };
+  };
+  const supplierFolders = [
+    ['Active Iliad profile', makeProfile('Iliad Internet')],
+    ['Stale duplicate profile', makeProfile('ILIAD   Internet')]
+  ].map(([name, profile]) => ({
     isTrashed: () => false,
     getName: () => name,
     getFilesByName: () => driveIterator([profile])
@@ -315,9 +361,8 @@ function testSupplierProfileContextLimitIncludesRenderedMetadata() {
     )
   });
 
-  assert.equal(profile.getSize() * supplierFolders.length, 49143);
   assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
-    /Combined approved supplier profiles exceed the context limit/);
+    /More than one approved supplier profile exists for the same supplier/);
 }
 
 function testFormulaLikeTextIsWrittenLiterally() {
@@ -683,6 +728,44 @@ function testSupplierDefaultsUseRuntimeTargetHeaders() {
     { header: "Spese d'incasso", value: 0 }
   ]));
   assert.equal(JSON.stringify(extracted.problems), JSON.stringify([]));
+}
+
+function testSupplierDefaultsNormalizeConfiguredIdentities() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'it',
+    canonical_suppliers: ['Iliad'],
+    supplier_aliases: {},
+    canonical_supplies: ['internet'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  const explicitAbsence = context.normalizeExtraction_({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+
+  context.applySupplierFieldDefaults_(explicitAbsence, ["Spese d'incasso"]);
+  assert.equal(JSON.stringify(explicitAbsence.sheet_values), JSON.stringify([{
+    header: "Spese d'incasso", value: 0
+  }]));
+  assert.equal(JSON.stringify(explicitAbsence.problems), JSON.stringify([]));
+
+  const unreadableCharge = context.normalizeExtraction_({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso amount missing or unreadable."],
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  context.applySupplierFieldDefaults_(unreadableCharge, ["Spese d'incasso"]);
+  assert.equal(unreadableCharge.sheet_values[0].value, null);
+  assert.equal(context.validateExtraction_(unreadableCharge).valid, false);
 }
 
 function testAmbiguousAddressRulesFailClosed() {
@@ -3180,6 +3263,70 @@ function testSingleFileProcessesOnlyTheValidatedTarget() {
   assert.deepEqual(calls, ['flush', 'process']);
 }
 
+function testSingleFilePersistsWhenOperatorLinksFail() {
+  const file = { getId: () => 'file-id' };
+  const rootFolder = {};
+  const result = { status: 'IMPORTED' };
+  const calls = [];
+  const linkFailureEvents = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder,
+      getFileById: () => file
+    },
+    LockService: {
+      getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.logCatalogEvent_ = (event, details) => {
+    if (event === 'catalog-operator-links-failed') {
+      linkFailureEvents.push(details);
+    }
+  };
+  context.describeFileForLog_ = () => ({ fileId: 'file-id' });
+  context.logCatalogResult_ = (candidate, actual) => {
+    assert.equal(candidate, file);
+    assert.equal(actual, result);
+    calls.push('log-result');
+  };
+  context.hasMutationJournal_ = () => false;
+  context.isDirectIntakePdf_ = () => true;
+  context.flushPendingReports_ = () => calls.push('flush');
+  context.loadDriveAgentsPolicy_ = () => 'policy';
+  context.loadIntakeFileState_ = () => ({ state: 'initial' });
+  context.markIntakeFileProcessing_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.processIntakeFile_ = () => {
+    calls.push('process');
+    return result;
+  };
+  context.addOperatorLinksToResult_ = () => {
+    calls.push('links');
+    throw new Error('profile lookup unavailable');
+  };
+  context.persistCatalogResult_ = (_state, candidate, folder, actual) => {
+    assert.equal(candidate, file);
+    assert.equal(folder, rootFolder);
+    assert.equal(actual, result);
+    calls.push('persist');
+  };
+  context.finalizeCatalogResults_ = (_state, results) => {
+    assert.equal(results.length, 1);
+    assert.equal(results[0], result);
+    calls.push('finalize');
+  };
+
+  assert.equal(context.processSingleIntakeFile('file-id'), result);
+  assert.deepEqual(calls, [
+    'flush', 'process', 'links', 'persist', 'log-result', 'finalize'
+  ]);
+  assert.equal(linkFailureEvents.length, 1);
+  assert.equal(linkFailureEvents[0].fileId, 'file-id');
+  assert.equal(linkFailureEvents[0].reason, 'profile lookup unavailable');
+}
+
 function testSingleFileRecoversOnlyTargetJournal() {
   const file = { getId: () => 'file-id' };
   const rootFolder = {};
@@ -3254,8 +3401,10 @@ testSupplierProfileWorkspaceRejectsIncompleteState();
 testSupplierProfileWorkspaceRejectsSameNamedReplacement();
 testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
 testSupplierProfileContextLimitIncludesRenderedMetadata();
+testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testSupplierDefaultsUseRuntimeTargetHeaders();
+testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
@@ -3312,6 +3461,7 @@ testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
 testSingleFilePreflightsTargetBeforeGlobalSideEffects();
 testSingleFileProcessesOnlyTheValidatedTarget();
+testSingleFilePersistsWhenOperatorLinksFail();
 testSingleFileRecoversOnlyTargetJournal();
 testSingleFileStopsWhenTargetJournalRemains();
 

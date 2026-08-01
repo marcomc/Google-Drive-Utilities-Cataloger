@@ -41,11 +41,16 @@ function processSingleIntakeFile(fileId) {
     const state = loadIntakeFileState_();
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
-    const result = addOperatorLinksToResult_(
-      processIntakeFile_(file, rootFolder, driveAgentsPolicy), rootFolder
-    );
-    logCatalogResult_(file, result);
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+    try {
+      addOperatorLinksToResult_(result, rootFolder);
+    } catch (error) {
+      logCatalogEvent_('catalog-operator-links-failed', Object.assign(
+        describeFileForLog_(file), { reason: String(error.message || error) }
+      ));
+    }
     persistCatalogResult_(state, file, rootFolder, result);
+    logCatalogResult_(file, result);
     finalizeCatalogResults_(state, [result]);
     return result;
   });
@@ -509,6 +514,7 @@ function loadApprovedSupplierProfiles_(rootFolder) {
   }
 
   const profiles = [];
+  const profileSupplierIdentities = Object.create(null);
   let totalBytes = 0;
   const supplierFolders = profileRoot.getFolders();
   while (supplierFolders.hasNext()) {
@@ -536,8 +542,13 @@ function loadApprovedSupplierProfiles_(rootFolder) {
       throw new Error('Approved supplier profile exceeds the size limit.');
     }
     const text = approved[0].getBlob().getDataAsString('UTF-8').trim();
-    if (!isApprovedSupplierProfile_(text, names)) {
+    const metadata = parseApprovedSupplierProfileMetadata_(text, names);
+    if (!metadata) {
       throw new Error('Approved supplier profile is malformed or not explicitly approved.');
+    }
+    const supplierIdentity = normalizeCellText_(metadata[names.supplierKey]);
+    if (profileSupplierIdentities[supplierIdentity]) {
+      throw new Error('More than one approved supplier profile exists for the same supplier.');
     }
     const renderedProfile = '--- BEGIN APPROVED SUPPLIER PROFILE: ' +
       supplierFolder.getName() + ' ---\n' + text +
@@ -549,6 +560,7 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     if (totalBytes > CONFIG.MAX_SUPPLIER_PROFILE_CONTEXT_BYTES) {
       throw new Error('Combined approved supplier profiles exceed the context limit.');
     }
+    profileSupplierIdentities[supplierIdentity] = true;
     profiles.push(renderedProfile);
   }
   return profiles.join('\n\n');
@@ -643,25 +655,29 @@ function getSupplierProfileFolderIdForExtraction_(folder, label) {
   return id;
 }
 
-function isApprovedSupplierProfile_(text, names) {
+function parseApprovedSupplierProfileMetadata_(text, names) {
   if (text.indexOf('\u0000') >= 0 || text.indexOf('---\n') !== 0) {
-    return false;
+    return null;
   }
   const metadataBlock = text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
   if (!metadataBlock) {
-    return false;
+    return null;
   }
   const metadata = Object.create(null);
   const lines = metadataBlock[1].split('\n');
   for (let index = 0; index < lines.length; index += 1) {
     const match = lines[index].match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(\S(?:.*\S)?)$/);
     if (!match || metadata[match[1]] !== undefined) {
-      return false;
+      return null;
     }
     metadata[match[1]] = match[2];
   }
   return metadata[names.statusKey] === names.approvedStatus &&
-    Boolean(metadata[names.supplierKey]);
+    Boolean(metadata[names.supplierKey]) ? metadata : null;
+}
+
+function isApprovedSupplierProfile_(text, names) {
+  return Boolean(parseApprovedSupplierProfileMetadata_(text, names));
 }
 
 function getSupplierProfilesFolderUrl_(rootFolder) {
@@ -1250,8 +1266,10 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
   const normalizedAvailableHeaders = availableHeaders.map(normalizeHeader_);
   const defaults = getLocalization_().supplierFieldDefaults || [];
   defaults.forEach(function (defaultValue) {
-    if (!defaultValue || defaultValue.supplier !== extracted.supplier ||
-      defaultValue.supply_type !== extracted.supply_type || !defaultValue.header) {
+    if (!defaultValue ||
+      normalizeSupplier_(defaultValue.supplier) !== normalizeSupplier_(extracted.supplier) ||
+      normalizeSupplyType_(defaultValue.supply_type) !==
+        normalizeSupplyType_(extracted.supply_type) || !defaultValue.header) {
       return;
     }
     const defaultHeader = normalizeHeader_(defaultValue.header);
