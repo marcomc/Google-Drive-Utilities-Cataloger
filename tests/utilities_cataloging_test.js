@@ -1547,6 +1547,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /one of contract_number or customer_code is sufficient/);
   assert.match(prompt, /Preserve every character and leading zero/);
   assert.match(prompt, /two-character text value in the exact format mm/);
+  assert.match(prompt, /measurements, and reference year\./);
+  assert.doesNotMatch(prompt, /reference year\/month/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
