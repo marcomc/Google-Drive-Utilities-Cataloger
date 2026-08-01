@@ -1321,6 +1321,58 @@ function testErrorResultMarksRetainedDestinationFoldersAsIncomplete() {
   assert.doesNotMatch(result.actions, /Any partial Drive or spreadsheet mutation was rolled back/);
 }
 
+function testDestinationFolderCreationCheckpointsEachCreatedPath() {
+  const context = loadCataloger();
+  const fileId = 'destination-checkpoint-file-id';
+  const { store } = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + fileId;
+  const file = {
+    getId: () => fileId,
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/destination-checkpoint-file-id'
+  };
+  const failingChild = {
+    getFoldersByName: () => {
+      const journal = JSON.parse(store[journalKey]);
+      assert.equal(journal.createdFolderPath, 'Water');
+      assert.equal(journal.failureStage, 'preparing-drive-destination');
+      throw new Error('second destination folder lookup failed');
+    }
+  };
+  const rootFolder = {
+    getFoldersByName: () => driveIterator([]),
+    createFolder: (name) => {
+      assert.equal(name, 'Water');
+      return failingChild;
+    }
+  };
+  context.getAutomationConfig_ = () => ({
+    destination_templates: {},
+    canonical_suppliers: []
+  });
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => validInvoice();
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'drive';
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processIntakeFile_(file, rootFolder, 'policy');
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /empty destination folders may remain at Water/);
+  assert.equal(JSON.parse(store[journalKey]).createdFolderPath, 'Water');
+}
+
 function testGenericRateLimitStaysOnDeveloperApi() {
   const requests = [];
   const responses = [
@@ -3699,6 +3751,7 @@ testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
 testPreExtractionErrorReportKeepsDataUnavailable();
 testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
+testDestinationFolderCreationCheckpointsEachCreatedPath();
 testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();

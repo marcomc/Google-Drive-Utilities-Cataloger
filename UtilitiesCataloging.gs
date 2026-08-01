@@ -253,7 +253,15 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       updatedAt: Date.now()
     });
     state.mutationJournalStarted = true;
-    const destination = getDestinationFolder_(rootFolder, extracted);
+    const destination = getDestinationFolder_(rootFolder, extracted,
+      function (createdPath) {
+        state.createdFolderPath = appendCreatedFolderPath_(
+          state.createdFolderPath, createdPath
+        );
+        checkpointMutationJournal_(file.getId(), state, {
+          createdFolderPath: state.createdFolderPath
+        });
+      });
     state.createdFolderPath = (destination.createdFolders || []).join(', ');
     checkpointMutationJournal_(file.getId(), state, {
       destinationPath: destination.path,
@@ -1699,7 +1707,7 @@ function getFileFromSourceCell_(cell) {
   }
 }
 
-function getDestinationFolder_(rootFolder, extracted) {
+function getDestinationFolder_(rootFolder, extracted, onFolderCreated) {
   const automationConfig = getAutomationConfig_();
   if (extracted.address_type === 'archive_only') {
     return {
@@ -1724,7 +1732,7 @@ function getDestinationFolder_(rootFolder, extracted) {
   assertSafePathSegment_(extracted.supply_type, 'supply');
   assertSafePathSegment_(extracted.supplier, 'supplier');
   const path = extracted.supply_type + '/' + extracted.supplier + '/' + year;
-  const ensured = ensureFolderPath_(rootFolder, path);
+  const ensured = ensureFolderPath_(rootFolder, path, onFolderCreated);
   return {
     folder: ensured.folder,
     path: path,
@@ -1768,7 +1776,7 @@ function getOrCreateFolderByPath_(rootFolder, path) {
   return ensureFolderPath_(rootFolder, path).folder;
 }
 
-function ensureFolderPath_(rootFolder, path) {
+function ensureFolderPath_(rootFolder, path, onFolderCreated) {
   let current = rootFolder;
   const createdFolders = [];
   const parts = path.split('/');
@@ -1779,10 +1787,24 @@ function ensureFolderPath_(rootFolder, path) {
       part,
       true,
       path,
-      function () { createdFolders.push(currentPath); }
+      function (createdFolder) {
+        createdFolders.push(currentPath);
+        if (onFolderCreated) {
+          onFolderCreated(currentPath, createdFolder);
+        }
+      }
     );
   });
   return { folder: current, createdFolders: createdFolders };
+}
+
+function appendCreatedFolderPath_(createdFolderPath, createdPath) {
+  const existing = String(createdFolderPath || '').split(', ')
+    .filter(Boolean);
+  if (existing.indexOf(createdPath) < 0) {
+    existing.push(createdPath);
+  }
+  return existing.join(', ');
 }
 
 function getDestinationCollision_(destination, name, sourceHash, currentFileId) {
