@@ -122,10 +122,11 @@ function createSupplierProfileTemplateFixture(initialContent, initialState) {
   };
 }
 
-function createSupplierProfileWorkspaceFixture(existingProfileRoot) {
+function createSupplierProfileWorkspaceFixture(existingProfileRoot, options = {}) {
   const stored = {};
   const createOperations = [];
   const events = [];
+  const descriptionFailures = Object.assign({}, options.descriptionFailures);
   const makeFolder = (id, name) => {
     const folders = [];
     const files = [];
@@ -141,6 +142,11 @@ function createSupplierProfileWorkspaceFixture(existingProfileRoot) {
       getName: () => name,
       getDescription: () => description,
       setDescription: (nextDescription) => {
+        if (descriptionFailures[id] > 0) {
+          descriptionFailures[id] -= 1;
+          events.push(['description-failed', id, nextDescription]);
+          throw new Error('simulated folder marker write failure');
+        }
         description = nextDescription;
         events.push(['description', id, nextDescription]);
         return folder;
@@ -388,6 +394,13 @@ function plannedSupplierProfileFolderState(token) {
   };
 }
 
+function createdSupplierProfileFolderState(token, id) {
+  const state = plannedSupplierProfileFolderState(token);
+  state.profileRootStatus = 'created';
+  state.profileRootId = id;
+  return state;
+}
+
 function testSupplierProfileWorkspaceRejectsUnmanagedFolders() {
   const unmanaged = createSupplierProfileWorkspaceFixture(true);
   assert.throws(
@@ -443,12 +456,83 @@ function testSupplierProfileWorkspaceJournalsAndMarksFreshFolders() {
   const rootMarked = fresh.events.findIndex((event) =>
     event[0] === 'description' && event[1] === 'root-folder-id/Supplier Profiles'
   );
+  const rootCheckpointed = fresh.events.findIndex((event) =>
+    event[0] === 'state' && event[1].profileRootStatus === 'created' &&
+      event[1].profileRootId === 'root-folder-id/Supplier Profiles'
+  );
   const rootManaged = fresh.events.findIndex((event) =>
     event[0] === 'state' && event[1].profileRootStatus === 'managed'
   );
   assert.ok(rootPlanned < rootCreated);
-  assert.ok(rootCreated < rootMarked);
+  assert.ok(rootCreated < rootCheckpointed);
+  assert.ok(rootCheckpointed < rootMarked);
   assert.ok(rootMarked < rootManaged);
+}
+
+function testSupplierProfileWorkspaceRecoversCheckpointedFolderAfterMarkerFailure() {
+  const folderId = 'root-folder-id/Supplier Profiles';
+  const fixture = createSupplierProfileWorkspaceFixture(false, {
+    descriptionFailures: { [folderId]: 1 }
+  });
+  const properties = fixture.context.PropertiesService.getScriptProperties();
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileWorkspace_(
+      fixture.rootFolder,
+      { folder: 'Supplier Profiles', templateFolder: '_template' },
+      properties
+    ),
+    /simulated folder marker write failure/
+  );
+  const checkpoint = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(checkpoint.profileRootStatus, 'created');
+  assert.equal(checkpoint.profileRootId, folderId);
+  assert.deepEqual(fixture.createOperations, [
+    ['root-folder-id', 'Supplier Profiles']
+  ]);
+
+  const workspace = fixture.context.ensureInstallerSupplierProfileWorkspace_(
+    fixture.rootFolder,
+    { folder: 'Supplier Profiles', templateFolder: '_template' },
+    properties
+  );
+  const recovered = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(workspace.profileRoot.getId(), folderId);
+  assert.equal(recovered.profileRootStatus, 'managed');
+  assert.equal(recovered.profileRootId, folderId);
+  assert.deepEqual(fixture.createOperations, [
+    ['root-folder-id', 'Supplier Profiles'],
+    [folderId, '_template']
+  ]);
+}
+
+function testSupplierProfileWorkspacePromotesMarkedCheckpoint() {
+  const fixture = createSupplierProfileWorkspaceFixture(false);
+  const token = '00000000-0000-4000-8000-000000000014';
+  const staged = fixture.rootFolder.createFolder('Supplier Profiles');
+  staged.setDescription(
+    fixture.context.getInstallerSupplierProfileFolderOwnershipMarker_(token)
+  );
+  fixture.createOperations.length = 0;
+  fixture.events.length = 0;
+  const state = createdSupplierProfileFolderState(token, staged.getId());
+  fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(state);
+
+  const promoted = fixture.context.ensureInstallerManagedSupplierProfileFolder_(
+    fixture.rootFolder,
+    'Supplier Profiles',
+    'profileRoot',
+    fixture.context.PropertiesService.getScriptProperties(),
+    state
+  );
+  const recovered = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(promoted, staged);
+  assert.equal(recovered.profileRootStatus, 'managed');
+  assert.equal(recovered.profileRootId, staged.getId());
+  assert.deepEqual(fixture.createOperations, []);
+  assert.deepEqual(fixture.events, [
+    ['state', recovered]
+  ]);
 }
 
 function testSupplierProfileWorkspaceAdoptsOnlyExactPlannedMarker() {
@@ -535,6 +619,73 @@ function testSupplierProfileWorkspaceRejectsUnmarkedOrStalePlans() {
     /planned supplier profile folder state is incomplete/
   );
   assert.deepEqual(legacyPlan.createOperations, []);
+}
+
+function testSupplierProfileWorkspaceRejectsMismatchedOrMutatedCheckpoint() {
+  const token = '00000000-0000-4000-8000-000000000013';
+  const mismatched = createSupplierProfileWorkspaceFixture(false);
+  mismatched.rootFolder.createFolder('Supplier Profiles');
+  mismatched.createOperations.length = 0;
+  const mismatchedState = createdSupplierProfileFolderState(
+    token,
+    'other-folder-id'
+  );
+  mismatched.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(
+    mismatchedState
+  );
+  assert.throws(
+    () => mismatched.context.ensureInstallerManagedSupplierProfileFolder_(
+      mismatched.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      mismatched.context.PropertiesService.getScriptProperties(),
+      mismatchedState
+    ),
+    /created supplier profile folder identity does not match/
+  );
+  assert.deepEqual(mismatched.createOperations, []);
+
+  const foreign = createSupplierProfileWorkspaceFixture(false);
+  const foreignFolder = foreign.rootFolder.createFolder('Supplier Profiles');
+  foreignFolder.setDescription('user-owned folder');
+  foreign.createOperations.length = 0;
+  const foreignState = createdSupplierProfileFolderState(
+    token,
+    foreignFolder.getId()
+  );
+  foreign.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(foreignState);
+  assert.throws(
+    () => foreign.context.ensureInstallerManagedSupplierProfileFolder_(
+      foreign.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      foreign.context.PropertiesService.getScriptProperties(),
+      foreignState
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.equal(foreignFolder.getDescription(), 'user-owned folder');
+
+  const mutated = createSupplierProfileWorkspaceFixture(false);
+  const mutatedFolder = mutated.rootFolder.createFolder('Supplier Profiles');
+  mutatedFolder.createFolder('user-content');
+  mutated.createOperations.length = 0;
+  const mutatedState = createdSupplierProfileFolderState(
+    token,
+    mutatedFolder.getId()
+  );
+  mutated.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(mutatedState);
+  assert.throws(
+    () => mutated.context.ensureInstallerManagedSupplierProfileFolder_(
+      mutated.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      mutated.context.PropertiesService.getScriptProperties(),
+      mutatedState
+    ),
+    /no longer pristine/
+  );
+  assert.deepEqual(mutated.createOperations, []);
 }
 
 function testSupplierProfileWorkspaceMigratesLegacyManagedWorkspace() {
@@ -1056,8 +1207,11 @@ testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
 testMissingManagedSupplierProfileTemplateIsNotReplaced();
 testSupplierProfileWorkspaceRejectsUnmanagedFolders();
 testSupplierProfileWorkspaceJournalsAndMarksFreshFolders();
+testSupplierProfileWorkspaceRecoversCheckpointedFolderAfterMarkerFailure();
+testSupplierProfileWorkspacePromotesMarkedCheckpoint();
 testSupplierProfileWorkspaceAdoptsOnlyExactPlannedMarker();
 testSupplierProfileWorkspaceRejectsUnmarkedOrStalePlans();
+testSupplierProfileWorkspaceRejectsMismatchedOrMutatedCheckpoint();
 testSupplierProfileWorkspaceMigratesLegacyManagedWorkspace();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();

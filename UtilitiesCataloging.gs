@@ -503,25 +503,14 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     return '';
   }
   const names = getSupplierProfileNames_();
-  const profileFolders = rootFolder.getFoldersByName(names.folder);
-  const matches = [];
-  while (profileFolders.hasNext()) {
-    const folder = profileFolders.next();
-    if (!folder.isTrashed()) {
-      matches.push(folder);
-    }
-  }
-  if (matches.length === 0) {
+  const profileRoot = getTrustedSupplierProfileRoot_(rootFolder, names);
+  if (!profileRoot) {
     return '';
-  }
-  if (matches.length > 1) {
-    throw new Error('More than one ' + names.folder +
-      ' folder exists in the Drive intake folder.');
   }
 
   const profiles = [];
   let totalBytes = 0;
-  const supplierFolders = matches[0].getFolders();
+  const supplierFolders = profileRoot.getFolders();
   while (supplierFolders.hasNext()) {
     const supplierFolder = supplierFolders.next();
     if (supplierFolder.isTrashed() ||
@@ -561,6 +550,95 @@ function loadApprovedSupplierProfiles_(rootFolder) {
   return profiles.join('\n\n');
 }
 
+function getTrustedSupplierProfileRoot_(rootFolder, names) {
+  const state = loadSupplierProfileWorkspaceStateForExtraction_();
+  if (!state) {
+    return null;
+  }
+  const rootFolderId = getSupplierProfileFolderIdForExtraction_(rootFolder,
+    'configured intake folder');
+  assertTrustedSupplierProfileWorkspaceState_(state, rootFolderId, names);
+
+  let profileRoot;
+  try {
+    if (!DriveApp || typeof DriveApp.getFolderById !== 'function') {
+      throw new Error('Drive folder lookup is unavailable.');
+    }
+    profileRoot = DriveApp.getFolderById(state.profileRootId);
+  } catch (error) {
+    throw new Error('The recorded supplier profile root is unavailable, moved, or renamed.');
+  }
+  if (!profileRoot ||
+    getSupplierProfileFolderIdForExtraction_(profileRoot,
+      'recorded supplier profile root') !== state.profileRootId ||
+    typeof profileRoot.getName !== 'function' ||
+    profileRoot.getName() !== names.folder) {
+    throw new Error('The recorded supplier profile root identity does not match ' +
+      'the managed workspace.');
+  }
+
+  const profileFolders = rootFolder.getFoldersByName(names.folder);
+  const matches = [];
+  while (profileFolders.hasNext()) {
+    const folder = profileFolders.next();
+    if (!folder.isTrashed()) {
+      matches.push(folder);
+    }
+  }
+  if (matches.length !== 1 ||
+    getSupplierProfileFolderIdForExtraction_(matches[0],
+      'supplier profile folder in configured intake folder') !== state.profileRootId) {
+    throw new Error('The recorded supplier profile root identity does not match ' +
+      'the configured intake folder.');
+  }
+  return profileRoot;
+}
+
+function loadSupplierProfileWorkspaceStateForExtraction_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(
+    CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_WORKSPACE_STATE
+  );
+  if (!raw) {
+    return null;
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  return state;
+}
+
+function assertTrustedSupplierProfileWorkspaceState_(state, rootFolderId, names) {
+  if (state.rootFolderId !== rootFolderId ||
+    state.profileRootParentId !== rootFolderId ||
+    state.profileRootName !== names.folder ||
+    state.profileRootStatus !== 'managed' ||
+    typeof state.profileRootId !== 'string' || !state.profileRootId ||
+    state.templateFolderParentId !== state.profileRootId ||
+    state.templateFolderName !== names.templateFolder ||
+    state.templateFolderStatus !== 'managed' ||
+    typeof state.templateFolderId !== 'string' || !state.templateFolderId) {
+    throw new Error('The supplier profile workspace state is incomplete or does ' +
+      'not match the configured intake folder.');
+  }
+}
+
+function getSupplierProfileFolderIdForExtraction_(folder, label) {
+  if (!folder || typeof folder.getId !== 'function') {
+    throw new Error('Could not validate the ' + label + ' identity.');
+  }
+  const id = folder.getId();
+  if (typeof id !== 'string' || !id) {
+    throw new Error('Could not validate the ' + label + ' identity.');
+  }
+  return id;
+}
+
 function isApprovedSupplierProfile_(text, names) {
   if (text.indexOf('\u0000') >= 0 || text.indexOf('---\n') !== 0) {
     return false;
@@ -586,15 +664,9 @@ function getSupplierProfilesFolderUrl_(rootFolder) {
   if (typeof rootFolder.getFoldersByName !== 'function') {
     return '';
   }
-  const folders = rootFolder.getFoldersByName(getSupplierProfileNames_().folder);
-  const matches = [];
-  while (folders.hasNext()) {
-    const folder = folders.next();
-    if (!folder.isTrashed()) {
-      matches.push(folder);
-    }
-  }
-  return matches.length === 1 ? matches[0].getUrl() : '';
+  const profileRoot = getTrustedSupplierProfileRoot_(rootFolder,
+    getSupplierProfileNames_());
+  return profileRoot ? profileRoot.getUrl() : '';
 }
 
 function getSupplierProfileNames_() {

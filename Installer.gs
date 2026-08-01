@@ -848,22 +848,46 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
     }
     return matches[0];
   }
-  if (state[statusKey] !== 'planned') {
+  if (state[statusKey] !== 'planned' && state[statusKey] !== 'created') {
     throw new Error('The supplier profile folder state is invalid.');
   }
   const marker = getInstallerSupplierProfileFolderOwnershipMarker_(
     state[ownershipTokenKey]
   );
-  if (matches.length === 1 && (matches[0].getDescription() !== marker ||
-    !isPristineInstallerSupplierProfileFolder_(matches[0]))) {
-    throw new Error('The planned supplier profile folder does not match the ' +
-      'installer-owned staging marker; refusing to adopt it.');
+  let folder;
+  if (state[statusKey] === 'planned') {
+    if (matches.length === 1) {
+      if (matches[0].getDescription() !== marker ||
+        !isPristineInstallerSupplierProfileFolder_(matches[0])) {
+        throw new Error('The planned supplier profile folder does not match the ' +
+          'installer-owned staging marker; refusing to adopt it.');
+      }
+      state[idKey] = matches[0].getId();
+      state[statusKey] = 'managed';
+      saveSupplierProfileWorkspaceState_(properties, state);
+      return matches[0];
+    }
+    folder = parent.createFolder(name);
+    state[idKey] = folder.getId();
+    state[statusKey] = 'created';
+    saveSupplierProfileWorkspaceState_(properties, state);
+  } else {
+    if (matches.length !== 1 || matches[0].getId() !== state[idKey]) {
+      throw new Error('The created supplier profile folder identity does not ' +
+        'match the recorded resource.');
+    }
+    folder = matches[0];
+    if (!isPristineInstallerSupplierProfileFolder_(folder)) {
+      throw new Error('The created supplier profile folder is no longer pristine; ' +
+        'refusing to resume it.');
+    }
   }
-  const folder = matches.length === 1 ? matches[0] : parent.createFolder(name);
-  if (matches.length === 0) {
+  if (folder.getDescription() === '') {
     folder.setDescription(marker);
+  } else if (folder.getDescription() !== marker) {
+    throw new Error('The created supplier profile folder does not match the ' +
+      'installer-owned staging marker; refusing to resume it.');
   }
-  state[idKey] = folder.getId();
   state[statusKey] = 'managed';
   saveSupplierProfileWorkspaceState_(properties, state);
   return folder;
@@ -949,6 +973,12 @@ function assertInstallerSupplierProfileFolderState_(state, parent, name, key) {
       state[key + 'OwnershipToken']
     ))) {
     throw new Error('The planned supplier profile folder state is incomplete.');
+  }
+  if (status === 'created' && (typeof id !== 'string' || !id ||
+    !isInstallerSupplierProfileFolderOwnershipToken_(
+      state[key + 'OwnershipToken']
+    ))) {
+    throw new Error('The created supplier profile folder state is incomplete.');
   }
 }
 

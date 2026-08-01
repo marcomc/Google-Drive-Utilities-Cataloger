@@ -112,6 +112,174 @@ function installScriptPropertyStore(context, initialValues = {}) {
   return { properties, store };
 }
 
+function driveIterator(items) {
+  let index = 0;
+  return {
+    hasNext: () => index < items.length,
+    next: () => items[index++]
+  };
+}
+
+function managedSupplierProfileWorkspaceState(rootFolderId, profileRootId) {
+  return {
+    rootFolderId,
+    profileRootParentId: rootFolderId,
+    profileRootName: 'Supplier Profiles',
+    profileRootStatus: 'managed',
+    profileRootId,
+    templateFolderParentId: profileRootId,
+    templateFolderName: '_template',
+    templateFolderStatus: 'managed',
+    templateFolderId: 'template-folder-id'
+  };
+}
+
+function testManagedSupplierProfileWorkspaceIdentityIsRequired() {
+  const profileText = '---\nstatus: approved\nsupplier: ILIAD\n---\n# Profile';
+  const profile = {
+    isTrashed: () => false,
+    getSize: () => profileText.length,
+    getBlob: () => ({ getDataAsString: () => profileText })
+  };
+  const supplierFolder = {
+    isTrashed: () => false,
+    getName: () => 'ILIAD',
+    getFilesByName: (name) => {
+      assert.equal(name, 'PROFILE.md');
+      return driveIterator([profile]);
+    }
+  };
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getUrl: () => 'https://drive.test/managed-profile-root-id',
+    getFolders: () => driveIterator([supplierFolder])
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: (name) => {
+      assert.equal(name, 'Supplier Profiles');
+      return driveIterator([profileRoot]);
+    }
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: (id) => {
+      assert.equal(id, 'managed-profile-root-id');
+      return profileRoot;
+    } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.match(context.loadApprovedSupplierProfiles_(rootFolder),
+    /BEGIN APPROVED SUPPLIER PROFILE: ILIAD/);
+  assert.equal(context.getSupplierProfilesFolderUrl_(rootFolder),
+    'https://drive.test/managed-profile-root-id');
+}
+
+function testSupplierProfilesAreOmittedWithoutWorkspaceState() {
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => { throw new Error('must not resolve'); } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context);
+  const rootFolder = {
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+  context.loadDriveAgentsPolicy_ = () => 'root policy';
+
+  assert.equal(context.loadApprovedSupplierProfiles_(rootFolder), '');
+  assert.equal(context.loadTrustedExtractionPolicy_(rootFolder), 'root policy');
+}
+
+function testSupplierProfilesSkipStateLookupForMinimalRootAdapter() {
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: () => { throw new Error('must not read state'); }
+      })
+    }
+  });
+
+  assert.equal(context.loadApprovedSupplierProfiles_({}), '');
+}
+
+function testSupplierProfileWorkspaceRejectsIncompleteState() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  const { store } = installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify({
+      rootFolderId: 'root-folder-id',
+      profileRootStatus: 'managed',
+      profileRootId: 'managed-profile-root-id'
+    })
+  });
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /supplier profile workspace state is incomplete/);
+  store.SUPPLIER_PROFILE_WORKSPACE_STATE = '{';
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /supplier profile workspace state is malformed/);
+}
+
+function testSupplierProfileWorkspaceRejectsSameNamedReplacement() {
+  const recordedProfileRoot = {
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles'
+  };
+  const replacement = {
+    isTrashed: () => false,
+    getId: () => 'user-owned-replacement-id'
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([replacement])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => recordedProfileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /profile root identity does not match the configured intake folder/);
+}
+
+function testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot() {
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => { throw new Error('not found'); } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'missing-profile-root-id')
+    )
+  });
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /recorded supplier profile root is unavailable, moved, or renamed/);
+}
+
 function testFormulaLikeTextIsWrittenLiterally() {
   const context = loadCataloger();
   [
@@ -3039,6 +3207,12 @@ function testSingleFileStopsWhenTargetJournalRemains() {
 }
 
 testFormulaLikeTextIsWrittenLiterally();
+testManagedSupplierProfileWorkspaceIdentityIsRequired();
+testSupplierProfilesAreOmittedWithoutWorkspaceState();
+testSupplierProfilesSkipStateLookupForMinimalRootAdapter();
+testSupplierProfileWorkspaceRejectsIncompleteState();
+testSupplierProfileWorkspaceRejectsSameNamedReplacement();
+testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
 testExtractionSchemaAndCalendarValidation();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testAmbiguousAddressRulesFailClosed();
