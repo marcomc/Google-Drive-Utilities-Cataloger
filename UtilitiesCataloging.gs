@@ -2858,6 +2858,11 @@ function updateMutationJournal_(fileId, changes) {
 
 function writeMutationJournal_(properties, fileId, journal) {
   const stored = Object.assign({}, journal);
+  if (stored.extracted) {
+    stored.extractedChunks = writeMutationJournalPayload_(properties,
+      fileId, stored.extracted, 'extracted');
+    delete stored.extracted;
+  }
   if (stored.sheetRowPayload) {
     stored.sheetRowPayloadChunks = writeMutationJournalPayload_(properties,
       fileId, stored.sheetRowPayload);
@@ -2867,8 +2872,15 @@ function writeMutationJournal_(properties, fileId, journal) {
     JSON.stringify(stored));
 }
 
-function writeMutationJournalPayload_(properties, fileId, payload) {
-  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+function getMutationJournalPayloadPrefix_(fileId, payloadType) {
+  const propertyPrefix = payloadType === 'extracted' ?
+    CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX :
+    CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX;
+  return propertyPrefix + fileId + '_';
+}
+
+function writeMutationJournalPayload_(properties, fileId, payload, payloadType) {
+  const prefix = getMutationJournalPayloadPrefix_(fileId, payloadType);
   Object.keys(properties.getProperties()).forEach(function (key) {
     if (key.indexOf(prefix) === 0) {
       properties.deleteProperty(key);
@@ -2887,19 +2899,27 @@ function writeMutationJournalPayload_(properties, fileId, payload) {
 }
 
 function hydrateMutationJournalPayload_(properties, fileId, journal) {
-  if (!journal.sheetRowPayloadChunks) {
-    return journal;
+  if (journal.extractedChunks) {
+    journal.extracted = readMutationJournalPayload_(properties, fileId,
+      journal.extractedChunks, 'extracted');
   }
-  const prefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
-  const raw = Array.from({ length: journal.sheetRowPayloadChunks }, function (_, index) {
+  if (journal.sheetRowPayloadChunks) {
+    journal.sheetRowPayload = readMutationJournalPayload_(properties, fileId,
+      journal.sheetRowPayloadChunks);
+  }
+  return journal;
+}
+
+function readMutationJournalPayload_(properties, fileId, count, payloadType) {
+  const prefix = getMutationJournalPayloadPrefix_(fileId, payloadType);
+  const raw = Array.from({ length: count }, function (_, index) {
     const chunk = properties.getProperty(prefix + index);
     if (chunk === null || chunk === '') {
       throw new Error('Mutation journal payload is incomplete for file ID ' + fileId + '.');
     }
     return chunk;
   }).join('');
-  journal.sheetRowPayload = JSON.parse(raw);
-  return journal;
+  return JSON.parse(raw);
 }
 
 function clearMutationJournal_(fileId) {
@@ -2910,9 +2930,14 @@ function clearMutationJournal_(fileId) {
   properties.deleteProperty(
     CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX + fileId
   );
-  const payloadPrefix = CONFIG.PROPERTY_KEYS.MUTATION_PAYLOAD_PREFIX + fileId + '_';
+  const payloadPrefixes = [
+    getMutationJournalPayloadPrefix_(fileId),
+    getMutationJournalPayloadPrefix_(fileId, 'extracted')
+  ];
   Object.keys(properties.getProperties()).forEach(function (key) {
-    if (key.indexOf(payloadPrefix) === 0) {
+    if (payloadPrefixes.some(function (prefix) {
+      return key.indexOf(prefix) === 0;
+    })) {
       properties.deleteProperty(key);
     }
   });

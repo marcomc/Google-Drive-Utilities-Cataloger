@@ -1757,7 +1757,12 @@ function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
   context.buildAssignedName_ = () => 'assigned.pdf';
   context.getDestinationFolder_ = () => {
     const journal = JSON.parse(propertyStore.store[journalKey]);
-    assert.deepEqual(JSON.parse(JSON.stringify(journal.extracted)), extraction);
+    const payloadPrefix = vm.runInContext(
+      'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+    ) + file.getId() + '_';
+    assert.equal(journal.extracted, undefined);
+    assert.equal(journal.extractedChunks, 1);
+    assert.deepEqual(JSON.parse(propertyStore.store[`${payloadPrefix}0`]), extraction);
     assert.equal(journal.extractionValidated, true);
     assert.equal(journal.failureStage, 'preparing-drive-destination');
     throw new Error('destination preparation interrupted');
@@ -1780,6 +1785,41 @@ function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
   assert.deepEqual(JSON.parse(JSON.stringify(recovered.extracted)), extraction);
   assert.equal(recovered.extractionValidated, true);
   assert.equal(recovered.failureStage, 'preparing-drive-destination');
+}
+
+function testMutationJournalChunksLargeValidatedExtractionSnapshots() {
+  const context = loadCataloger();
+  const fileId = 'large-extraction-file-id';
+  const chunkSize = vm.runInContext(
+    'CONFIG.MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS', context
+  );
+  const extraction = {
+    ...validInvoice(),
+    sheet_values: [{ value: 'x'.repeat(chunkSize * 2) }]
+  };
+  const { store } = installScriptPropertyStore(context);
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const payloadPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+  ) + fileId + '_';
+
+  context.saveMutationJournal_(fileId, { extracted: extraction });
+
+  const journal = JSON.parse(store[`${journalPrefix}${fileId}`]);
+  assert.equal(journal.extracted, undefined);
+  assert.ok(journal.extractedChunks > 1);
+  assert.deepEqual(JSON.parse(
+    Array.from({ length: journal.extractedChunks }, (_, index) =>
+      store[`${payloadPrefix}${index}`]
+    ).join('')
+  ), extraction);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.hydrateMutationJournalPayload_(
+      { getProperty: (key) => store[key] || null }, fileId, journal
+    ).extracted)), extraction
+  );
 }
 
 function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
@@ -3571,6 +3611,7 @@ testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
 testMutationJournalCapturesValidatedReportingContextBeforeMutations();
+testMutationJournalChunksLargeValidatedExtractionSnapshots();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
 testRuntimeExhaustionPersistsOperatorLinks();
