@@ -956,7 +956,8 @@ function buildExtractionResponseSchema_() {
           additionalProperties: false,
           properties: {
             header: { type: 'string' },
-            value: { type: ['string', 'number', 'boolean', 'null'] }
+            value: { type: ['string', 'number', 'boolean', 'null'] },
+            source_evidence: { type: 'string', enum: ['printed'] }
           },
           required: ['header', 'value']
         }
@@ -1138,14 +1139,14 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "cost_non_consumption": 0.00,',
     '  "vat": 0.00,',
     '  "total": 0.00,',
-    '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date"}],',
+    '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date","source_evidence":"printed only for a visibly printed zero-valued supplier default"}],',
     '  "problems": ["observed problems"]',
     '}',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds.',
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each printed line item in sheet_values using its exact header. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
-    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem; never infer or copy it from another invoice. If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, return that exact target header with numeric value 0. If a nonzero amount is printed, return the printed amount instead; never use a previous invoice to fill it.',
+    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem; never infer or copy it from another invoice. If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem, and never use a previous invoice to fill it.',
     'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
       JSON.stringify(localization.supplierFieldDefaults || []) + '.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
@@ -1234,6 +1235,18 @@ function validateRawExtractionShape_(extracted) {
   if (!Array.isArray(extracted.sheet_values)) {
     throw new Error('Gemini extraction sheet_values must be an array.');
   }
+  if (extracted.sheet_values.some(function (entry) {
+    return !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      !Object.keys(entry).every(function (key) {
+        return ['header', 'value', 'source_evidence'].indexOf(key) >= 0;
+      }) ||
+      typeof entry.header !== 'string' ||
+      !['string', 'number', 'boolean'].includes(typeof entry.value) &&
+        entry.value !== null ||
+      entry.source_evidence !== undefined && entry.source_evidence !== 'printed';
+  })) {
+    throw new Error('Gemini extraction sheet_values contains an invalid entry.');
+  }
 }
 
 function normalizeExtraction_(extracted) {
@@ -1266,7 +1279,8 @@ function normalizeExtraction_(extracted) {
   normalized.vat = normalizeMoney_(normalized.vat);
   normalized.total = normalizeMoney_(normalized.total);
   applyFrequencyOverride_(normalized);
-  normalized.problems = Array.isArray(normalized.problems) ? normalized.problems : [];
+  normalized.problems = Array.isArray(normalized.problems) ?
+    normalized.problems.slice() : [];
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
 }
@@ -1303,10 +1317,17 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
       matching[0].value === undefined ||
       (typeof matching[0].value === 'string' && !matching[0].value.trim());
     if (!valueIsMissing) {
-      if (matching[0].value === defaultValue.value && explicitAbsence) {
+      if (matching[0].value !== defaultValue.value ||
+        isPrintedSupplierDefaultValue_(matching[0])) {
+        return;
+      }
+      if (explicitAbsence) {
         extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
           extracted.problems, defaultValue
         );
+      } else {
+        extracted.problems.push('The default value for ' + defaultValue.header +
+          ' was not established by printed evidence.');
       }
       return;
     }
@@ -1327,6 +1348,10 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
       extracted.problems, defaultValue
     );
   });
+}
+
+function isPrintedSupplierDefaultValue_(entry) {
+  return entry && entry.source_evidence === 'printed';
 }
 
 function hasExplicitSupplierFieldAbsence_(problems, defaultValue) {
@@ -1461,7 +1486,7 @@ function validateExtraction_(extracted) {
         'Verify that the invoice belongs to this account before importing it.');
     }
     const blockingProblems = extracted.problems.filter(function (problem) {
-      return !isMissingOptionalSubscriberIdentifierProblem_(problem) &&
+      return !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
         !isInformationalTaxInclusionProblem_(problem, extracted);
     });
     if (blockingProblems.length > 0) {
@@ -1538,15 +1563,23 @@ function validateExtraction_(extracted) {
   return { valid: true };
 }
 
-function isMissingOptionalSubscriberIdentifierProblem_(problem) {
+function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
   if (!isStandaloneInformationalProblem_(text)) {
     return false;
   }
   const patterns = getLocalization_().subscriberIdentifierProblemPatterns;
-  const missing = new RegExp(patterns[0]).test(text);
-  const identifier = new RegExp(patterns[1]).test(text);
-  return missing && identifier;
+  if (!new RegExp(patterns.missing).test(text)) {
+    return false;
+  }
+  const contractNumberMissing = new RegExp(patterns.contractNumber).test(text);
+  const customerCodeMissing = new RegExp(patterns.customerCode).test(text);
+  if (contractNumberMissing === customerCodeMissing) {
+    return false;
+  }
+  return contractNumberMissing ?
+    !extracted.contract_number && Boolean(extracted.customer_code) :
+    !extracted.customer_code && Boolean(extracted.contract_number);
 }
 
 function isInformationalTaxInclusionProblem_(problem, extracted) {

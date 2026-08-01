@@ -447,6 +447,30 @@ function testExtractionSchemaAndCalendarValidation() {
     { header: "Spese d'incasso", value: 1.25 }
   ]));
 
+  const iliadPrintedZeroCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{
+      header: "Spese d'incasso",
+      value: 0,
+      source_evidence: 'printed'
+    }]
+  });
+  context.applySupplierFieldDefaults_(iliadPrintedZeroCharge, ["Spese d'incasso"]);
+  assert.equal(iliadPrintedZeroCharge.sheet_values[0].value, 0);
+  assert.deepEqual(iliadPrintedZeroCharge.problems, []);
+
+  const iliadUnprovenZeroCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{ header: "Spese d'incasso", value: 0 }]
+  });
+  context.applySupplierFieldDefaults_(iliadUnprovenZeroCharge, ["Spese d'incasso"]);
+  assert.equal(context.validateExtraction_(iliadUnprovenZeroCharge).valid, false);
+  assert.match(iliadUnprovenZeroCharge.problems[0], /not established by printed evidence/);
+
   const iliadEmptyCharge = context.normalizeExtraction_({
     ...raw,
     supplier: 'ILIAD',
@@ -558,6 +582,14 @@ function testExtractionSchemaAndCalendarValidation() {
     }),
     /invalid date/
   );
+  assert.throws(
+    () => context.validateRawExtractionShape_({
+      ...raw,
+      sheet_values: [{ header: 'Collection charges', value: 0,
+        source_evidence: 'inferred' }]
+    }),
+    /invalid entry/
+  );
 
   const invalidMonth = { ...raw, reference_month: '13' };
   assert.equal(context.validateExtraction_(invalidMonth).valid, false);
@@ -591,6 +623,14 @@ function testExtractionSchemaAndCalendarValidation() {
     ...onlyContractNumber,
     problems: ['Numero cliente assente']
   }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyContractNumber,
+    problems: ['Contract number absent']
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Customer code absent']
+  }).valid, false);
 
   const noOwnershipIdentifier = {
     ...raw,
@@ -932,6 +972,11 @@ function testDeveloperApiKeyUsesHeader() {
     payload.generationConfig.responseJsonSchema.properties.sheet_values
       .items.properties.value.type,
     ['string', 'number', 'boolean', 'null']
+  );
+  assert.deepEqual(
+    payload.generationConfig.responseJsonSchema.properties.sheet_values
+      .items.properties.source_evidence.enum,
+    ['printed']
   );
 }
 
@@ -1597,6 +1642,7 @@ function testPromptKeepsHeadersScopedBySupply() {
     /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
   assert.match(prompt,
     /If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why/);
+  assert.match(prompt, /source_evidence "printed"/);
   assert.doesNotMatch(prompt,
     /If a field is genuinely not printed or not applicable, leave it absent and add a concise problem/);
   assert.match(prompt, /recurring Iliad Internet charges/);

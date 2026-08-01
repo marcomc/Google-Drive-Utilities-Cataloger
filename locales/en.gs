@@ -60,10 +60,11 @@ function getEnglishLocalization_() {
       invoice: 'Invoice', fattura: 'Invoice', contract: 'Contract',
       contratto: 'Contract', report: 'Report'
     }),
-    subscriberIdentifierProblemPatterns: Object.freeze([
-      '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
-      '(?:contract(?:\\s+number)?|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|id\\s*utente|(?:codice|numero)\\s+(?:cliente|utente))'
-    ]),
+    subscriberIdentifierProblemPatterns: Object.freeze({
+      missing: '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
+      contractNumber: '(?:contract(?:\\s+(?:number|code))?|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto)',
+      customerCode: '(?:user\\s*id|id\\s*utente|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
+    }),
     supplierFieldDefaults: Object.freeze([
       Object.freeze({
         supplier: 'ILIAD',
