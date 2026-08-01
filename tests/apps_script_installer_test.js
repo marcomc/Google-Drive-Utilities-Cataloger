@@ -288,7 +288,7 @@ function testSupplierProfileTemplatePreservesManualContent() {
     () => fixture.context.ensureInstallerSupplierProfileTemplate_(
       fixture.rootFolder, 'en'
     ),
-    /not installer-managed or pristine/
+    /has no durable installer ownership state/
   );
   assert.deepEqual(fixture.writes, []);
   assert.equal(fixture.files[0].getContent(), '# Operator-maintained template');
@@ -364,7 +364,15 @@ function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
   const legacy = template.replace(
     '\nmanaged_by: Google Drive Utilities Cataloger\n', '\n'
   );
-  const fixture = createSupplierProfileTemplateFixture(legacy);
+  const fixture = createSupplierProfileTemplateFixture(legacy, {
+    status: 'managed',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: 'template-file-id',
+    content: legacy
+  });
 
   fixture.context.ensureInstallerSupplierProfileTemplate_(fixture.rootFolder, 'en');
 
@@ -372,6 +380,24 @@ function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
   const state = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
   assert.equal(state.status, 'managed');
   assert.equal(state.content, fixture.template);
+}
+
+function testSupplierProfileTemplateRejectsStaticContentWithoutOwnershipState() {
+  const fixture = createSupplierProfileTemplateFixture([
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n'));
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /has no durable installer ownership state/
+  );
+  assert.deepEqual(fixture.writes, []);
 }
 
 function testMissingManagedSupplierProfileTemplateIsNotReplaced() {
@@ -1222,6 +1248,7 @@ testBootstrapInitializesSpreadsheetUnderLifecycleLock();
 testSupplierProfileTemplatePreservesManualContent();
 testSupplierProfileTemplateCreationAndRecoveryAreJournaled();
 testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
+testSupplierProfileTemplateRejectsStaticContentWithoutOwnershipState();
 testMissingManagedSupplierProfileTemplateIsNotReplaced();
 testSupplierProfileWorkspaceRejectsUnmanagedFolders();
 testSupplierProfileWorkspaceJournalsAndMarksFreshFolders();

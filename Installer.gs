@@ -685,13 +685,8 @@ function reconcileInstallerSupplierProfileTemplate_(file, rootFolder,
   templateFolder, locale, fileName, template, properties, state) {
   const currentContent = file.getBlob().getDataAsString('UTF-8');
   if (!state) {
-    if (!isPristineInstallerSupplierProfileTemplate_(currentContent, template)) {
-      throw new Error('The existing supplier profile template is not installer-managed ' +
-        'or pristine; refusing to overwrite it.');
-    }
-    state = buildSupplierProfileTemplateState_('managed', rootFolder,
-      templateFolder, locale, fileName, file.getId(), currentContent);
-    saveSupplierProfileTemplateState_(properties, state);
+    throw new Error('The existing supplier profile template has no durable ' +
+      'installer ownership state; refusing to adopt it.');
   } else {
     assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
       templateFolder, fileName);
@@ -817,12 +812,6 @@ function assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
     throw new Error('The supplier profile template identity does not match the ' +
       'installer-managed resource.');
   }
-}
-
-function isPristineInstallerSupplierProfileTemplate_(content, template) {
-  return content === template || content === template.replace(
-    '\nmanaged_by: Google Drive Utilities Cataloger\n', '\n'
-  );
 }
 
 function createInstallerSupplierProfileTemplateOwnershipToken_() {
