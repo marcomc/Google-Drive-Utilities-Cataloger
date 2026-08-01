@@ -14,12 +14,18 @@ const installerSource = fs.readFileSync(
 );
 
 function loadInstaller(fetchImplementation) {
+  let uuidSequence = 0;
   const context = vm.createContext({
     ScriptApp: {
       getOAuthToken: () => 'vertex-oauth-token',
       getScriptId: () => 'test-script-id'
     },
     Utilities: {
+      getUuid: () => {
+        uuidSequence += 1;
+        return '00000000-0000-4000-8000-' +
+          String(uuidSequence).padStart(12, '0');
+      },
       base64Decode: (value) => Buffer.from(value, 'base64'),
       newBlob: (value) => ({
         getDataAsString: () => Buffer.from(value).toString('utf8')
@@ -34,6 +40,151 @@ function loadInstaller(fetchImplementation) {
     filename: 'Installer.gs'
   });
   return context;
+}
+
+function iteratorFor(items) {
+  let index = 0;
+  return {
+    hasNext: () => index < items.length,
+    next: () => items[index++]
+  };
+}
+
+function createSupplierProfileTemplateFixture(initialContent, initialState) {
+  const stored = initialState ? {
+    SUPPLIER_PROFILE_TEMPLATE_STATE: JSON.stringify(initialState)
+  } : {};
+  const writes = [];
+  const files = [];
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const makeFile = (content) => {
+    let fileContent = content;
+    return {
+      getId: () => 'template-file-id',
+      getName: () => 'PROFILE.example.md',
+      isTrashed: () => false,
+      getBlob: () => ({ getDataAsString: () => fileContent }),
+      setContent: (nextContent) => {
+        writes.push(nextContent);
+        fileContent = nextContent;
+      },
+      getContent: () => fileContent
+    };
+  };
+  if (initialContent !== undefined) {
+    files.push(makeFile(initialContent));
+  }
+  const templateFolder = {
+    getId: () => 'template-folder-id',
+    getFilesByName: () => iteratorFor(files),
+    createFile: (_name, content) => {
+      const file = makeFile(content);
+      files.push(file);
+      return file;
+    }
+  };
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  context.CONFIG = { PROPERTY_KEYS: {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
+    SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE'
+  } };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => { stored[key] = value; }
+    })
+  };
+  context.MimeType = { PLAIN_TEXT: 'text/plain' };
+  context.getSupplierProfileNamesForLocale_ = () => ({
+    folder: 'Supplier Profiles', templateFolder: '_template',
+    templateFile: 'PROFILE.example.md'
+  });
+  context.getLocalizedSupplierProfileTemplate_ = () => template;
+  context.ensureInstallerSupplierProfileWorkspace_ = () => ({
+    profileRoot: { getId: () => 'profile-root-id' },
+    templateFolder: templateFolder
+  });
+  return {
+    context,
+    rootFolder: { getId: () => 'root-folder-id' },
+    files,
+    stored,
+    template,
+    writes
+  };
+}
+
+function createSupplierProfileWorkspaceFixture(existingProfileRoot, options = {}) {
+  const stored = {};
+  const createOperations = [];
+  const events = [];
+  const descriptionFailures = Object.assign({}, options.descriptionFailures);
+  const makeFolder = (id, name) => {
+    const folders = [];
+    const files = [];
+    let description = '';
+    const folder = {
+      getId: () => id,
+      isTrashed: () => false,
+      getFoldersByName: (requestedName) => iteratorFor(
+        folders.filter((folder) => folder.getName() === requestedName)
+      ),
+      getFolders: () => iteratorFor(folders),
+      getFiles: () => iteratorFor(files),
+      getName: () => name,
+      getDescription: () => description,
+      setDescription: (nextDescription) => {
+        if (descriptionFailures[id] > 0) {
+          descriptionFailures[id] -= 1;
+          events.push(['description-failed', id, nextDescription]);
+          throw new Error('simulated folder marker write failure');
+        }
+        description = nextDescription;
+        events.push(['description', id, nextDescription]);
+        return folder;
+      },
+      createFolder: (childName) => {
+        const child = makeFolder(id + '/' + childName, childName);
+        folders.push(child);
+        createOperations.push([id, childName]);
+        events.push(['create', id, childName]);
+        return child;
+      }
+    };
+    return folder;
+  };
+  const rootFolder = makeFolder('root-folder-id', 'root');
+  if (existingProfileRoot) {
+    rootFolder.createFolder('Supplier Profiles');
+    createOperations.length = 0;
+  }
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  context.CONFIG = { PROPERTY_KEYS: {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
+    SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE'
+  } };
+  context.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => stored[key] || '',
+      setProperty: (key, value) => {
+        stored[key] = value;
+        if (key === 'SUPPLIER_PROFILE_WORKSPACE_STATE') {
+          events.push(['state', JSON.parse(value)]);
+        }
+      }
+    })
+  };
+  return { context, rootFolder, stored, createOperations, events };
 }
 
 function testSecretManagerBootstrapHandoff() {
@@ -104,6 +255,7 @@ function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
   });
   context.validateInstallerGeminiAccess_ = () => {};
   context.ensureInstallerPolicyFile_ = () => ({ getUrl: () => 'https://drive.test/policy' });
+  context.ensureInstallerSupplierProfileTemplate_ = () => {};
   context.ensureInstallerSpreadsheet_ = () => {
     operations.push('spreadsheet');
     return spreadsheet;
@@ -122,10 +274,492 @@ function testBootstrapInitializesSpreadsheetUnderLifecycleLock() {
   context.bootstrapCatalogerInstallation({});
 
   assert.deepEqual(operations, [
+    'installation-supplier-profile-initialization',
     'installation-spreadsheet-initialization',
     'spreadsheet',
     'installation-bootstrap'
   ]);
+}
+
+function testSupplierProfileTemplatePreservesManualContent() {
+  const fixture = createSupplierProfileTemplateFixture('# Operator-maintained template');
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /has no durable installer ownership state/
+  );
+  assert.deepEqual(fixture.writes, []);
+  assert.equal(fixture.files[0].getContent(), '# Operator-maintained template');
+}
+
+function testSupplierProfileTemplateCreationAndRecoveryAreJournaled() {
+  const fixture = createSupplierProfileTemplateFixture();
+  const created = fixture.context.ensureInstallerSupplierProfileTemplate_(
+    fixture.rootFolder, 'en'
+  );
+  const managedState = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
+  assert.equal(created.getId(), 'template-file-id');
+  assert.equal(managedState.status, 'managed');
+  assert.equal(managedState.fileId, 'template-file-id');
+  assert.equal(managedState.content, fixture.template);
+
+  created.setContent('# Operator-maintained template');
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /was modified/
+  );
+  assert.equal(created.getContent(), '# Operator-maintained template');
+
+  const token = '00000000-0000-4000-8000-000000000010';
+  const plannedState = {
+    status: 'planned',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: '',
+    targetContent: fixture.template,
+    ownershipToken: token
+  };
+  const unmarked = createSupplierProfileTemplateFixture(fixture.template,
+    plannedState);
+  assert.throws(
+    () => unmarked.context.ensureInstallerSupplierProfileTemplate_(
+      unmarked.rootFolder, 'en'
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.deepEqual(unmarked.writes, []);
+
+  const interrupted = createSupplierProfileTemplateFixture(
+    fixture.context.getInstallerSupplierProfileTemplateStagingContent_(
+      fixture.template, token
+    ),
+    plannedState
+  );
+  const adopted = interrupted.context.ensureInstallerSupplierProfileTemplate_(
+    interrupted.rootFolder, 'en'
+  );
+  const recoveredState = JSON.parse(
+    interrupted.stored.SUPPLIER_PROFILE_TEMPLATE_STATE
+  );
+  assert.equal(adopted.getId(), 'template-file-id');
+  assert.equal(recoveredState.status, 'managed');
+  assert.equal(recoveredState.fileId, 'template-file-id');
+  assert.deepEqual(interrupted.writes, [interrupted.template]);
+}
+
+function testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent() {
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const legacy = template.replace(
+    '\nmanaged_by: Google Drive Utilities Cataloger\n', '\n'
+  );
+  const fixture = createSupplierProfileTemplateFixture(legacy, {
+    status: 'managed',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: 'template-file-id',
+    content: legacy
+  });
+
+  fixture.context.ensureInstallerSupplierProfileTemplate_(fixture.rootFolder, 'en');
+
+  assert.deepEqual(fixture.writes, [fixture.template]);
+  const state = JSON.parse(fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE);
+  assert.equal(state.status, 'managed');
+  assert.equal(state.content, fixture.template);
+}
+
+function testSupplierProfileTemplateRejectsStaticContentWithoutOwnershipState() {
+  const fixture = createSupplierProfileTemplateFixture([
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n'));
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /has no durable installer ownership state/
+  );
+  assert.deepEqual(fixture.writes, []);
+}
+
+function testMissingManagedSupplierProfileTemplateIsNotReplaced() {
+  const template = [
+    '---',
+    'managed_by: Google Drive Utilities Cataloger',
+    'status: approved',
+    'supplier: SUPPLIER NAME',
+    '---'
+  ].join('\n');
+  const fixture = createSupplierProfileTemplateFixture(undefined, {
+    status: 'managed',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: 'template-folder-id',
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: 'template-file-id',
+    content: template
+  });
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileTemplate_(
+      fixture.rootFolder, 'en'
+    ),
+    /missing or was moved/
+  );
+  assert.deepEqual(fixture.writes, []);
+}
+
+function plannedSupplierProfileFolderState(token) {
+  return {
+    rootFolderId: 'root-folder-id',
+    profileRootParentId: 'root-folder-id',
+    profileRootName: 'Supplier Profiles',
+    profileRootStatus: 'planned',
+    profileRootId: '',
+    profileRootOwnershipToken: token
+  };
+}
+
+function createdSupplierProfileFolderState(token, id) {
+  const state = plannedSupplierProfileFolderState(token);
+  state.profileRootStatus = 'created';
+  state.profileRootId = id;
+  return state;
+}
+
+function testSupplierProfileWorkspaceRejectsUnmanagedFolders() {
+  const unmanaged = createSupplierProfileWorkspaceFixture(true);
+  assert.throws(
+    () => unmanaged.context.ensureInstallerSupplierProfileWorkspace_(
+      unmanaged.rootFolder,
+      { folder: 'Supplier Profiles', templateFolder: '_template' },
+      unmanaged.context.PropertiesService.getScriptProperties()
+    ),
+    /not installer-managed/
+  );
+  assert.deepEqual(unmanaged.createOperations, []);
+}
+
+function testSupplierProfileWorkspaceJournalsAndMarksFreshFolders() {
+  const fresh = createSupplierProfileWorkspaceFixture(false);
+  const workspace = fresh.context.ensureInstallerSupplierProfileWorkspace_(
+    fresh.rootFolder,
+    { folder: 'Supplier Profiles', templateFolder: '_template' },
+    fresh.context.PropertiesService.getScriptProperties()
+  );
+  const state = JSON.parse(fresh.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(workspace.profileRoot.getId(), 'root-folder-id/Supplier Profiles');
+  assert.equal(
+    workspace.templateFolder.getId(),
+    'root-folder-id/Supplier Profiles/_template'
+  );
+  assert.equal(state.profileRootStatus, 'managed');
+  assert.equal(state.templateFolderStatus, 'managed');
+  assert.match(state.profileRootOwnershipToken, /^[0-9a-f-]{36}$/i);
+  assert.match(state.templateFolderOwnershipToken, /^[0-9a-f-]{36}$/i);
+  assert.equal(
+    workspace.profileRoot.getDescription(),
+    fresh.context.getInstallerSupplierProfileFolderOwnershipMarker_(
+      state.profileRootOwnershipToken
+    )
+  );
+  assert.equal(
+    workspace.templateFolder.getDescription(),
+    fresh.context.getInstallerSupplierProfileFolderOwnershipMarker_(
+      state.templateFolderOwnershipToken
+    )
+  );
+  assert.deepEqual(fresh.createOperations, [
+    ['root-folder-id', 'Supplier Profiles'],
+    ['root-folder-id/Supplier Profiles', '_template']
+  ]);
+  const rootPlanned = fresh.events.findIndex((event) =>
+    event[0] === 'state' && event[1].profileRootStatus === 'planned'
+  );
+  const rootCreated = fresh.events.findIndex((event) =>
+    event[0] === 'create' && event[1] === 'root-folder-id'
+  );
+  const rootMarked = fresh.events.findIndex((event) =>
+    event[0] === 'description' && event[1] === 'root-folder-id/Supplier Profiles'
+  );
+  const rootCheckpointed = fresh.events.findIndex((event) =>
+    event[0] === 'state' && event[1].profileRootStatus === 'created' &&
+      event[1].profileRootId === 'root-folder-id/Supplier Profiles'
+  );
+  const rootManaged = fresh.events.findIndex((event) =>
+    event[0] === 'state' && event[1].profileRootStatus === 'managed'
+  );
+  assert.ok(rootPlanned < rootCreated);
+  assert.ok(rootCreated < rootCheckpointed);
+  assert.ok(rootCheckpointed < rootMarked);
+  assert.ok(rootMarked < rootManaged);
+}
+
+function testSupplierProfileWorkspaceRecoversCheckpointedFolderAfterMarkerFailure() {
+  const folderId = 'root-folder-id/Supplier Profiles';
+  const fixture = createSupplierProfileWorkspaceFixture(false, {
+    descriptionFailures: { [folderId]: 1 }
+  });
+  const properties = fixture.context.PropertiesService.getScriptProperties();
+
+  assert.throws(
+    () => fixture.context.ensureInstallerSupplierProfileWorkspace_(
+      fixture.rootFolder,
+      { folder: 'Supplier Profiles', templateFolder: '_template' },
+      properties
+    ),
+    /simulated folder marker write failure/
+  );
+  const checkpoint = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(checkpoint.profileRootStatus, 'created');
+  assert.equal(checkpoint.profileRootId, folderId);
+  assert.deepEqual(fixture.createOperations, [
+    ['root-folder-id', 'Supplier Profiles']
+  ]);
+
+  const workspace = fixture.context.ensureInstallerSupplierProfileWorkspace_(
+    fixture.rootFolder,
+    { folder: 'Supplier Profiles', templateFolder: '_template' },
+    properties
+  );
+  const recovered = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(workspace.profileRoot.getId(), folderId);
+  assert.equal(recovered.profileRootStatus, 'managed');
+  assert.equal(recovered.profileRootId, folderId);
+  assert.deepEqual(fixture.createOperations, [
+    ['root-folder-id', 'Supplier Profiles'],
+    [folderId, '_template']
+  ]);
+}
+
+function testSupplierProfileWorkspacePromotesMarkedCheckpoint() {
+  const fixture = createSupplierProfileWorkspaceFixture(false);
+  const token = '00000000-0000-4000-8000-000000000014';
+  const staged = fixture.rootFolder.createFolder('Supplier Profiles');
+  staged.setDescription(
+    fixture.context.getInstallerSupplierProfileFolderOwnershipMarker_(token)
+  );
+  fixture.createOperations.length = 0;
+  fixture.events.length = 0;
+  const state = createdSupplierProfileFolderState(token, staged.getId());
+  fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(state);
+
+  const promoted = fixture.context.ensureInstallerManagedSupplierProfileFolder_(
+    fixture.rootFolder,
+    'Supplier Profiles',
+    'profileRoot',
+    fixture.context.PropertiesService.getScriptProperties(),
+    state
+  );
+  const recovered = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(promoted, staged);
+  assert.equal(recovered.profileRootStatus, 'managed');
+  assert.equal(recovered.profileRootId, staged.getId());
+  assert.deepEqual(fixture.createOperations, []);
+  assert.deepEqual(fixture.events, [
+    ['state', recovered]
+  ]);
+}
+
+function testSupplierProfileWorkspaceAdoptsOnlyExactPlannedMarker() {
+  const fixture = createSupplierProfileWorkspaceFixture(false);
+  const token = '00000000-0000-4000-8000-000000000010';
+  const state = plannedSupplierProfileFolderState(token);
+  const staged = fixture.rootFolder.createFolder('Supplier Profiles');
+  staged.setDescription(
+    fixture.context.getInstallerSupplierProfileFolderOwnershipMarker_(token)
+  );
+  fixture.createOperations.length = 0;
+  fixture.events.length = 0;
+  fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(state);
+
+  const adopted = fixture.context.ensureInstallerManagedSupplierProfileFolder_(
+    fixture.rootFolder,
+    'Supplier Profiles',
+    'profileRoot',
+    fixture.context.PropertiesService.getScriptProperties(),
+    state
+  );
+  const recovered = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(adopted, staged);
+  assert.equal(recovered.profileRootStatus, 'managed');
+  assert.equal(recovered.profileRootId, staged.getId());
+  assert.equal(recovered.profileRootOwnershipToken, token);
+  assert.deepEqual(fixture.createOperations, []);
+}
+
+function testSupplierProfileWorkspaceRejectsUnmarkedOrStalePlans() {
+  const token = '00000000-0000-4000-8000-000000000011';
+  const unmarked = createSupplierProfileWorkspaceFixture(false);
+  const ordinaryFolder = unmarked.rootFolder.createFolder('Supplier Profiles');
+  unmarked.createOperations.length = 0;
+  const unmarkedState = plannedSupplierProfileFolderState(token);
+  unmarked.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(unmarkedState);
+  assert.throws(
+    () => unmarked.context.ensureInstallerManagedSupplierProfileFolder_(
+      unmarked.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      unmarked.context.PropertiesService.getScriptProperties(),
+      unmarkedState
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.equal(ordinaryFolder.getDescription(), '');
+  assert.deepEqual(unmarked.createOperations, []);
+
+  const stale = createSupplierProfileWorkspaceFixture(false);
+  const staleFolder = stale.rootFolder.createFolder('Supplier Profiles');
+  staleFolder.setDescription(
+    stale.context.getInstallerSupplierProfileFolderOwnershipMarker_(
+      '00000000-0000-4000-8000-000000000012'
+    )
+  );
+  stale.createOperations.length = 0;
+  const staleState = plannedSupplierProfileFolderState(token);
+  stale.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(staleState);
+  assert.throws(
+    () => stale.context.ensureInstallerManagedSupplierProfileFolder_(
+      stale.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      stale.context.PropertiesService.getScriptProperties(),
+      staleState
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.deepEqual(stale.createOperations, []);
+
+  const legacyPlan = createSupplierProfileWorkspaceFixture(false);
+  const legacyState = plannedSupplierProfileFolderState(token);
+  delete legacyState.profileRootOwnershipToken;
+  legacyPlan.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(legacyState);
+  assert.throws(
+    () => legacyPlan.context.ensureInstallerManagedSupplierProfileFolder_(
+      legacyPlan.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      legacyPlan.context.PropertiesService.getScriptProperties(),
+      legacyState
+    ),
+    /planned supplier profile folder state is incomplete/
+  );
+  assert.deepEqual(legacyPlan.createOperations, []);
+}
+
+function testSupplierProfileWorkspaceRejectsMismatchedOrMutatedCheckpoint() {
+  const token = '00000000-0000-4000-8000-000000000013';
+  const mismatched = createSupplierProfileWorkspaceFixture(false);
+  mismatched.rootFolder.createFolder('Supplier Profiles');
+  mismatched.createOperations.length = 0;
+  const mismatchedState = createdSupplierProfileFolderState(
+    token,
+    'other-folder-id'
+  );
+  mismatched.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(
+    mismatchedState
+  );
+  assert.throws(
+    () => mismatched.context.ensureInstallerManagedSupplierProfileFolder_(
+      mismatched.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      mismatched.context.PropertiesService.getScriptProperties(),
+      mismatchedState
+    ),
+    /created supplier profile folder identity does not match/
+  );
+  assert.deepEqual(mismatched.createOperations, []);
+
+  const foreign = createSupplierProfileWorkspaceFixture(false);
+  const foreignFolder = foreign.rootFolder.createFolder('Supplier Profiles');
+  foreignFolder.setDescription('user-owned folder');
+  foreign.createOperations.length = 0;
+  const foreignState = createdSupplierProfileFolderState(
+    token,
+    foreignFolder.getId()
+  );
+  foreign.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(foreignState);
+  assert.throws(
+    () => foreign.context.ensureInstallerManagedSupplierProfileFolder_(
+      foreign.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      foreign.context.PropertiesService.getScriptProperties(),
+      foreignState
+    ),
+    /does not match the installer-owned staging marker/
+  );
+  assert.equal(foreignFolder.getDescription(), 'user-owned folder');
+
+  const mutated = createSupplierProfileWorkspaceFixture(false);
+  const mutatedFolder = mutated.rootFolder.createFolder('Supplier Profiles');
+  mutatedFolder.createFolder('user-content');
+  mutated.createOperations.length = 0;
+  const mutatedState = createdSupplierProfileFolderState(
+    token,
+    mutatedFolder.getId()
+  );
+  mutated.stored.SUPPLIER_PROFILE_WORKSPACE_STATE = JSON.stringify(mutatedState);
+  assert.throws(
+    () => mutated.context.ensureInstallerManagedSupplierProfileFolder_(
+      mutated.rootFolder,
+      'Supplier Profiles',
+      'profileRoot',
+      mutated.context.PropertiesService.getScriptProperties(),
+      mutatedState
+    ),
+    /no longer pristine/
+  );
+  assert.deepEqual(mutated.createOperations, []);
+}
+
+function testSupplierProfileWorkspaceMigratesLegacyManagedWorkspace() {
+  const fixture = createSupplierProfileWorkspaceFixture(false);
+  const profileRoot = fixture.rootFolder.createFolder('Supplier Profiles');
+  const templateFolder = profileRoot.createFolder('_template');
+  fixture.createOperations.length = 0;
+  fixture.stored.SUPPLIER_PROFILE_TEMPLATE_STATE = JSON.stringify({
+    status: 'managed',
+    rootFolderId: 'root-folder-id',
+    templateFolderId: templateFolder.getId(),
+    locale: 'en',
+    fileName: 'PROFILE.example.md',
+    fileId: 'template-file-id',
+    content: 'template'
+  });
+
+  const workspace = fixture.context.ensureInstallerSupplierProfileWorkspace_(
+    fixture.rootFolder,
+    { folder: 'Supplier Profiles', templateFolder: '_template' },
+    fixture.context.PropertiesService.getScriptProperties()
+  );
+  const state = JSON.parse(fixture.stored.SUPPLIER_PROFILE_WORKSPACE_STATE);
+  assert.equal(workspace.profileRoot, profileRoot);
+  assert.equal(workspace.templateFolder, templateFolder);
+  assert.equal(state.profileRootStatus, 'managed');
+  assert.equal(state.templateFolderStatus, 'managed');
+  assert.equal(state.profileRootOwnershipToken, undefined);
+  assert.equal(state.templateFolderOwnershipToken, undefined);
+  assert.deepEqual(fixture.createOperations, []);
 }
 
 function testSecretManagerScopeIsRestricted() {
@@ -611,6 +1245,19 @@ function testTimeZoneTransactionLifecycle() {
 
 testSecretManagerBootstrapHandoff();
 testBootstrapInitializesSpreadsheetUnderLifecycleLock();
+testSupplierProfileTemplatePreservesManualContent();
+testSupplierProfileTemplateCreationAndRecoveryAreJournaled();
+testSupplierProfileTemplateAdoptsOnlyPristineLegacyContent();
+testSupplierProfileTemplateRejectsStaticContentWithoutOwnershipState();
+testMissingManagedSupplierProfileTemplateIsNotReplaced();
+testSupplierProfileWorkspaceRejectsUnmanagedFolders();
+testSupplierProfileWorkspaceJournalsAndMarksFreshFolders();
+testSupplierProfileWorkspaceRecoversCheckpointedFolderAfterMarkerFailure();
+testSupplierProfileWorkspacePromotesMarkedCheckpoint();
+testSupplierProfileWorkspaceAdoptsOnlyExactPlannedMarker();
+testSupplierProfileWorkspaceRejectsUnmarkedOrStalePlans();
+testSupplierProfileWorkspaceRejectsMismatchedOrMutatedCheckpoint();
+testSupplierProfileWorkspaceMigratesLegacyManagedWorkspace();
 testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();

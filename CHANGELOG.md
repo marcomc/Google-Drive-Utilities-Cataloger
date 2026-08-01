@@ -5,6 +5,73 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-07-31 - Actionable failed-import reports
+
+### Fixed
+
+- Preserve a successfully extracted invoice snapshot when a later Drive or
+  spreadsheet operation fails, and label it as available but not imported in
+  the configured-recipient email report.
+- Include the failed processing phase, extraction-reconciliation outcome,
+  rollback state, and formula-total expected/observed values in error reports
+  without adding invoice data to Cloud logs.
+- Report every verification mismatch with its field and expected/observed
+  values; failures without a comparison retain their stage, reason, and action.
+- Treat `ID UTENTE` as a customer-code label for invoice ownership.
+  A missing contract number or user ID alone no longer blocks an otherwise
+  valid import; both identifiers must be unavailable to require identity review.
+- Treat an otherwise reconciled note that line items include VAT as
+  informational rather than a blocking extraction problem.
+- Let detailed non-formula `sheet_values` cost entries override broad
+  reconciliation fields, preserving spreadsheet formulas that aggregate the
+  detailed invoice charges.
+- Require Gemini to inspect every visible non-formula invoice field, including
+  recurring-service unit, quantity, and unit cost, instead of returning only
+  the broad reconciliation totals.
+- Preserve identifiers and the two-character reference month as literal text
+  in Sheets, even when their values contain digits only or the template cell
+  previously had a numeric format.
+- Ignore a reported missing secondary identifier when the other ownership
+  identifier is present, while continuing to block invoices with neither a
+  customer code nor a contract number.
+- Apply the reviewed ILIAD Internet default of numeric `0.00` for absent
+  `Spese d'incasso`/`Collection charges`, while preserving any printed amount.
+- Preserve formula-backed identifier and month columns during invoice imports.
+- Record the installer-owned supplier-profile template identity before creation
+  and refuse to overwrite an existing template unless it is a known pristine
+  installer template.
+- Retain formula-safe literal text writes when applying text formatting to
+  identifiers and supplier values.
+- Require explicit evidence that an ILIAD collection charge is absent before
+  applying the reviewed zero default; unreadable amounts remain blocking.
+- Keep mixed extraction concerns blocking and reject duplicate normalized
+  `sheet_values` before spreadsheet writes.
+- Trust a supplier profile only when its exact front-matter metadata declares
+  the approved status and supplier, never because the body contains matching
+  text.
+- Keep comma- or conjunction-separated mixed extraction problems blocking,
+  rather than suppressing them as one informational note.
+- Label non-monetary verification discrepancies as numbers without an `EUR`
+  suffix or money tolerance.
+- Journal the supplier-profile workspace folders before creation and refuse to
+  adopt same-named operator folders without exact managed ownership state.
+- Keep the reconciled invoice total authoritative when a supplementary
+  `sheet_values` entry conflicts with it.
+- Preserve `false` boolean values in failed-import discrepancy reports.
+- Keep an explicit uncertainty about whether VAT is included blocking even if
+  the extracted numeric totals happen to reconcile.
+- Fail closed when an installer-managed supplier-profile template was renamed
+  or moved, preserving the recorded resource identity rather than replacing it.
+- Recognize the Italian `Codice contratto` label as an optional ownership
+  identifier when a customer code is present, while preserving VAT ambiguities
+  in both grammatical genders as blocking conditions.
+- Include every detected spreadsheet, formula, total, and source-link mismatch
+  in a failed-import report instead of stopping at the first discrepancy.
+- Persist a successful outcome before generating optional report links, and
+  recognize Italian contract-code labels under either installation locale.
+- Reject incomplete supplier-profile workspace state and include nonfatal
+  operator links before serializing the durable notification body.
+
 ## [0.3.0] - 2026-07-29 - Electricity dashboard and localized imports
 
 ### Added

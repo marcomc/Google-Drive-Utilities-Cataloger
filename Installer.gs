@@ -22,6 +22,12 @@ function bootstrapCatalogerInstallation(options) {
     properties.getProperty(CONFIG.PROPERTY_KEYS.SPREADSHEET_ID) : '';
   const rootFolder = DriveApp.getFolderById(validated.rootFolderId);
   const policyFile = ensureInstallerPolicyFile_(rootFolder, validated.agentsPolicy);
+  withCatalogLifecycleLock_('installation-supplier-profile-initialization',
+    function () {
+      return ensureInstallerSupplierProfileTemplate_(
+        rootFolder, validated.automationConfig.locale || 'en'
+      );
+    });
   const spreadsheet = withCatalogLifecycleLock_(
     'installation-spreadsheet-initialization', function () {
       return ensureInstallerSpreadsheet_(
@@ -331,7 +337,7 @@ function validateInstallerTimeZoneTransaction_(options) {
 function validateCatalogerInstallation() {
   assertCatalogConfiguration_();
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-  loadDriveAgentsPolicy_(rootFolder);
+  loadTrustedExtractionPolicy_(rootFolder);
   validateInstallerConfiguredSheets_();
   getSheetHeadersBySupply_();
 
@@ -627,6 +633,430 @@ function ensureInstallerPolicyFile_(rootFolder, policyText) {
     policyText,
     MimeType.PLAIN_TEXT
   );
+}
+
+function ensureInstallerSupplierProfileTemplate_(rootFolder, locale) {
+  const names = getSupplierProfileNamesForLocale_(locale);
+  const properties = PropertiesService.getScriptProperties();
+  const workspace = ensureInstallerSupplierProfileWorkspace_(rootFolder, names,
+    properties);
+  const profileRoot = workspace.profileRoot;
+  const templateFolder = workspace.templateFolder;
+  const template = getLocalizedSupplierProfileTemplate_(locale);
+  let state = getSupplierProfileTemplateState_(properties);
+  const files = templateFolder.getFilesByName(names.templateFile);
+  const matches = [];
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!file.isTrashed()) {
+      matches.push(file);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error('More than one supplier profile template exists.');
+  }
+  if (matches.length === 0 && state && state.fileId) {
+    throw new Error('The installer-managed supplier profile template is missing ' +
+      'or was moved; refusing to create a replacement.');
+  }
+  if (matches.length === 1) {
+    return reconcileInstallerSupplierProfileTemplate_(matches[0], rootFolder,
+      templateFolder, locale, names.templateFile, template, properties, state);
+  }
+  state = buildSupplierProfileTemplateState_('planned', rootFolder,
+    templateFolder, locale, names.templateFile, '', '');
+  state.targetContent = template;
+  state.ownershipToken = createInstallerSupplierProfileTemplateOwnershipToken_();
+  delete state.content;
+  saveSupplierProfileTemplateState_(properties, state);
+  const created = templateFolder.createFile(
+    names.templateFile,
+    getInstallerSupplierProfileTemplateStagingContent_(template, state.ownershipToken),
+    MimeType.PLAIN_TEXT
+  );
+  state.fileId = created.getId();
+  state.status = 'created';
+  saveSupplierProfileTemplateState_(properties, state);
+  return reconcileInstallerSupplierProfileTemplate_(created, rootFolder,
+    templateFolder, locale, names.templateFile, template, properties, state);
+}
+
+function reconcileInstallerSupplierProfileTemplate_(file, rootFolder,
+  templateFolder, locale, fileName, template, properties, state) {
+  const currentContent = file.getBlob().getDataAsString('UTF-8');
+  if (!state) {
+    throw new Error('The existing supplier profile template has no durable ' +
+      'installer ownership state; refusing to adopt it.');
+  } else {
+    assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
+      templateFolder, fileName);
+    if (state.status === 'planned') {
+      const stagingContent = getInstallerSupplierProfileTemplateStagingContent_(
+        state.targetContent, state.ownershipToken
+      );
+      if (currentContent !== stagingContent) {
+        throw new Error('The planned supplier profile template does not match the ' +
+          'installer-owned staging marker; refusing to adopt it.');
+      }
+      state.fileId = file.getId();
+      state.status = 'created';
+      saveSupplierProfileTemplateState_(properties, state);
+    }
+    if (state.status === 'created') {
+      if (currentContent !== getInstallerSupplierProfileTemplateStagingContent_(
+        state.targetContent, state.ownershipToken
+      )) {
+        throw new Error('The created supplier profile template does not match the ' +
+          'installer-owned staging marker; refusing to resume it.');
+      }
+      state.status = 'updating';
+      state.content = currentContent;
+      saveSupplierProfileTemplateState_(properties, state);
+    } else if (state.status === 'updating') {
+      if (currentContent === state.targetContent) {
+        state.status = 'managed';
+        state.content = state.targetContent;
+        delete state.targetContent;
+        delete state.ownershipToken;
+        saveSupplierProfileTemplateState_(properties, state);
+        return file;
+      }
+      if (currentContent !== state.content) {
+        throw new Error('The managed supplier profile template was modified; ' +
+          'refusing to overwrite it.');
+      }
+    } else if (state.status !== 'managed' || currentContent !== state.content) {
+      throw new Error('The managed supplier profile template was modified; ' +
+        'refusing to overwrite it.');
+    }
+  }
+
+  if (currentContent === template) {
+    return file;
+  }
+  state.status = 'updating';
+  state.targetContent = template;
+  saveSupplierProfileTemplateState_(properties, state);
+  file.setContent(template);
+  state.status = 'managed';
+  state.content = template;
+  delete state.targetContent;
+  delete state.ownershipToken;
+  saveSupplierProfileTemplateState_(properties, state);
+  return file;
+}
+
+function getSupplierProfileTemplateState_(properties) {
+  const raw = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_TEMPLATE_STATE
+  );
+  if (!raw) {
+    return null;
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The supplier profile template state is malformed.');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The supplier profile template state is malformed.');
+  }
+  if (['planned', 'created', 'managed', 'updating'].indexOf(state.status) < 0 ||
+    ['rootFolderId', 'templateFolderId', 'locale', 'fileName'].some(
+      function (key) { return typeof state[key] !== 'string' || !state[key]; }
+    ) || (state.status === 'planned' &&
+      (state.fileId !== '' || typeof state.targetContent !== 'string' ||
+        !state.targetContent ||
+        !isInstallerSupplierProfileTemplateOwnershipToken_(state.ownershipToken))) ||
+    (state.status === 'created' &&
+      (typeof state.fileId !== 'string' || !state.fileId ||
+        typeof state.targetContent !== 'string' || !state.targetContent ||
+        !isInstallerSupplierProfileTemplateOwnershipToken_(state.ownershipToken))) ||
+    (state.status === 'managed' &&
+      (typeof state.fileId !== 'string' || !state.fileId ||
+        typeof state.content !== 'string' || !state.content)) ||
+    (state.status === 'updating' &&
+      (typeof state.fileId !== 'string' || !state.fileId ||
+        typeof state.content !== 'string' || !state.content ||
+        typeof state.targetContent !== 'string' || !state.targetContent))) {
+    throw new Error('The supplier profile template state is incomplete.');
+  }
+  return state;
+}
+
+function saveSupplierProfileTemplateState_(properties, state) {
+  properties.setProperty(CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_TEMPLATE_STATE,
+    JSON.stringify(state));
+}
+
+function buildSupplierProfileTemplateState_(status, rootFolder, templateFolder,
+  locale, fileName, fileId, content) {
+  return {
+    status: status,
+    rootFolderId: rootFolder.getId(),
+    templateFolderId: templateFolder.getId(),
+    locale: locale,
+    fileName: fileName,
+    fileId: fileId,
+    content: content
+  };
+}
+
+function assertSupplierProfileTemplateStateMatches_(state, file, rootFolder,
+  templateFolder, fileName) {
+  if (state.rootFolderId !== rootFolder.getId() ||
+    state.templateFolderId !== templateFolder.getId() ||
+    state.fileName !== fileName ||
+    (state.fileId && state.fileId !== file.getId())) {
+    throw new Error('The supplier profile template identity does not match the ' +
+      'installer-managed resource.');
+  }
+}
+
+function createInstallerSupplierProfileTemplateOwnershipToken_() {
+  const token = Utilities.getUuid();
+  if (!isInstallerSupplierProfileTemplateOwnershipToken_(token)) {
+    throw new Error('Could not generate a valid supplier profile template ownership token.');
+  }
+  return token;
+}
+
+function getInstallerSupplierProfileTemplateStagingContent_(template, token) {
+  if (!isInstallerSupplierProfileTemplateOwnershipToken_(token)) {
+    throw new Error('The planned supplier profile template state is incomplete.');
+  }
+  return template + '\n<!-- Google Drive Utilities Cataloger supplier profile template ownership: ' +
+    token + ' -->';
+}
+
+function isInstallerSupplierProfileTemplateOwnershipToken_(token) {
+  return typeof token === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token);
+}
+
+function ensureInstallerSupplierProfileWorkspace_(rootFolder, names, properties) {
+  let state = getSupplierProfileWorkspaceState_(properties);
+  if (!state) {
+    state = migrateLegacySupplierProfileWorkspaceState_(rootFolder, names,
+      properties);
+  }
+  const profileRoot = ensureInstallerManagedSupplierProfileFolder_(rootFolder,
+    names.folder, 'profileRoot', properties, state);
+  state = getSupplierProfileWorkspaceState_(properties);
+  const templateFolder = ensureInstallerManagedSupplierProfileFolder_(
+    profileRoot, names.templateFolder, 'templateFolder', properties, state
+  );
+  return { profileRoot: profileRoot, templateFolder: templateFolder };
+}
+
+function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
+  properties, state) {
+  const matches = getSingleNamedInstallerFolder_(parent, name);
+  const idKey = key + 'Id';
+  const nameKey = key + 'Name';
+  const parentKey = key + 'ParentId';
+  const statusKey = key + 'Status';
+  const ownershipTokenKey = key + 'OwnershipToken';
+  const isNewTemplateFolder = state && key === 'templateFolder' &&
+    state.profileRootStatus === 'managed' &&
+    state.templateFolderStatus === undefined;
+  if (!state || isNewTemplateFolder) {
+    if (matches.length > 0) {
+      throw new Error('The existing supplier profile folder is not installer-managed; ' +
+        'refusing to adopt it.');
+    }
+    state = state || { rootFolderId: parent.getId() };
+    state[parentKey] = parent.getId();
+    state[nameKey] = name;
+    state[statusKey] = 'planned';
+    state[idKey] = '';
+    state[ownershipTokenKey] = createInstallerSupplierProfileFolderOwnershipToken_();
+    saveSupplierProfileWorkspaceState_(properties, state);
+  } else if (state[statusKey] !== undefined) {
+    assertInstallerSupplierProfileFolderState_(state, parent, name, key);
+  } else {
+    throw new Error('The supplier profile workspace state is incomplete.');
+  }
+  if (state[statusKey] === 'managed') {
+    if (matches.length !== 1 || matches[0].getId() !== state[idKey]) {
+      throw new Error('The installer-managed supplier profile folder identity ' +
+        'does not match the recorded resource.');
+    }
+    return matches[0];
+  }
+  if (state[statusKey] !== 'planned' && state[statusKey] !== 'created') {
+    throw new Error('The supplier profile folder state is invalid.');
+  }
+  const marker = getInstallerSupplierProfileFolderOwnershipMarker_(
+    state[ownershipTokenKey]
+  );
+  let folder;
+  if (state[statusKey] === 'planned') {
+    if (matches.length === 1) {
+      if (matches[0].getDescription() !== marker ||
+        !isPristineInstallerSupplierProfileFolder_(matches[0])) {
+        throw new Error('The planned supplier profile folder does not match the ' +
+          'installer-owned staging marker; refusing to adopt it.');
+      }
+      state[idKey] = matches[0].getId();
+      state[statusKey] = 'managed';
+      saveSupplierProfileWorkspaceState_(properties, state);
+      return matches[0];
+    }
+    folder = parent.createFolder(name);
+    state[idKey] = folder.getId();
+    state[statusKey] = 'created';
+    saveSupplierProfileWorkspaceState_(properties, state);
+  } else {
+    if (matches.length !== 1 || matches[0].getId() !== state[idKey]) {
+      throw new Error('The created supplier profile folder identity does not ' +
+        'match the recorded resource.');
+    }
+    folder = matches[0];
+    if (!isPristineInstallerSupplierProfileFolder_(folder)) {
+      throw new Error('The created supplier profile folder is no longer pristine; ' +
+        'refusing to resume it.');
+    }
+  }
+  if (folder.getDescription() === '') {
+    folder.setDescription(marker);
+  } else if (folder.getDescription() !== marker) {
+    throw new Error('The created supplier profile folder does not match the ' +
+      'installer-owned staging marker; refusing to resume it.');
+  }
+  state[statusKey] = 'managed';
+  saveSupplierProfileWorkspaceState_(properties, state);
+  return folder;
+}
+
+function getSingleNamedInstallerFolder_(parent, name) {
+  const folders = parent.getFoldersByName(name);
+  const matches = [];
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    if (!folder.isTrashed()) {
+      matches.push(folder);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error('More than one folder exists: ' + name + '.');
+  }
+  return matches;
+}
+
+function isPristineInstallerSupplierProfileFolder_(folder) {
+  return !folder.getFiles().hasNext() && !folder.getFolders().hasNext();
+}
+
+function createInstallerSupplierProfileFolderOwnershipToken_() {
+  const token = Utilities.getUuid();
+  if (!isInstallerSupplierProfileFolderOwnershipToken_(token)) {
+    throw new Error('Could not generate a valid supplier profile folder ownership token.');
+  }
+  return token;
+}
+
+function getInstallerSupplierProfileFolderOwnershipMarker_(token) {
+  if (!isInstallerSupplierProfileFolderOwnershipToken_(token)) {
+    throw new Error('The planned supplier profile folder state is incomplete.');
+  }
+  return 'Google Drive Utilities Cataloger supplier profile ownership: ' + token;
+}
+
+function isInstallerSupplierProfileFolderOwnershipToken_(token) {
+  return typeof token === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token);
+}
+
+function getSupplierProfileWorkspaceState_(properties) {
+  const raw = properties.getProperty(
+    CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_WORKSPACE_STATE
+  );
+  if (!raw) {
+    return null;
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('The supplier profile workspace state is malformed.');
+  }
+  return state;
+}
+
+function saveSupplierProfileWorkspaceState_(properties, state) {
+  properties.setProperty(CONFIG.PROPERTY_KEYS.SUPPLIER_PROFILE_WORKSPACE_STATE,
+    JSON.stringify(state));
+}
+
+function assertInstallerSupplierProfileFolderState_(state, parent, name, key) {
+  const status = state[key + 'Status'];
+  const id = state[key + 'Id'];
+  if ((key === 'profileRoot' && state.rootFolderId !== parent.getId()) ||
+    state[key + 'ParentId'] !== parent.getId() ||
+    state[key + 'Name'] !== name) {
+    throw new Error('The supplier profile folder state does not match the ' +
+      'configured parent and name.');
+  }
+  if (status === 'managed' && (typeof id !== 'string' || !id)) {
+    throw new Error('The managed supplier profile folder state is incomplete.');
+  }
+  if (status === 'planned' && (id !== '' ||
+    !isInstallerSupplierProfileFolderOwnershipToken_(
+      state[key + 'OwnershipToken']
+    ))) {
+    throw new Error('The planned supplier profile folder state is incomplete.');
+  }
+  if (status === 'created' && (typeof id !== 'string' || !id ||
+    !isInstallerSupplierProfileFolderOwnershipToken_(
+      state[key + 'OwnershipToken']
+    ))) {
+    throw new Error('The created supplier profile folder state is incomplete.');
+  }
+}
+
+function migrateLegacySupplierProfileWorkspaceState_(rootFolder, names,
+  properties) {
+  const templateState = getSupplierProfileTemplateState_(properties);
+  if (!templateState || templateState.status !== 'managed' ||
+    templateState.rootFolderId !== rootFolder.getId()) {
+    return null;
+  }
+  const profileRoots = getSingleNamedInstallerFolder_(rootFolder, names.folder);
+  if (profileRoots.length !== 1) {
+    return null;
+  }
+  const templateFolders = getSingleNamedInstallerFolder_(profileRoots[0],
+    names.templateFolder);
+  if (templateFolders.length !== 1 ||
+    templateFolders[0].getId() !== templateState.templateFolderId) {
+    return null;
+  }
+  const state = {
+    rootFolderId: rootFolder.getId(),
+    profileRootParentId: rootFolder.getId(),
+    profileRootName: names.folder,
+    profileRootStatus: 'managed',
+    profileRootId: profileRoots[0].getId(),
+    templateFolderParentId: profileRoots[0].getId(),
+    templateFolderName: names.templateFolder,
+    templateFolderStatus: 'managed',
+    templateFolderId: templateFolders[0].getId()
+  };
+  saveSupplierProfileWorkspaceState_(properties, state);
+  return state;
+}
+
+function getLocalizedSupplierProfileTemplate_(locale) {
+  const localization = getLocalizationRegistry_()[locale];
+  if (!localization || !localization.supplierProfileTemplate) {
+    throw new Error('Unsupported supplier-profile locale: ' + locale);
+  }
+  return localization.supplierProfileTemplate.join('\n');
 }
 
 function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,

@@ -56,6 +56,48 @@ function getEnglishLocalization_() {
       })
     }),
     documentLabels: Object.freeze({ Invoice: 'Invoice', Contract: 'Contract', Report: 'Report' }),
+    documentTypeAliases: Object.freeze({
+      invoice: 'Invoice', fattura: 'Invoice', contract: 'Contract',
+      contratto: 'Contract', report: 'Report'
+    }),
+    subscriberIdentifierProblemPatterns: Object.freeze({
+      missing: '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
+      contractNumber: '(?:contract(?:\\s+(?:number|code))?|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto)',
+      customerCode: '(?:user\\s*id|id\\s*utente|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
+    }),
+    supplierFieldDefaults: Object.freeze([
+      Object.freeze({
+        supplier: 'ILIAD',
+        supply_type: 'Internet',
+        header: 'Collection charges',
+        value: 0,
+        fieldPattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present)|absent)\\b'
+      })
+    ]),
+    supplierProfiles: Object.freeze({
+      folder: 'Supplier Profiles', pendingFolder: 'Pending approval',
+      templateFolder: '_template', profileFile: 'PROFILE.md',
+      templateFile: 'PROFILE.example.md', statusKey: 'status', approvedStatus: 'approved',
+      supplierKey: 'supplier'
+    }),
+    supplierProfileTemplate: Object.freeze([
+      '---', 'managed_by: Google Drive Utilities Cataloger', 'status: approved', 'supplier: SUPPLIER NAME',
+      'supplies: [supply]', 'verified_on: YYYY-MM-DD', '---', '',
+      '# Supplier profile: SUPPLIER NAME', '', '## Sources', '',
+      '- Official website: <https://example.invalid/>',
+      '- Bill-reading guides: version/date, source tier, URL, verification date.', '',
+      '## Document structure', '',
+      '- Invoice: stable visual sections, required evidence, and known variants.',
+      '- Report: stable visual sections, required evidence, and known variants.',
+      '- Version history: describe changes and their effective date/range.', '',
+      '## Navigation', '',
+      '- Classify from printed evidence and structure together; do not use filename alone.',
+      '- After classification, inspect the documented sections in order and reconcile totals.',
+      '- A structural mismatch is evidence for review or a pending proposal, never to invent data.', '',
+      '## Maintenance', '',
+      '- Put a revised profile in `Pending approval` for review; never overwrite this approved profile automatically.', ''
+    ]),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVED WITHOUT IMPORT',
@@ -78,13 +120,38 @@ function getEnglishLocalization_() {
       vat: 'VAT',
       total: 'Total',
       reconciliation: 'Reconciliation check',
+      reconciliationPassed: 'passed',
+      failureStage: 'Failure stage',
+      extractedData: 'Gemini extracted data',
+      extractedSnapshot: 'Extracted snapshot',
+      persistence: 'Persistence',
+      availableNotImported: 'available, not imported',
+      rollbackCompleted: 'no import persisted; rollback completed',
+      rollbackRequiresManualReview: 'rollback incomplete; manual review required',
+      discrepancyDetails: 'Detected discrepancy',
+      discrepancyField: 'field',
+      expectedValue: 'expected',
+      observedValue: 'observed',
+      tolerance: 'tolerance',
       actions: 'Actions taken',
       issue: 'Issue and recommended action',
+      supplierProfiles: 'Supplier profiles and proposals',
+      retryImport: 'Retry import',
       notAvailable: 'not available',
       notChanged: 'not changed',
       notIdentified: 'not identified',
       noIssue: 'No issue.',
       notApplicable: 'not applicable',
+      failureStages: Object.freeze({
+        'extracting-document-data': 'Extracting document data',
+        'validating-extracted-data': 'Validating extracted data',
+        'validating-target-spreadsheet': 'Validating target spreadsheet',
+        'checking-duplicates': 'Checking duplicates',
+        'preparing-drive-destination': 'Preparing Drive destination',
+        'spreadsheet-write-and-verify': 'Writing and verifying spreadsheet row',
+        'renaming-and-moving-pdf': 'Renaming and moving PDF',
+        'verifying-imported-row': 'Verifying imported row'
+      }),
       emailSubject: '[Utilities] {count} PDF(s) processed'
     }),
     headerAliases: Object.freeze({
@@ -92,7 +159,7 @@ function getEnglishLocalization_() {
       supplier: ['supplier'],
       identifier: ['invoice number', 'document number'],
       contractNumber: ['contract number'],
-      customerCode: ['customer code', 'customer/client code', 'client code'],
+      customerCode: ['customer code', 'customer/client code', 'client code', 'user id'],
       sourceFile: ['source file'],
       year: ['year', 'reference year'],
       month: ['month', 'reference month'],

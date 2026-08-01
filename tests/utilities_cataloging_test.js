@@ -8,7 +8,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
-const sources = ['Config.gs', 'UtilitiesCataloging.gs'].map((file) =>
+const sources = ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs',
+  'UtilitiesCataloging.gs'].map((file) =>
   fs.readFileSync(path.join(projectRoot, file), 'utf8')
 );
 
@@ -60,7 +61,8 @@ function loadCataloger(overrides = {}) {
   });
   sources.forEach((source, index) => {
     vm.runInContext(source, context, {
-      filename: index === 0 ? 'Config.gs' : 'UtilitiesCataloging.gs'
+      filename: ['Config.gs', 'locales/en.gs', 'locales/it.gs',
+        'Localization.gs', 'UtilitiesCataloging.gs'][index]
     });
   });
   return context;
@@ -110,6 +112,259 @@ function installScriptPropertyStore(context, initialValues = {}) {
   return { properties, store };
 }
 
+function driveIterator(items) {
+  let index = 0;
+  return {
+    hasNext: () => index < items.length,
+    next: () => items[index++]
+  };
+}
+
+function managedSupplierProfileWorkspaceState(rootFolderId, profileRootId) {
+  return {
+    rootFolderId,
+    profileRootParentId: rootFolderId,
+    profileRootName: 'Supplier Profiles',
+    profileRootStatus: 'managed',
+    profileRootId,
+    templateFolderParentId: profileRootId,
+    templateFolderName: '_template',
+    templateFolderStatus: 'managed',
+    templateFolderId: 'template-folder-id'
+  };
+}
+
+function testManagedSupplierProfileWorkspaceIdentityIsRequired() {
+  const profileText = '---\nstatus: approved\nsupplier: ILIAD\n---\n# Profile';
+  const profile = {
+    isTrashed: () => false,
+    getSize: () => profileText.length,
+    getBlob: () => ({ getDataAsString: () => profileText })
+  };
+  const supplierFolder = {
+    isTrashed: () => false,
+    getName: () => 'ILIAD',
+    getFilesByName: (name) => {
+      assert.equal(name, 'PROFILE.md');
+      return driveIterator([profile]);
+    }
+  };
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getUrl: () => 'https://drive.test/managed-profile-root-id',
+    getFolders: () => driveIterator([supplierFolder])
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: (name) => {
+      assert.equal(name, 'Supplier Profiles');
+      return driveIterator([profileRoot]);
+    }
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: (id) => {
+      assert.equal(id, 'managed-profile-root-id');
+      return profileRoot;
+    } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.match(context.loadApprovedSupplierProfiles_(rootFolder),
+    /BEGIN APPROVED SUPPLIER PROFILE: ILIAD/);
+  assert.equal(context.getSupplierProfilesFolderUrl_(rootFolder),
+    'https://drive.test/managed-profile-root-id');
+}
+
+function testSupplierProfilesAreOmittedWithoutWorkspaceState() {
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => { throw new Error('must not resolve'); } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context);
+  const rootFolder = {
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+  context.loadDriveAgentsPolicy_ = () => 'root policy';
+
+  assert.equal(context.loadApprovedSupplierProfiles_(rootFolder), '');
+  assert.equal(context.loadTrustedExtractionPolicy_(rootFolder), 'root policy');
+}
+
+function testSupplierProfilesSkipStateLookupForMinimalRootAdapter() {
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: () => { throw new Error('must not read state'); }
+      })
+    }
+  });
+
+  assert.equal(context.loadApprovedSupplierProfiles_({}), '');
+}
+
+function testSupplierProfileWorkspaceRejectsIncompleteState() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  const { store } = installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify({
+      rootFolderId: 'root-folder-id',
+      profileRootStatus: 'managed',
+      profileRootId: 'managed-profile-root-id'
+    })
+  });
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /supplier profile workspace state is incomplete/);
+  store.SUPPLIER_PROFILE_WORKSPACE_STATE = '{';
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /supplier profile workspace state is malformed/);
+}
+
+function testSupplierProfileWorkspaceRejectsSameNamedReplacement() {
+  const recordedProfileRoot = {
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles'
+  };
+  const replacement = {
+    isTrashed: () => false,
+    getId: () => 'user-owned-replacement-id'
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([replacement])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => recordedProfileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /profile root identity does not match the configured intake folder/);
+}
+
+function testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot() {
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => { throw new Error('must not inspect profiles'); }
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => { throw new Error('not found'); } }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'missing-profile-root-id')
+    )
+  });
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /recorded supplier profile root is unavailable, moved, or renamed/);
+}
+
+function testSupplierProfileContextLimitIncludesRenderedMetadata() {
+  const profiles = ['ALIAD', 'BLIAD', 'CLIAD'].map((supplier) => {
+    const profileText = '---\nstatus: approved\nsupplier: ' + supplier + '\n---\n' +
+      'x'.repeat(16340);
+    return {
+      isTrashed: () => false,
+      getSize: () => Buffer.byteLength(profileText, 'utf8'),
+      getBlob: () => ({ getDataAsString: () => profileText })
+    };
+  });
+  const supplierFolders = ['a'.repeat(80) + '1', 'a'.repeat(80) + '2',
+    'a'.repeat(80) + '3'].map((name, index) => ({
+    isTrashed: () => false,
+    getName: () => name,
+    getFilesByName: () => driveIterator([profiles[index]])
+  }));
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getFolders: () => driveIterator(supplierFolders)
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([profileRoot])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => profileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.equal(profiles.reduce((total, profile) => total + profile.getSize(), 0), 49143);
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /Combined approved supplier profiles exceed the context limit/);
+}
+
+function testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders() {
+  const makeProfile = (supplier) => {
+    const profileText = '---\nstatus: approved\nsupplier: ' + supplier +
+      '\n---\n# Profile';
+    return {
+      isTrashed: () => false,
+      getSize: () => Buffer.byteLength(profileText, 'utf8'),
+      getBlob: () => ({ getDataAsString: () => profileText })
+    };
+  };
+  const supplierFolders = [
+    ['Active Iliad profile', makeProfile('Iliad Internet')],
+    ['Stale duplicate profile', makeProfile('ILIAD   Internet')]
+  ].map(([name, profile]) => ({
+    isTrashed: () => false,
+    getName: () => name,
+    getFilesByName: () => driveIterator([profile])
+  }));
+  const profileRoot = {
+    isTrashed: () => false,
+    getId: () => 'managed-profile-root-id',
+    getName: () => 'Supplier Profiles',
+    getFolders: () => driveIterator(supplierFolders)
+  };
+  const rootFolder = {
+    getId: () => 'root-folder-id',
+    getFoldersByName: () => driveIterator([profileRoot])
+  };
+  const context = loadCataloger({
+    DriveApp: { getFolderById: () => profileRoot }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  installScriptPropertyStore(context, {
+    SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
+      managedSupplierProfileWorkspaceState('root-folder-id',
+        'managed-profile-root-id')
+    )
+  });
+
+  assert.throws(() => context.loadApprovedSupplierProfiles_(rootFolder),
+    /More than one approved supplier profile exists for the same supplier/);
+}
+
 function testFormulaLikeTextIsWrittenLiterally() {
   const context = loadCataloger();
   [
@@ -135,9 +390,10 @@ function testFormulaLikeTextIsWrittenLiterally() {
 function testExtractionSchemaAndCalendarValidation() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
-    canonical_suppliers: ['SUPPLIER'],
+    locale: 'it',
+    canonical_suppliers: ['SUPPLIER', 'ILIAD', 'Energygas Italia'],
     supplier_aliases: {},
-    canonical_supplies: ['Water'],
+    canonical_supplies: ['Water', 'Internet'],
     supply_aliases: {},
     address_rules: [],
     address_missing_type: 'import',
@@ -155,6 +411,107 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(normalized.contract_number, 'CONTRACT-2');
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
   assert.equal(normalized.reference_month, '07');
+  assert.equal(typeof normalized.reference_month, 'string');
+
+  const digitOnlyIdentifiers = context.normalizeExtraction_({
+    ...raw,
+    identifier: 16657014,
+    contract_number: 123456,
+    customer_code: 53009296
+  });
+  assert.equal(typeof digitOnlyIdentifiers.identifier, 'string');
+  assert.equal(typeof digitOnlyIdentifiers.contract_number, 'string');
+  assert.equal(typeof digitOnlyIdentifiers.customer_code, 'string');
+
+  const iliadDefault = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(iliadDefault, ["Spese d'incasso"]);
+  assert.equal(JSON.stringify(iliadDefault.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 0 }
+  ]));
+  assert.deepEqual(iliadDefault.problems, []);
+
+  const iliadPrintedCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{ header: "Spese d'incasso", value: 1.25 }]
+  });
+  context.applySupplierFieldDefaults_(iliadPrintedCharge, ["Spese d'incasso"]);
+  assert.equal(JSON.stringify(iliadPrintedCharge.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 1.25 }
+  ]));
+
+  const iliadPrintedZeroCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{
+      header: "Spese d'incasso",
+      value: 0,
+      source_evidence: 'printed'
+    }]
+  });
+  context.applySupplierFieldDefaults_(iliadPrintedZeroCharge, ["Spese d'incasso"]);
+  assert.equal(iliadPrintedZeroCharge.sheet_values[0].value, 0);
+  assert.deepEqual(iliadPrintedZeroCharge.problems, []);
+
+  const iliadUnprovenZeroCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: [{ header: "Spese d'incasso", value: 0 }]
+  });
+  context.applySupplierFieldDefaults_(iliadUnprovenZeroCharge, ["Spese d'incasso"]);
+  assert.equal(context.validateExtraction_(iliadUnprovenZeroCharge).valid, false);
+  assert.match(iliadUnprovenZeroCharge.problems[0], /not established by printed evidence/);
+
+  const iliadEmptyCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  context.applySupplierFieldDefaults_(iliadEmptyCharge, ["Spese d'incasso"]);
+  assert.equal(iliadEmptyCharge.sheet_values[0].value, 0);
+
+  const iliadUnreadableCharge = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso amount missing or unreadable."],
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  context.applySupplierFieldDefaults_(iliadUnreadableCharge, ["Spese d'incasso"]);
+  assert.equal(iliadUnreadableCharge.sheet_values[0].value, null);
+  assert.equal(context.validateExtraction_(iliadUnreadableCharge).valid, false);
+
+  const iliadWithoutConfiguredChargeColumn = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(iliadWithoutConfiguredChargeColumn, []);
+  assert.deepEqual(iliadWithoutConfiguredChargeColumn.sheet_values, []);
+  assert.deepEqual(iliadWithoutConfiguredChargeColumn.problems, []);
+
+  const iliadReport = context.normalizeExtraction_({
+    ...raw,
+    document_type: 'Report',
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(iliadReport, ["Spese d'incasso"]);
+  assert.deepEqual(iliadReport.sheet_values, []);
 
   const energygas = context.normalizeExtraction_({
     ...raw,
@@ -225,11 +582,151 @@ function testExtractionSchemaAndCalendarValidation() {
     }),
     /invalid date/
   );
+  assert.throws(
+    () => context.validateRawExtractionShape_({
+      ...raw,
+      sheet_values: [{ header: 'Collection charges', value: 0,
+        source_evidence: 'inferred' }]
+    }),
+    /invalid entry/
+  );
 
   const invalidMonth = { ...raw, reference_month: '13' };
   assert.equal(context.validateExtraction_(invalidMonth).valid, false);
   const invalidSupplier = { ...raw, supplier: '|||***' };
   assert.equal(context.validateExtraction_(invalidSupplier).valid, false);
+
+  const onlyCustomerCode = {
+    ...raw,
+    contract_number: '',
+    customer_code: 'ID-UTENTE-1',
+    problems: ['Numero di contratto assente nel documento.']
+  };
+  assert.equal(context.validateExtraction_(onlyCustomerCode).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Numero contratto non presente nel documento.']
+  }).valid, true);
+
+  const onlyContractNumber = {
+    ...raw,
+    contract_number: 'CONTRACT-ONLY',
+    customer_code: '',
+    problems: ['ID utente missing from the document.']
+  };
+  assert.equal(context.validateExtraction_(onlyContractNumber).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Codice contratto assente nel documento.']
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyContractNumber,
+    problems: ['Numero cliente assente']
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyContractNumber,
+    problems: ['Contract number absent']
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Customer code absent']
+  }).valid, false);
+
+  const noOwnershipIdentifier = {
+    ...raw,
+    contract_number: '',
+    customer_code: '',
+    problems: []
+  };
+  const noOwnershipValidation = context.validateExtraction_(noOwnershipIdentifier);
+  assert.equal(noOwnershipValidation.valid, false);
+  assert.match(noOwnershipValidation.problem, /Contract number and customer code are both missing/);
+
+  const otherProblemRemainsBlocking = {
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente nel documento.', 'VAT cannot be verified.']
+  };
+  assert.equal(context.validateExtraction_(otherProblemRemainsBlocking).valid, false);
+
+  const mixedIdentifierProblem = {
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente nel documento; periodo ambiguo.']
+  };
+  assert.equal(context.validateExtraction_(mixedIdentifierProblem).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Numero di contratto assente, importo illeggibile.']
+  }).valid, false);
+
+  const informationalVatInclusion = {
+    ...onlyCustomerCode,
+    problems: [
+      'Gli importi delle singole voci nel dettaglio servizi sono riportati nel documento comprensivi di IVA al 22%.'
+    ]
+  };
+  assert.equal(context.validateExtraction_(informationalVatInclusion).valid, true);
+  [
+    'VAT was included twice.',
+    'VAT was incorrectly included.',
+    'IVA inclusa erroneamente.',
+    'IVA inclusa due volte.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({
+      ...onlyCustomerCode,
+      problems: [problem]
+    }).valid, false);
+  });
+
+  const mixedVatProblem = {
+    ...onlyCustomerCode,
+    problems: ['IVA inclusa nei dettagli. Il periodo di fatturazione è ambiguo.']
+  };
+  assert.equal(context.validateExtraction_(mixedVatProblem).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['Non è chiaro se le voci di dettaglio siano comprensive di IVA.']
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ["Non è chiara l'inclusione dell'IVA."]
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
+    problems: ['It is not certain whether VAT is included.']
+  }).valid, false);
+
+  const duplicateSheetValues = {
+    ...raw,
+    sheet_values: [
+      { header: 'Total consumption costs', value: 10 },
+      { header: ' Total consumption costs ', value: 11 }
+    ]
+  };
+  const duplicateValidation = context.validateExtraction_(duplicateSheetValues);
+  assert.equal(duplicateValidation.valid, false);
+  assert.match(duplicateValidation.problem, /duplicate spreadsheet values/);
+
+  const names = { statusKey: 'status', approvedStatus: 'approved',
+    supplierKey: 'supplier' };
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: approved\nsupplier: ILIAD\n---\n# Profile', names
+  ), true);
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: approved\nsupplier: ILIAD\n---', names
+  ), true);
+  assert.equal(context.isApprovedSupplierProfile_(
+    '---\nstatus: pending\nsupplier: ILIAD\n---\nchange status: approved', names
+  ), false);
+
+  const discrepancy = context.formatVerificationDiscrepancies_([{
+    field: 'Consumption quantity', expected: 2, actual: 1, valueType: 'number'
+  }], context.getLocalization_().reportLabels);
+  assert.match(discrepancy[0], /atteso 2; riscontrato 1/);
+  assert.doesNotMatch(discrepancy[0], /EUR/);
+  const booleanDiscrepancy = context.formatVerificationDiscrepancies_([{
+    field: 'Direct debit', expected: false, actual: true, valueType: 'text'
+  }], context.getLocalization_().reportLabels);
+  assert.match(booleanDiscrepancy[0], /atteso false; riscontrato true/);
 
   const report = {
     ...raw,
@@ -250,6 +747,101 @@ function testExtractionSchemaAndCalendarValidation() {
     contract_object: ''
   };
   assert.equal(context.validateExtraction_(contract).valid, false);
+}
+
+function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+
+  assert.equal(context.validateExtraction_({
+    ...validInvoice(),
+    contract_number: 'CONTRACT-ONLY',
+    customer_code: '',
+    problems: ['Numero cliente assente nel documento.']
+  }).valid, true);
+}
+
+function testSupplierDefaultsUseRuntimeTargetHeaders() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'it',
+    canonical_suppliers: ['ILIAD'],
+    supplier_aliases: {},
+    canonical_supplies: ['Internet'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  context.getSheetHeadersBySupply_ = () => ({
+    Internet: ["Spese d'incasso"]
+  });
+  context.callGeminiForPdf_ = () => 'model-response';
+  context.parseGeminiJson_ = () => ({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."]
+  });
+  context.validateRawExtractionShape_ = () => {};
+
+  const extracted = context.extractUtilityData_({
+    getBlob: () => ({}),
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf'
+  }, '');
+
+  assert.equal(JSON.stringify(extracted.sheet_values), JSON.stringify([
+    { header: "Spese d'incasso", value: 0 }
+  ]));
+  assert.equal(JSON.stringify(extracted.problems), JSON.stringify([]));
+}
+
+function testSupplierDefaultsNormalizeConfiguredIdentities() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'it',
+    canonical_suppliers: ['Iliad'],
+    supplier_aliases: {},
+    canonical_supplies: ['internet'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  const explicitAbsence = context.normalizeExtraction_({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso non presente nel documento."],
+    sheet_values: []
+  });
+
+  context.applySupplierFieldDefaults_(explicitAbsence, ["Spese d'incasso"]);
+  assert.equal(JSON.stringify(explicitAbsence.sheet_values), JSON.stringify([{
+    header: "Spese d'incasso", value: 0
+  }]));
+  assert.equal(JSON.stringify(explicitAbsence.problems), JSON.stringify([]));
+
+  const unreadableCharge = context.normalizeExtraction_({
+    ...validInvoice(),
+    supplier: 'ILIAD',
+    supply_type: 'Internet',
+    problems: ["Spese d'incasso amount missing or unreadable."],
+    sheet_values: [{ header: "Spese d'incasso", value: null }]
+  });
+  context.applySupplierFieldDefaults_(unreadableCharge, ["Spese d'incasso"]);
+  assert.equal(unreadableCharge.sheet_values[0].value, null);
+  assert.equal(context.validateExtraction_(unreadableCharge).valid, false);
 }
 
 function testAmbiguousAddressRulesFailClosed() {
@@ -380,6 +972,11 @@ function testDeveloperApiKeyUsesHeader() {
     payload.generationConfig.responseJsonSchema.properties.sheet_values
       .items.properties.value.type,
     ['string', 'number', 'boolean', 'null']
+  );
+  assert.deepEqual(
+    payload.generationConfig.responseJsonSchema.properties.sheet_values
+      .items.properties.source_evidence.enum,
+    ['printed']
   );
 }
 
@@ -622,6 +1219,245 @@ function testEmailReportIncludesSoftwareVersion() {
     ),
     true
   );
+  assert.match(report, /Failure stage: not available/);
+  assert.match(report, /Persistence: not available/);
+
+  const linkedReport = context.formatResult_(Object.assign({}, {
+    status: 'ERROR', originalName: 'invoice.pdf', fileUrl: 'https://drive.test/file-id',
+    extracted: {}, actions: 'No changes.', problem: 'Provider unavailable.',
+    recommendedAction: 'Retry later.', supplierProfilesUrl: 'https://drive.test/profiles',
+    retryUrl: 'https://script.google.com/home/projects/script-id/edit?function=retryFailedUtilitiesCataloging'
+  }));
+  assert.match(linkedReport, /Supplier profiles and proposals: https:\/\/drive\.test\/profiles/);
+  assert.match(linkedReport, /Retry import: https:\/\/script\.google\.com\/home\/projects\/script-id/);
+}
+
+function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
+  const cloudPayloads = [];
+  const consoleErrors = [];
+  const extraction = validInvoice();
+  extraction.contract_number = 'CONTRACT-RECOVERY';
+  extraction.customer_code = 'CUSTOMER-RECOVERY';
+  extraction.frequency = 'monthly';
+  extraction.sheet_values = [
+    { header: 'Consumption quantity F1', value: 368.74 },
+    { header: 'Unit cost F1', value: 0.12 }
+  ];
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const context = loadCataloger({
+    Logger: { log: (payload) => cloudPayloads.push(payload) },
+    console: { error: (message) => consoleErrors.push(message) }
+  });
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.saveMutationJournal_ = () => {};
+  context.updateMutationJournal_ = () => {};
+  context.getDestinationFolder_ = () => ({ folder: {}, path: 'Water/2026' });
+  context.getDestinationCollision_ = () => ({ status: 'none' });
+  context.importUtilityInvoiceToSheet_ = () => {
+    const error = new Error('Spreadsheet formula total verification failed for: Total cost');
+    error.verificationDiscrepancies = [{
+      field: 'Total cost',
+      expected: 14.64,
+      actual: 12.34,
+      valueType: 'money',
+      tolerance: 0.02
+    }];
+    throw error;
+  };
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
+  context.attachMutationJournal_ = (result) => result;
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+  const report = context.formatResult_(result);
+
+  assert.equal(result.status, 'ERROR');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.extracted)), extraction);
+  assert.equal(result.supplySupplier, 'Water / SUPPLIER');
+  assert.equal(result.failureStage, 'spreadsheet-write-and-verify');
+  assert.equal(result.extractionValidated, true);
+  assert.match(report, /Failure stage: Writing and verifying spreadsheet row/);
+  assert.match(report, /Gemini extracted data: available, not imported/);
+  assert.ok(report.includes('Extracted snapshot: ' + JSON.stringify(extraction)));
+  assert.match(report, /Persistence: no import persisted; rollback completed/);
+  assert.match(report, /Supply \/ supplier: Water \/ SUPPLIER/);
+  assert.match(report, /Total: 14\.64 EUR/);
+  assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
+  assert.match(report,
+    /Detected discrepancy: field Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
+  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
+    message: 'catalog-file-processing-error',
+    component: 'drive-utilities-cataloger',
+    applicationVersion: '0.3.1',
+    event: 'catalog-file-processing-error',
+    fileId: 'file-id',
+    errorType: 'Error',
+    errorCategory: 'spreadsheet',
+    failureStage: 'spreadsheet-write-and-verify'
+  }]);
+  assert.deepEqual(consoleErrors, [
+    'Catalog file processing failed for file ID file-id (spreadsheet).'
+  ]);
+  const cloudText = JSON.stringify({ cloudPayloads, consoleErrors });
+  [
+    extraction.supplier,
+    extraction.identifier,
+    extraction.period_start,
+    String(extraction.total),
+    '12.34',
+    'Spreadsheet formula total verification failed for: Total cost'
+  ].forEach((sensitiveValue) => {
+    assert.equal(cloudText.includes(sensitiveValue), false);
+  });
+
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/it.gs'), 'utf8'),
+    context,
+    { filename: 'locales/it.gs' }
+  );
+  context.getLocalization_ = () => context.getItalianLocalization_();
+  const italianReport = context.formatResult_(result);
+  assert.match(italianReport, /Fase errore: Scrittura e verifica riga del foglio/);
+  assert.match(italianReport, /Dati estratti da Gemini: disponibili, non importati/);
+  assert.ok(italianReport.includes('Snapshot estrazione: ' +
+    JSON.stringify(extraction)));
+  assert.match(italianReport,
+    /Stato importazione: nessun import persistito; rollback completato/);
+  assert.match(italianReport,
+    /Verifica quadratura: superata: 14\.64 EUR \/ 14\.64 EUR/);
+  assert.match(italianReport,
+    /Discrepanza rilevata: campo Total cost; atteso 14\.64 EUR; riscontrato 12\.34 EUR; tolleranza 0\.02 EUR/);
+
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = ['Spreadsheet rollback failed: service unavailable'];
+  };
+  const incompleteRollbackResult = context.processIntakeFile_(file, {}, 'policy');
+  assert.equal(incompleteRollbackResult.rollbackCompleted, false);
+  assert.equal(incompleteRollbackResult.keepMutationJournal, true);
+  assert.match(context.formatResult_(incompleteRollbackResult),
+    /Stato importazione: rollback incompleto; verifica manuale necessaria/);
+}
+
+function testPreExtractionErrorReportKeepsDataUnavailable() {
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const context = loadCataloger({ Logger: { log: () => {} } });
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
+  );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.sha256ForFile_ = () => {
+    throw new Error('Gemini network error');
+  };
+  context.attachMutationJournal_ = (result) => result;
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+  const report = context.formatResult_(result);
+
+  assert.equal(result.status, 'ERROR');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.extracted)), {});
+  assert.equal(result.extractionValidated, false);
+  assert.equal(result.failureStage, 'extracting-document-data');
+  assert.match(report, /Gemini extracted data: not available/);
+  assert.match(report, /Reconciliation check: not applicable/);
+}
+
+function testErrorResultMarksRetainedDestinationFoldersAsIncomplete() {
+  const context = loadCataloger();
+  const file = {
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/file-id'
+  };
+
+  const result = context.buildErrorResult_(
+    file,
+    'Drive destination creation failed.',
+    'Inspect the intake folder before retrying.',
+    'invoice.pdf',
+    { createdFolderPath: 'Water/2026', rollbackErrors: [] }
+  );
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /Automatic rollback was incomplete/);
+  assert.match(result.actions, /empty destination folders may remain at Water\/2026/);
+  assert.doesNotMatch(result.actions, /Any partial Drive or spreadsheet mutation was rolled back/);
+}
+
+function testDestinationFolderCreationCheckpointsEachCreatedPath() {
+  const context = loadCataloger();
+  const fileId = 'destination-checkpoint-file-id';
+  const { store } = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + fileId;
+  const file = {
+    getId: () => fileId,
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/destination-checkpoint-file-id'
+  };
+  const failingChild = {
+    getFoldersByName: () => {
+      const journal = JSON.parse(store[journalKey]);
+      assert.equal(journal.createdFolderPath, 'Water');
+      assert.equal(journal.failureStage, 'preparing-drive-destination');
+      throw new Error('second destination folder lookup failed');
+    }
+  };
+  const rootFolder = {
+    getFoldersByName: () => driveIterator([]),
+    createFolder: (name) => {
+      assert.equal(name, 'Water');
+      return failingChild;
+    }
+  };
+  context.getAutomationConfig_ = () => ({
+    destination_templates: {},
+    canonical_suppliers: []
+  });
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => validInvoice();
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'drive';
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processIntakeFile_(file, rootFolder, 'policy');
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /empty destination folders may remain at Water/);
+  assert.equal(JSON.parse(store[journalKey]).createdFolderPath, 'Water');
 }
 
 function testGenericRateLimitStaysOnDeveloperApi() {
@@ -792,8 +1628,27 @@ function testPromptKeepsHeadersScopedBySupply() {
 
   assert.match(prompt, /matching canonical supply entry/);
   assert.match(prompt, /"contract_number": "printed contract number or null"/);
-  assert.match(prompt, /"customer_code": "printed customer\/client\/account code or null"/);
+  assert.match(prompt,
+    /"customer_code": "printed customer\/client\/account code \(ID UTENTE is a customer code\), or null"/);
   assert.match(prompt, /Never substitute one for the other/);
+  assert.match(prompt, /one of contract_number or customer_code is sufficient/);
+  assert.match(prompt, /Preserve every character and leading zero/);
+  assert.match(prompt, /two-character text value in the exact format mm/);
+  assert.match(prompt, /measurements, and reference year\./);
+  assert.doesNotMatch(prompt, /reference year\/month/);
+  assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
+  assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
+  assert.match(prompt,
+    /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
+  assert.match(prompt,
+    /If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why/);
+  assert.match(prompt, /source_evidence "printed"/);
+  assert.doesNotMatch(prompt,
+    /If a field is genuinely not printed or not applicable, leave it absent and add a concise problem/);
+  assert.match(prompt, /recurring Iliad Internet charges/);
+  assert.match(prompt, /localized supplier field defaults/);
+  assert.match(prompt, /numeric value 0/);
+  assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
 }
@@ -1044,6 +1899,156 @@ function testMutationRecoveryStages() {
   assert.deepEqual(legacyExistingRowAfterRename.refreshedRows, [3]);
 }
 
+function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
+  const context = loadCataloger();
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const extraction = validInvoice();
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + file.getId();
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.getDestinationFolder_ = () => {
+    const journal = JSON.parse(propertyStore.store[journalKey]);
+    const payloadPrefix = vm.runInContext(
+      'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+    ) + file.getId() + '_';
+    assert.equal(journal.extracted, undefined);
+    assert.equal(journal.extractedChunks, 1);
+    assert.deepEqual(JSON.parse(propertyStore.store[`${payloadPrefix}0`]), extraction);
+    assert.equal(journal.extractionValidated, true);
+    assert.equal(journal.failureStage, 'preparing-drive-destination');
+    throw new Error('destination preparation interrupted');
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'drive';
+  context.logCatalogEvent_ = () => {};
+
+  const interrupted = context.processIntakeFile_(file, {}, 'policy');
+  assert.equal(interrupted.status, 'ERROR');
+
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => ({ unmarkedRowMayRemain: false });
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+
+  const recovered = context.recoverMutationJournalForFile_({}, file.getId());
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.extracted)), extraction);
+  assert.equal(recovered.extractionValidated, true);
+  assert.equal(recovered.failureStage, 'preparing-drive-destination');
+}
+
+function testMutationJournalPersistsFailureStageAtProcessingCheckpoints() {
+  const context = loadCataloger();
+  const extraction = validInvoice();
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + 'file-id';
+  let fileName = 'invoice.pdf';
+  const readJournal = () => JSON.parse(propertyStore.store[journalKey]);
+  const file = {
+    getId: () => 'file-id',
+    getName: () => fileName,
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id',
+    setName: (name) => {
+      assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+      assert.equal(readJournal().stage, 'renaming');
+      fileName = name;
+    },
+    moveTo: () => {
+      assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+      assert.equal(readJournal().stage, 'moving');
+    }
+  };
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.getDestinationFolder_ = () => ({
+    folder: {},
+    path: 'Water/2026',
+    createdFolders: []
+  });
+  context.getDestinationCollision_ = () => ({ status: 'none' });
+  context.importUtilityInvoiceToSheet_ = () => {
+    assert.equal(readJournal().failureStage, 'spreadsheet-write-and-verify');
+    return { link: '', sheet: {}, row: 2, created: false };
+  };
+  context.verifyMovedFile_ = () => {
+    assert.equal(readJournal().failureStage, 'renaming-and-moving-pdf');
+    assert.equal(readJournal().stage, 'moved');
+  };
+  context.refreshImportedSourceLink_ = () => {
+    assert.equal(readJournal().failureStage, 'verifying-imported-row');
+  };
+  context.verifyImportedRow_ = () => {
+    assert.equal(readJournal().failureStage, 'verifying-imported-row');
+    throw new Error('imported-row verification interrupted');
+  };
+  context.rollbackProcessingMutations_ = (_file, _root, _name, state) => {
+    state.rollbackErrors = [];
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+
+  assert.equal(result.failureStage, 'verifying-imported-row');
+  assert.equal(readJournal().failureStage, 'verifying-imported-row');
+}
+
+function testMutationJournalChunksLargeValidatedExtractionSnapshots() {
+  const context = loadCataloger();
+  const fileId = 'large-extraction-file-id';
+  const chunkSize = vm.runInContext(
+    'CONFIG.MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS', context
+  );
+  const extraction = {
+    ...validInvoice(),
+    sheet_values: [{ value: 'x'.repeat(chunkSize * 2) }]
+  };
+  const { store } = installScriptPropertyStore(context);
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const payloadPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+  ) + fileId + '_';
+
+  context.saveMutationJournal_(fileId, { extracted: extraction });
+
+  const journal = JSON.parse(store[`${journalPrefix}${fileId}`]);
+  assert.equal(journal.extracted, undefined);
+  assert.ok(journal.extractedChunks > 1);
+  assert.deepEqual(JSON.parse(
+    Array.from({ length: journal.extractedChunks }, (_, index) =>
+      store[`${payloadPrefix}${index}`]
+    ).join('')
+  ), extraction);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.hydrateMutationJournalPayload_(
+      { getProperty: (key) => store[key] || null }, fileId, journal
+    ).extracted)), extraction
+  );
+}
+
 function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
   const fileId = 'source-file-id';
   const initialJournal = {
@@ -1129,6 +2134,7 @@ function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
 
 function testMutationRecoveryReportsUnavailableFileOnce() {
   const context = loadCataloger();
+  const extraction = validInvoice();
   const journalPrefix = vm.runInContext(
     'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX',
     context
@@ -1138,11 +2144,18 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
     context
   );
   const fileId = 'unavailable-file-id';
+  const extractionPayloadPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_EXTRACTION_PAYLOAD_PREFIX', context
+  ) + fileId + '_';
   const store = {
     [`${journalPrefix}${fileId}`]: JSON.stringify({
       originalName: 'unavailable.pdf',
-      stage: 'moved'
-    })
+      stage: 'moved',
+      extractedChunks: 1,
+      extractionValidated: true,
+      failureStage: 'verifying-imported-row'
+    }),
+    [`${extractionPayloadPrefix}0`]: JSON.stringify(extraction)
   };
   const queuedResults = [];
   const properties = {
@@ -1164,17 +2177,69 @@ function testMutationRecoveryReportsUnavailableFileOnce() {
     queuedResults.push(...results);
   };
   context.logCatalogEvent_ = () => {};
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    return result;
+  };
 
   const firstResults = context.recoverPendingMutations_({});
   const secondResults = context.recoverPendingMutations_({});
 
   assert.equal(firstResults.length, 1);
   assert.equal(firstResults[0].status, 'ERROR');
+  assert.equal(firstResults[0].rollbackCompleted, false);
   assert.match(firstResults[0].problem, /Drive file is unavailable/);
+  assert.deepEqual(JSON.parse(JSON.stringify(firstResults[0].extracted)), extraction);
+  assert.equal(firstResults[0].extractionValidated, true);
+  assert.equal(firstResults[0].failureStage, 'verifying-imported-row');
+  assert.equal(firstResults[0].supplySupplier, 'Water / SUPPLIER');
+  assert.equal(firstResults[0].retryUrl, 'https://script.test/retry');
+  assert.equal(firstResults[0].supplierProfilesUrl, 'https://drive.test/profiles');
   assert.equal(queuedResults.length, 1);
+  assert.equal(queuedResults[0].retryUrl, 'https://script.test/retry');
+  assert.equal(queuedResults[0].supplierProfilesUrl, 'https://drive.test/profiles');
   assert.equal(secondResults.length, 0);
   assert.ok(store[`${alertPrefix}${fileId}`]);
   assert.ok(store[`${journalPrefix}${fileId}`]);
+}
+
+function testRuntimeExhaustionPersistsOperatorLinks() {
+  const persisted = [];
+  const linked = [];
+  const context = loadCataloger();
+  vm.runInContext(
+    'let runtimeExhaustionClockReads = 0; ' +
+      'Date.now = () => runtimeExhaustionClockReads++ === 0 ? 0 : 280000;',
+    context
+  );
+  context.loadIntakeFileState_ = () => ({});
+  context.loadTrustedExtractionPolicy_ = () => 'policy';
+  context.shouldProcessIntakeFile_ = () => true;
+  context.persistCatalogResult_ = (_state, _file, _root, result) => {
+    persisted.push(result);
+  };
+  context.logCatalogEvent_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    linked.push(result);
+    return result;
+  };
+
+  const file = {
+    getId: () => 'timed-out-file',
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/timed-out-file'
+  };
+  const batch = context.processEligibleIntakeFiles_([file], {}, 'event');
+
+  assert.equal(batch.results.length, 1);
+  assert.equal(linked.length, 1);
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].retryUrl, 'https://script.test/retry');
+  assert.equal(persisted[0].supplierProfilesUrl, 'https://drive.test/profiles');
 }
 
 function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
@@ -1232,6 +2297,11 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   context.queuePendingReports_ = () => calls.push('queue-report');
   context.saveIntakeFileState_ = () => calls.push('save-state');
   context.logCatalogEvent_ = () => calls.push('log-recovered');
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/profiles';
+    return result;
+  };
 
   const result = context.recoverMutationJournalForFile_(
     {}, 'target-file'
@@ -1246,6 +2316,88 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   assert.ok(calls.includes('queue-report'));
   assert.ok(calls.includes('save-state'));
   assert.ok(calls.includes('log-recovered'));
+  assert.equal(result.retryUrl, 'https://script.test/retry');
+  assert.equal(result.supplierProfilesUrl, 'https://drive.test/profiles');
+}
+
+function testRecoveryMarksUnmarkedRowsAsIncomplete() {
+  const context = loadCataloger();
+  const fileId = 'unmarked-row-file-id';
+  const file = {
+    getId: () => fileId,
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/unmarked-row-file-id'
+  };
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const propertyStore = installScriptPropertyStore(context, {
+    [`${journalPrefix}${fileId}`]: JSON.stringify({
+      originalName: 'invoice.pdf',
+      stage: 'sheet-insert-planned'
+    })
+  });
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => ({ unmarkedRowMayRemain: true });
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.recoverMutationJournalForFile_({}, fileId);
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /Automatic rollback was incomplete/);
+  assert.match(result.actions, /unmarked spreadsheet row may remain/);
+  assert.equal(propertyStore.store[`${journalPrefix}${fileId}`], undefined);
+}
+
+function testAccessibleRecoveryFailureRequiresManualReview() {
+  const context = loadCataloger();
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const alertPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_RECOVERY_ALERT_PREFIX', context
+  );
+  const fileId = 'recoverable-file-id';
+  const store = {
+    [`${journalPrefix}${fileId}`]: JSON.stringify({
+      originalName: 'original.pdf',
+      stage: 'sheet-written'
+    })
+  };
+  const file = {
+    getId: () => fileId,
+    getName: () => 'original.pdf',
+    getUrl: () => 'https://drive.test/recoverable-file-id'
+  };
+  const properties = {
+    getProperty: (key) => store[key] || '',
+    setProperty: (key, value) => {
+      store[key] = value;
+    }
+  };
+  context.PropertiesService = { getScriptProperties: () => properties };
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => {
+    throw new Error('source marker is missing');
+  };
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.recoverMutationJournalForFile_(
+    {}, fileId, store[`${journalPrefix}${fileId}`], {}, properties
+  );
+
+  assert.equal(result.status, 'ERROR');
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /spreadsheet row may remain/);
+  assert.ok(store[`${alertPrefix}${fileId}`]);
 }
 
 function testFormulaAndStyleCopySources() {
@@ -1297,19 +2449,22 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
   context.buildDrivePathLabel_ = () => 'invoice.pdf';
   const layout = {
     headerRow: 1,
-    headers: ['Issue date', 'Source file', 'Calculated value'],
+    headers: ['Issue date', 'Supplier', 'Source file', 'Calculated value'],
     lookup: {
       'issue date': 1,
-      'source file': 2,
-      'calculated value': 3
+      supplier: 2,
+      'source file': 3,
+      'calculated value': 4
     }
   };
   const sheet = {
     getLastRow: () => 3,
     getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
     getRange: (row, column, _rows, width) => {
-      if (column === 1 && width === 3) {
-        return { getFormulas: () => [['', '=HYPERLINK("url","text")', '=A3*2']] };
+      if (column === 1 && width === 4) {
+        return { getFormulas: () => [[
+          '', '=UPPER("supplier")', '=HYPERLINK("url","text")', '=A3*2'
+        ]] };
       }
       return {
         setFormula: (value) => writes.push([row, column, 'formula', value]),
@@ -1322,10 +2477,170 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
   context.writeInvoiceRow_(sheet, 3, layout,
     { getUrl: () => 'https://drive.test/file' }, validInvoice());
 
-  assert.equal(writes.some((entry) => entry[1] === 3), false);
+  assert.equal(writes.some((entry) => entry[1] === 2), false);
+  assert.equal(writes.some((entry) => entry[1] === 4), false);
   assert.equal(writes.some((entry) => entry[1] === 1), true);
-  assert.equal(writes.some((entry) => entry[1] === 2 && entry[2] === 'formula'),
+  assert.equal(writes.some((entry) => entry[1] === 3 && entry[2] === 'formula'),
     true);
+}
+
+function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier'],
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    year: ['Reference year'],
+    month: ['Reference month'],
+    frequency: ['Frequency'],
+    consumptionCost: ['Total consumption costs'],
+    nonConsumptionCosts: ['Total non-consumption costs'],
+    vat: ['VAT'],
+    total: ['Total cost'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: [
+      'Total consumption costs', 'Collection charges', 'Discounts',
+      'Wi-Fi extender', 'Total non-consumption costs', 'VAT', 'Total cost',
+      'Source file'
+    ],
+    lookup: {
+      'total consumption costs': 1,
+      'collection charges': 2,
+      discounts: 3,
+      'wi fi extender': 4,
+      'total non-consumption costs': 5,
+      vat: 6,
+      'total cost': 7,
+      'source file': 8
+    }
+  };
+  const formulas = ['', '', '', '', '=B3+C3+D3', '', '=A3+E3+F3', ''];
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 8) {
+        return { getFormulas: () => [formulas] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    cost_consumption: 0,
+    cost_non_consumption: 21.29,
+    vat: 4.68,
+    total: 25.97,
+    sheet_values: [
+      { header: 'Total consumption costs', value: 25.99 },
+      { header: 'Collection charges', value: 0 },
+      { header: 'Discounts', value: -4 },
+      { header: 'Wi-Fi extender', value: 3.98 },
+      { header: 'VAT', value: 0 }
+    ]
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, extracted);
+
+  assert.deepEqual(writes.filter((entry) => entry[2] === 'value').sort(
+    (left, right) => left[1] - right[1]
+  ), [
+    [3, 1, 'value', 25.99],
+    [3, 2, 'value', 0],
+    [3, 3, 'value', -4],
+    [3, 4, 'value', 3.98],
+    [3, 6, 'value', 0]
+  ]);
+
+  const actualValues = [25.99, 0, -4, 3.98, -0.02, 0, 25.97, 'invoice'];
+  const verificationSheet = {
+    getLastRow: () => 3,
+    getRange: (_row, column, _rows, width) => {
+      if (column === 1 && width === 8) {
+        return { getFormulas: () => [formulas] };
+      }
+      return {
+        getValue: () => actualValues[column - 1],
+        getRichTextValue: () => null,
+        getFormula: () => column === 8 ?
+          '=HYPERLINK("https://drive.test/file";"invoice")' : formulas[column - 1],
+        getDisplayValue: () => 'invoice'
+      };
+    }
+  };
+  assert.doesNotThrow(() => context.verifyImportedRow_(verificationSheet, 3,
+    layout, { getUrl: () => 'https://drive.test/file' }, extracted));
+}
+
+function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
+  const writes = [];
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    identifier: ['Invoice number'],
+    contractNumber: ['Contract number'],
+    customerCode: ['Customer code'],
+    month: ['Reference month'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const layout = {
+    headerRow: 1,
+    headers: ['Invoice number', 'Contract number', 'Customer code',
+      'Reference month', 'Source file'],
+    lookup: {
+      'invoice number': 1,
+      'contract number': 2,
+      'customer code': 3,
+      'reference month': 4,
+      'source file': 5
+    }
+  };
+  const sheet = {
+    getLastRow: () => 3,
+    getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+    getRange: (row, column, _rows, width) => {
+      if (column === 1 && width === 5) {
+        return { getFormulas: () => [['', '', '', '', '']] };
+      }
+      return {
+        setFormula: (value) => writes.push([row, column, 'formula', value]),
+        setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
+        setValue: (value) => writes.push([row, column, 'value', value])
+      };
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    identifier: 'INV-01',
+    contract_number: 'CON-01',
+    customer_code: '00053009296',
+    reference_month: '09',
+    sheet_values: [
+      { header: 'Customer code', value: 53009296 },
+      { header: 'Reference month', value: 9 }
+    ]
+  };
+
+  context.writeInvoiceRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file' }, extracted);
+
+  assert.deepEqual(writes.filter((entry) => entry[2] === 'rich').map(
+    (entry) => [entry[1], entry[3].text]
+  ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
+  assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 4),
+    false);
 }
 
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
@@ -1392,6 +2707,7 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
   const context = loadCataloger();
   const layout = { headers: ['Date', 'Source', 'Total', 'Notes'], lookup: {} };
   const originalDate = new Date('2026-04-09T00:00:00Z');
+  const originalNumberFormats = ['dd/MM/yyyy', '@', '#,##0.00', '@'];
   const writes = [];
   const moves = [];
   const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 4 };
@@ -1402,7 +2718,8 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
           return {
             ...sourceRow,
             getValues: () => [[originalDate, 'ignored', 14.64, '=untrusted']],
-            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']]
+            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']],
+            getNumberFormats: () => [originalNumberFormats]
           };
         }
         return { row, column, numRows, numColumns };
@@ -1410,7 +2727,8 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
       return {
         setFormula: (value) => writes.push(['formula', row, column, value]),
         setValue: (value) => writes.push(['value', row, column, value]),
-        setRichTextValue: (value) => writes.push(['rich', row, column, value])
+        setRichTextValue: (value) => writes.push(['rich', row, column, value]),
+        setNumberFormat: (value) => writes.push(['number-format', row, column, value])
       };
     },
     moveRows: (range, destination) => moves.push([range, destination])
@@ -1425,18 +2743,78 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
     { getId: () => 'file-id' }, layout);
   assert.equal(moves.length, 1);
   assert.equal(moves[0][1], 4);
-  assert.equal(writes[0][0], 'value');
-  assert.equal(Object.prototype.toString.call(writes[0][3]), '[object Date]');
-  assert.deepEqual(writes[1], ['formula', 4, 2, '=HYPERLINK("url";"invoice")']);
-  assert.deepEqual(writes[2], ['value', 4, 3, 14.64]);
-  assert.equal(writes[3][0], 'rich');
-  assert.equal(writes[3][3].text, '=untrusted');
+  const restoredValues = writes.filter((entry) => entry[0] !== 'number-format');
+  assert.equal(restoredValues[0][0], 'value');
+  assert.equal(Object.prototype.toString.call(restoredValues[0][3]), '[object Date]');
+  assert.deepEqual(restoredValues[1], ['formula', 4, 2,
+    '=HYPERLINK("url";"invoice")']);
+  assert.deepEqual(restoredValues[2], ['value', 4, 3, 14.64]);
+  assert.equal(restoredValues[3][0], 'rich');
+  assert.equal(restoredValues[3][3].text, '=untrusted');
+  assert.deepEqual(writes.filter((entry) => entry[0] === 'number-format').map(
+    (entry) => entry[3]
+  ), originalNumberFormats);
 
   context.getInsertionRow_ = () => 12;
   context.findSpreadsheetRowBySourceFile_ = () => 11;
   assert.equal(context.repositionImportedRow_(sheet, 9, layout,
     '2026-05-08', { getId: () => 'file-id' }), 11);
   assert.equal(moves[1][1], 12);
+}
+
+function testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement() {
+  const context = loadCataloger();
+  const originalNumberFormat = '00000000';
+  let numberFormat = originalNumberFormat;
+  const layout = {
+    headerRow: 1,
+    headers: ['Contract number', 'Source file'],
+    lookup: { 'contract number': 1, 'source file': 2 }
+  };
+  const sheet = {
+    getSheetId: () => 7,
+    getRange: (row, column, numRows, numColumns) => {
+      if (numRows === 1 && numColumns === 2) {
+        return {
+          getValues: () => [['00001234', 'ignored']],
+          getFormulas: () => [['', '=HYPERLINK("url";"invoice")']],
+          getNumberFormats: () => [[numberFormat, '@']]
+        };
+      }
+      return {
+        setFormula: () => {},
+        setRichTextValue: () => {},
+        setValue: () => {},
+        setNumberFormat: (value) => {
+          if (column === 1) {
+            numberFormat = value;
+          }
+        }
+      };
+    }
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.getSheetLayout_ = () => layout;
+  context.findSpreadsheetRowBySourceFile_ = () => 2;
+  context.clearImportedLiteralCells_ = () => {};
+  context.updateMutationJournal_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+  context.writeInvoiceRow_ = () => {
+    context.setTextValueForHeaders_(sheet, 2, layout, [false, false],
+      ['Contract number'], '00005678');
+    throw new Error('replacement failed');
+  };
+
+  assert.throws(() => context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice()
+  ), /replacement failed/);
+  assert.equal(numberFormat, originalNumberFormat);
 }
 
 function testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice() {
@@ -1936,8 +3314,9 @@ function testFormulaTotalMustReconcileWithExtraction() {
   const extracted = validInvoice();
   extracted.sheet_values = [];
 
-  assert.throws(
-    () => context.verifyImportedRow_(
+  let error = null;
+  try {
+    context.verifyImportedRow_(
       sheet,
       3,
       {
@@ -1947,9 +3326,114 @@ function testFormulaTotalMustReconcileWithExtraction() {
       },
       { getUrl: () => 'https://drive.test/file-id' },
       extracted
-    ),
-    /formula total verification failed/
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(error.message, /formula total verification failed/);
+  assert.deepEqual(JSON.parse(JSON.stringify(error.verificationDiscrepancies)), [{
+    field: 'Cost total',
+    expected: 14.64,
+    actual: 42.55,
+    valueType: 'money',
+    tolerance: 0.02
+  }]);
+}
+
+function testSupplementaryValuesCannotOverrideValidatedInvoiceTotal() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    total: ['Cost total'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  let actualTotal = 14.64;
+  const sheet = {
+    getRange: (_row, column, _rows, width) => {
+      if (column === 1 && width === 2) {
+        return { getFormulas: () => [['', '=HYPERLINK("url";"text")']] };
+      }
+      return {
+        getValue: () => column === 1 ? actualTotal : 'text',
+        getRichTextValue: () => null,
+        getFormula: () => column === 2 ?
+          '=HYPERLINK("https://drive.test/file-id";"text")' : '',
+        getDisplayValue: () => 'text'
+      };
+    }
+  };
+  const extracted = validInvoice();
+  extracted.sheet_values = [{ header: 'Cost total', value: 99 }];
+  const layout = {
+    headerRow: 1,
+    headers: ['Cost total', 'Source file'],
+    lookup: { 'cost total': 1, 'source file': 2 }
+  };
+
+  assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted));
+  actualTotal = 99;
+  assert.throws(() => context.verifyImportedRow_(sheet, 3, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted),
+  /Spreadsheet value verification failed/);
+}
+
+function testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues() {
+  const context = loadCataloger();
+  vm.runInContext(
+    fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
+    context,
+    { filename: 'locales/en.gs' }
   );
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  context.getHeaderAliases_ = (key) => ({
+    supplier: ['Supplier'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  const sheet = {
+    getRange: (_row, column) => ({
+      getFormulas: () => [['', '=HYPERLINK("url";"text")']],
+      getFormula: () => column === 2 ?
+        '=HYPERLINK("https://drive.test/file-id";"text")' : '',
+      getDisplayValue: () => column === 2 ? 'text' : 'OTHER SUPPLIER',
+      getValue: () => column === 1 ? 'OTHER SUPPLIER' : 'text',
+      getRichTextValue: () => null
+    })
+  };
+  const extracted = validInvoice();
+  extracted.sheet_values = [];
+
+  let error = null;
+  try {
+    context.verifyImportedRow_(
+      sheet,
+      3,
+      {
+        headerRow: 1,
+        headers: ['Supplier', 'Source file'],
+        lookup: { supplier: 1, 'source file': 2 }
+      },
+      { getUrl: () => 'https://drive.test/file-id' },
+      extracted
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(error.message, /value verification failed/);
+  assert.deepEqual(JSON.parse(JSON.stringify(error.verificationDiscrepancies)), [{
+    field: 'Supplier',
+    expected: extracted.supplier,
+    actual: 'OTHER SUPPLIER',
+    valueType: 'text',
+    tolerance: null
+  }]);
+  const report = context.formatResult_({
+    status: 'ERROR',
+    extracted,
+    rollbackCompleted: true,
+    verificationDiscrepancies: error.verificationDiscrepancies
+  });
+  assert.match(report,
+    /Detected discrepancy: field Supplier; expected SUPPLIER; observed OTHER SUPPLIER/);
 }
 
 function testPendingReportOutboxRetriesAndRepairsMalformedEntries() {
@@ -1997,7 +3481,7 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
     context
   );
   const store = {};
-  for (let index = 0; index < 40; index += 1) {
+  for (let index = 0; index < 35; index += 1) {
     store[`${prefix}existing-${index}`] = JSON.stringify({
       body: 'x'.repeat(7000)
     });
@@ -2006,12 +3490,18 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
     getProperties: () => ({ ...store }),
     setProperty: (key, value) => {
       store[key] = value;
+    },
+    setProperties: (values) => {
+      Object.assign(store, values);
     }
   };
   context.PropertiesService = {
     getScriptProperties: () => scriptProperties
   };
-  context.formatResult_ = () => 'new report';
+  context.formatResult_ = (_result, includeExtractionSnapshot) => {
+    assert.equal(includeExtractionSnapshot, false);
+    return 'new report';
+  };
   let flushes = 0;
   context.flushPendingReports_ = () => {
     flushes += 1;
@@ -2024,12 +3514,104 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
   };
 
   context.queuePendingReports_([{
-    fileUrl: 'https://drive.test/abcdefghijklmnopqrstuvwxyz123456'
+    status: 'ERROR',
+    fileUrl: 'https://drive.test/abcdefghijklmnopqrstuvwxyz123456',
+    extracted: {
+      ...validInvoice(),
+      sheet_values: [{ value: 'x'.repeat(20000) }]
+    }
   }]);
 
   assert.equal(flushes, 1);
-  assert.equal(Object.keys(store).length, 1);
-  assert.match(Object.values(store)[0], /new report/);
+  assert.ok(Object.values(store).some((value) => /new report/.test(value)));
+}
+
+function testPendingReportOutboxChunksLargeExtractionSnapshots() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  const reportPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.PENDING_REPORT_PREFIX', context
+  );
+  const snapshotPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.PENDING_REPORT_SNAPSHOT_PREFIX', context
+  );
+  const correlationId = 'abcdefghijklmnopqrstuvwxyz123456';
+  const extraction = {
+    ...validInvoice(),
+    consumption_description: 'x'.repeat(20000),
+    sheet_values: [{
+      header: 'Detailed reading',
+      value: 'x'.repeat(9000)
+    }]
+  };
+  const snapshot = JSON.stringify(extraction);
+  assert.ok(Buffer.byteLength(snapshot, 'utf8') > 8000);
+  const { store } = installScriptPropertyStore(context);
+
+  context.queuePendingReports_([{
+    status: 'ERROR',
+    fileUrl: 'https://drive.test/' + correlationId,
+    originalName: 'invoice.pdf',
+    extracted: extraction,
+    rollbackCompleted: true,
+    actions: 'Automatic rollback completed.',
+    problem: 'Spreadsheet verification failed.',
+    recommendedAction: 'Review the recovered PDF, then retry the import.',
+    supplierProfilesUrl: 'https://drive.test/supplier-profiles',
+    retryUrl: 'https://script.test/retry'
+  }]);
+
+  const queued = JSON.parse(store[`${reportPrefix}${correlationId}`]);
+  assert.equal(queued.body.includes(snapshot), false);
+  assert.ok(Buffer.byteLength(queued.body, 'utf8') < 8000);
+  assert.match(queued.body, /Field truncated; inspect the source PDF/);
+  assert.match(queued.body, /Actions taken: Automatic rollback completed/);
+  assert.match(queued.body, /Review the recovered PDF, then retry the import/);
+  assert.match(queued.body, /Supplier profiles and proposals: https:\/\/drive\.test\/supplier-profiles/);
+  assert.match(queued.body, /Retry import: https:\/\/script\.test\/retry/);
+  assert.ok(queued.extractionSnapshotChunks > 1);
+  const storedSnapshot = Array.from({ length: queued.extractionSnapshotChunks },
+    (_, index) => store[`${snapshotPrefix}${correlationId}_` +
+      `${queued.extractionSnapshotId}_${index}`]
+  ).join('');
+  assert.equal(storedSnapshot, snapshot);
+
+  context.sendReportBodies_ = () => {
+    throw new Error('mail unavailable');
+  };
+  assert.throws(() => context.flushPendingReports_(), /mail unavailable/);
+  assert.ok(store[`${reportPrefix}${correlationId}`]);
+  assert.ok(Object.keys(store).some((key) => key.startsWith(snapshotPrefix)));
+
+  const delivered = [];
+  context.sendReportBodies_ = (bodies) => delivered.push(...bodies);
+  assert.equal(context.flushPendingReports_().sent, 1);
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /Actions taken: Automatic rollback completed/);
+  assert.match(delivered[0], /Retry import: https:\/\/script\.test\/retry/);
+  assert.ok(delivered[0].endsWith('Extracted snapshot: ' + snapshot));
+  assert.equal(Object.keys(store).filter((key) =>
+    key.startsWith(reportPrefix) || key.startsWith(snapshotPrefix)
+  ).length, 0);
+}
+
+function testPendingReportTruncationPreservesOperatorSection() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  const operatorSection = [
+    'Actions taken: Automatic rollback completed.',
+    'Issue and recommended action: Review the recovered PDF.',
+    'Supplier profiles and proposals: https://drive.test/supplier-profiles',
+    'Retry import: https://script.test/retry'
+  ].join('\n');
+  const body = 'Consumption or contributions: ' + 'x'.repeat(20000) +
+    '\n' + operatorSection;
+
+  const truncated = context.truncatePendingReportBody_(body);
+
+  assert.ok(Buffer.byteLength(JSON.stringify({ body: truncated }), 'utf8') <= 8000);
+  assert.match(truncated, /Report truncated; inspect the source PDF/);
+  assert.ok(truncated.endsWith(operatorSection));
 }
 
 function testLockAndLogContracts() {
@@ -2220,6 +3802,70 @@ function testSingleFileProcessesOnlyTheValidatedTarget() {
   assert.deepEqual(calls, ['flush', 'process']);
 }
 
+function testSingleFilePersistsWhenOperatorLinksFail() {
+  const file = { getId: () => 'file-id' };
+  const rootFolder = {};
+  const result = { status: 'IMPORTED' };
+  const calls = [];
+  const linkFailureEvents = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder,
+      getFileById: () => file
+    },
+    LockService: {
+      getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} })
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.logCatalogEvent_ = (event, details) => {
+    if (event === 'catalog-operator-links-failed') {
+      linkFailureEvents.push(details);
+    }
+  };
+  context.describeFileForLog_ = () => ({ fileId: 'file-id' });
+  context.logCatalogResult_ = (candidate, actual) => {
+    assert.equal(candidate, file);
+    assert.equal(actual, result);
+    calls.push('log-result');
+  };
+  context.hasMutationJournal_ = () => false;
+  context.isDirectIntakePdf_ = () => true;
+  context.flushPendingReports_ = () => calls.push('flush');
+  context.loadDriveAgentsPolicy_ = () => 'policy';
+  context.loadIntakeFileState_ = () => ({ state: 'initial' });
+  context.markIntakeFileProcessing_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.processIntakeFile_ = () => {
+    calls.push('process');
+    return result;
+  };
+  context.addOperatorLinksToResult_ = () => {
+    calls.push('links');
+    throw new Error('profile lookup unavailable');
+  };
+  context.persistCatalogResult_ = (_state, candidate, folder, actual) => {
+    assert.equal(candidate, file);
+    assert.equal(folder, rootFolder);
+    assert.equal(actual, result);
+    calls.push('persist');
+  };
+  context.finalizeCatalogResults_ = (_state, results) => {
+    assert.equal(results.length, 1);
+    assert.equal(results[0], result);
+    calls.push('finalize');
+  };
+
+  assert.equal(context.processSingleIntakeFile('file-id'), result);
+  assert.deepEqual(calls, [
+    'flush', 'process', 'links', 'persist', 'log-result', 'finalize'
+  ]);
+  assert.equal(linkFailureEvents.length, 1);
+  assert.equal(linkFailureEvents[0].fileId, 'file-id');
+  assert.equal(linkFailureEvents[0].reason, 'profile lookup unavailable');
+}
+
 function testSingleFileRecoversOnlyTargetJournal() {
   const file = { getId: () => 'file-id' };
   const rootFolder = {};
@@ -2287,7 +3933,18 @@ function testSingleFileStopsWhenTargetJournalRemains() {
 }
 
 testFormulaLikeTextIsWrittenLiterally();
+testManagedSupplierProfileWorkspaceIdentityIsRequired();
+testSupplierProfilesAreOmittedWithoutWorkspaceState();
+testSupplierProfilesSkipStateLookupForMinimalRootAdapter();
+testSupplierProfileWorkspaceRejectsIncompleteState();
+testSupplierProfileWorkspaceRejectsSameNamedReplacement();
+testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
+testSupplierProfileContextLimitIncludesRenderedMetadata();
+testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
+testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
+testSupplierDefaultsUseRuntimeTargetHeaders();
+testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
@@ -2296,6 +3953,10 @@ testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testEmailReportIncludesSoftwareVersion();
+testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
+testPreExtractionErrorReportKeepsDataUnavailable();
+testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
+testDestinationFolderCreationCheckpointsEachCreatedPath();
 testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
@@ -2305,14 +3966,23 @@ testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
+testMutationJournalCapturesValidatedReportingContextBeforeMutations();
+testMutationJournalPersistsFailureStageAtProcessingCheckpoints();
+testMutationJournalChunksLargeValidatedExtractionSnapshots();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
+testRuntimeExhaustionPersistsOperatorLinks();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
+testRecoveryMarksUnmarkedRowsAsIncomplete();
+testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
+testDetailedCostSheetValuesOverrideBroadReconciliationValues();
+testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
+testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement();
 testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
@@ -2329,13 +3999,18 @@ testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
 testReferenceMonthVerificationAcceptsSheetNumericCoercion();
 testFormulaTotalMustReconcileWithExtraction();
+testSupplementaryValuesCannotOverrideValidatedInvoiceTotal();
+testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();
+testPendingReportOutboxChunksLargeExtractionSnapshots();
+testPendingReportTruncationPreservesOperatorSection();
 testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
 testSingleFilePreflightsTargetBeforeGlobalSideEffects();
 testSingleFileProcessesOnlyTheValidatedTarget();
+testSingleFilePersistsWhenOperatorLinksFail();
 testSingleFileRecoversOnlyTargetJournal();
 testSingleFileStopsWhenTargetJournalRemains();
 

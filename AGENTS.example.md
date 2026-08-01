@@ -76,8 +76,19 @@ manual review.
 - Add a working Drive link in the `Source file` column.
 - Import only data present in the document and existing sheet headers; never
   invent columns, consumption values, costs, or tax rates.
+- Store identifiers, customer/account codes, supply-point codes, names,
+  descriptions, dates, and other non-quantitative values as literal text even
+  when they contain only digits. Preserve leading zeroes and every printed
+  character; use numbers only for quantities, money, rates, and measurements.
+- Store the reference month as the two-character text value `mm` (`01` through
+  `12`), never as an unpadded or numeric value.
 - Keep a printed contract number and customer/client code in separate destination
   columns. Never substitute one for the other.
+- For invoice ownership, accept either a printed contract number or a printed
+  customer/client/account code; `ID UTENTE` is a customer-code label. Import
+  both when they are present. The absence of one is not an extraction problem.
+  Leave the PDF in intake for identity review only when neither identifier is
+  available.
 - Treat labels as authoritative in the document's supply-country language:
   the localized equivalent of `customer code` belongs only in the customer
   code column, while the localized equivalent of `contract code` or `contract
@@ -89,9 +100,15 @@ manual review.
   contract-labelled value is explicitly printed.
 - Verify that consumption cost + non-consumption cost + VAT equals the total.
   A difference beyond a few cents blocks the import.
+- A note that line items include VAT is not itself an uncertainty when the
+  invoice shows VAT and total explicitly and that reconciliation succeeds.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
+- Treat top-level consumption, non-consumption, VAT, and total values as
+  reconciliation data. For a non-formula detailed cost header, return the
+  printed line item in `sheet_values`; that exact row value is authoritative
+  over a broad reconciliation total for the same destination cell.
 - For electricity invoices, inspect every consumption and cost table for
   time-of-use bands. When the document reports F1, F2, and F3 separately,
   import three separate consumption values and three separate cost values into
@@ -119,3 +136,20 @@ review when provenance is ambiguous.
 Send email only for a new outcome or a recovered pending outcome. Each outcome
 must include status, original file, assigned name, destination, extracted data,
 costs, reconciliation, actions taken, and one recommended next action.
+
+## Supplier profiles
+
+- Store supplier-specific guidance only in the localized supplier-profile
+  workspace created by the installer. Only the exact approved profile file is
+  trusted at run time; pending proposals are review material and must never
+  influence an import.
+- A profile must identify the official supplier site and every known bill-reading
+  guide URL, with the bill-version or date covered by each guide. Mark a guide
+  as `official` or `external`, record the verification date, and say explicitly
+  when no official guide was found.
+- When an official guide is unavailable, create a proposal for human review;
+  research official domains first and label any external fallback as untrusted.
+  Never promote, overwrite, or follow a proposed profile automatically.
+- To approve a proposal, manually review it and replace the supplier's approved
+  profile file; retain the previous file as an archive. The next import reads
+  only that reviewed profile.

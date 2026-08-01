@@ -129,6 +129,20 @@ pair remained `ACTIVE`, and final installation validation completed. No test
 document identifiers, installation IDs, or extracted private values are kept
 in this repository.
 
+On 2026-07-31, the `0.3.1` supplier-profile, ownership, literal-value,
+reference-month, and reconciliation policy changes were applied to the existing
+Drive `AGENTS.md` and read back successfully. The update preserved the
+installation-specific policy content and did not deploy source code or alter
+processing triggers.
+
+On 2026-08-01, the existing Drive `AGENTS.md` was updated and read back
+successfully to require explicit absence evidence before the reviewed ILIAD
+`Spese d'incasso` zero default can apply, retain a printed zero as a printed
+value, and leave unreadable or ambiguous charges for review. The conflicting
+reference-month wording was corrected to require literal `mm` text (`01`
+through `12`). This operational policy update did not deploy source code or
+alter processing triggers.
+
 ## Cadence and cost
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
@@ -171,7 +185,10 @@ each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
 headers, and business rules before any Drive or Sheet mutation.
 Post-write verification treats `6`, `06`, and the numeric value `6` as the same
-reference month, because Sheets can coerce that field; this equivalence is not
+reference month. When a verification comparison fails, the recipient report
+includes the affected field and the expected and observed values (plus a money
+tolerance where applicable). Other failures report the phase, reason, and
+recommended action rather than inventing a comparison. This equivalence is not
 applied to invoice, contract, or customer identifiers.
 
 ## Operations
@@ -186,6 +203,12 @@ applied to invoice, contract, or customer identifiers.
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
+
+When a report contains the localized supplier-profile link, open that folder to
+review a pending profile or the approved profile. The localized retry-import
+link opens the Apps Script project at
+`retryFailedUtilitiesCataloging`; it is deliberately an owner-controlled manual
+execution, not a public retry endpoint.
 
 After a transport repair, run `installAutomationTriggers` to restore all three
 triggers. It preserves matching schedules, removes duplicates, and refreshes
@@ -240,6 +263,17 @@ Every structured log event, setup-status response, and per-file email report
 includes the running `MAJOR.MINOR.PATCH` application version. This identifies
 the exact source version that processed a PDF even when email delivery is
 retried later from the durable outbox.
+
+When a later Drive or spreadsheet step fails after Gemini has returned a valid
+extraction, the configured-recipient email preserves that extracted snapshot
+as **available, not imported**. It also names the failed phase, confirms
+whether the extraction reconciliation passed, and reports rollback state. A
+formula-total mismatch also reports the formula column, expected value, observed
+value, and tolerance so the spreadsheet template can be diagnosed after the
+rollback. The
+corresponding Cloud Logging event carries the opaque file ID, error type and
+category, failure stage, and standard event/component/version metadata; it
+never includes extracted values.
 
 Apps Script can take a short time to display log entries. For a reliable view,
 open **View in Cloud Logging** from an execution, or query the linked Cloud
