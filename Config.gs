@@ -14,6 +14,9 @@ const CONFIG = Object.freeze({
   // platform accounting and reject oversized configuration before bootstrap.
   MAX_AUTOMATION_CONFIG_BYTES: 8 * 1024,
   MUTATION_JOURNAL_PAYLOAD_CHUNK_CHARS: 2048,
+  // Keep each queued-report snapshot chunk safely below the 9 KB
+  // PropertiesService value limit, including multi-byte extracted text.
+  PENDING_REPORT_SNAPSHOT_CHUNK_CHARS: 2048,
   // Script Properties have a 500 KB total limit. Reserve most of that space
   // for configuration, per-file state, mutation journals, and transport data.
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
@@ -52,6 +55,7 @@ const CONFIG = Object.freeze({
     INTAKE_FILE_STATE: 'INTAKE_FILE_STATE',
     INTAKE_FILE_STATE_PREFIX: 'INTAKE_FILE_STATE_',
     PENDING_REPORT_PREFIX: 'PENDING_REPORT_',
+    PENDING_REPORT_SNAPSHOT_PREFIX: 'PENDING_REPORT_SNAPSHOT_',
     MUTATION_JOURNAL_PREFIX: 'MUTATION_JOURNAL_',
     MUTATION_PAYLOAD_PREFIX: 'MUTATION_PAYLOAD_',
     MUTATION_EXTRACTION_PAYLOAD_PREFIX: 'MUTATION_EXTRACTION_PAYLOAD_',

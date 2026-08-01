@@ -3445,29 +3445,67 @@ function queuePendingReports_(results) {
     const correlationId = fileIdMatch ? fileIdMatch[0] :
       String(Date.now()) + '-' + String(index);
     const propertyKey = prefix + correlationId;
-    const propertyValue = JSON.stringify({
-      body: truncatePendingReportBody_(formatResult_(result))
-    });
+    const extractionSnapshot = getExtractionSnapshotForErrorResult_(result);
+    const snapshot = extractionSnapshot ?
+      buildPendingReportSnapshot_(correlationId, extractionSnapshot, index) : null;
+    const queued = {
+      body: truncatePendingReportBody_(formatResult_(result, false))
+    };
+    if (snapshot) {
+      queued.extractionSnapshotId = snapshot.id;
+      queued.extractionSnapshotChunks = snapshot.count;
+    }
+    const propertyValue = JSON.stringify(queued);
     const existingValue = existingProperties[propertyKey] || '';
     const projectedBytes = pendingReportStorageBytes_(existingProperties, prefix) -
       propertyStorageBytes_(propertyKey, existingValue) +
-      propertyStorageBytes_(propertyKey, propertyValue);
+      propertyStorageBytes_(propertyKey, propertyValue) -
+      pendingReportSnapshotStorageBytes_(existingProperties, correlationId) +
+      (snapshot ? pendingReportPropertiesStorageBytes_(snapshot.values) : 0);
     if (projectedBytes > CONFIG.MAX_PENDING_REPORT_BYTES) {
       flushPendingReports_();
       existingProperties = scriptProperties.getProperties();
     }
-    scriptProperties.setProperty(propertyKey, propertyValue);
-    existingProperties[propertyKey] = propertyValue;
+    if (snapshot) {
+      scriptProperties.setProperties(snapshot.values, false);
+    }
+    try {
+      scriptProperties.setProperty(propertyKey, propertyValue);
+    } catch (error) {
+      if (snapshot) {
+        deletePendingReportSnapshotChunksByPrefix_(scriptProperties, snapshot.prefix);
+      }
+      throw error;
+    }
+    clearPendingReportSnapshotChunks_(scriptProperties, correlationId,
+      snapshot ? snapshot.id : '');
+    existingProperties = scriptProperties.getProperties();
   });
 }
 
 function pendingReportStorageBytes_(properties, prefix) {
+  return pendingReportPropertiesStorageBytes_(Object.keys(properties)
+    .filter(function (key) { return key.indexOf(prefix) === 0; })
+    .reduce(function (pendingProperties, key) {
+      pendingProperties[key] = properties[key];
+      return pendingProperties;
+    }, {}));
+}
+
+function pendingReportPropertiesStorageBytes_(properties) {
   return Object.keys(properties).reduce(function (total, key) {
-    if (key.indexOf(prefix) !== 0) {
-      return total;
-    }
     return total + propertyStorageBytes_(key, properties[key]);
   }, 0);
+}
+
+function pendingReportSnapshotStorageBytes_(properties, correlationId) {
+  const snapshotPrefix = getPendingReportSnapshotCorrelationPrefix_(correlationId);
+  return pendingReportPropertiesStorageBytes_(Object.keys(properties)
+    .filter(function (key) { return key.indexOf(snapshotPrefix) === 0; })
+    .reduce(function (snapshotProperties, key) {
+      snapshotProperties[key] = properties[key];
+      return snapshotProperties;
+    }, {}));
 }
 
 function propertyStorageBytes_(key, value) {
@@ -3482,7 +3520,8 @@ function flushPendingReports_() {
   const properties = scriptProperties.getProperties();
   const prefix = CONFIG.PROPERTY_KEYS.PENDING_REPORT_PREFIX;
   const keys = Object.keys(properties).filter(function (key) {
-    return key.indexOf(prefix) === 0;
+    return key.indexOf(prefix) === 0 &&
+      key.indexOf(CONFIG.PROPERTY_KEYS.PENDING_REPORT_SNAPSHOT_PREFIX) !== 0;
   }).sort();
   if (keys.length === 0) {
     return { sent: 0 };
@@ -3500,7 +3539,7 @@ function flushPendingReports_() {
         if (!queued || typeof queued.body !== 'string') {
           throw new Error('missing body');
         }
-        body = queued.body;
+        body = hydratePendingReportBody_(properties, key.slice(prefix.length), queued);
       } catch (error) {
         body = 'A pending catalog report could not be decoded. ' +
           'Inspect Cloud Logging using correlation key ' +
@@ -3518,10 +3557,93 @@ function flushPendingReports_() {
     sendReportBodies_(bodies);
     batchKeys.forEach(function (key) {
       scriptProperties.deleteProperty(key);
+      clearPendingReportSnapshotChunks_(scriptProperties, key.slice(prefix.length));
     });
     sent += bodies.length;
   }
   return { sent: sent };
+}
+
+function getExtractionSnapshotForErrorResult_(result) {
+  const extracted = result.extracted || {};
+  return result.status === 'ERROR' && Object.keys(extracted).length > 0 ?
+    formatExtractionSnapshot_(extracted) : '';
+}
+
+function buildPendingReportSnapshot_(correlationId, snapshot, index) {
+  const id = String(Date.now()) + '-' + String(index);
+  const prefix = getPendingReportSnapshotPrefix_(correlationId, id);
+  const size = CONFIG.PENDING_REPORT_SNAPSHOT_CHUNK_CHARS;
+  const values = {};
+  let chunk = '';
+  let count = 0;
+  Array.from(snapshot).forEach(function (character) {
+    if (chunk && chunk.length + character.length > size) {
+      values[prefix + count] = chunk;
+      count += 1;
+      chunk = '';
+    }
+    chunk += character;
+  });
+  if (chunk) {
+    values[prefix + count] = chunk;
+    count += 1;
+  }
+  return { id: id, prefix: prefix, count: count, values: values };
+}
+
+function getPendingReportSnapshotCorrelationPrefix_(correlationId) {
+  return CONFIG.PROPERTY_KEYS.PENDING_REPORT_SNAPSHOT_PREFIX + correlationId + '_';
+}
+
+function getPendingReportSnapshotPrefix_(correlationId, snapshotId) {
+  return getPendingReportSnapshotCorrelationPrefix_(correlationId) + snapshotId + '_';
+}
+
+function hydratePendingReportBody_(properties, correlationId, queued) {
+  if (!queued.extractionSnapshotChunks && !queued.extractionSnapshotId) {
+    return queued.body;
+  }
+  if (typeof queued.extractionSnapshotId !== 'string' ||
+    !queued.extractionSnapshotId ||
+    typeof queued.extractionSnapshotChunks !== 'number' ||
+    queued.extractionSnapshotChunks < 1 ||
+    Math.floor(queued.extractionSnapshotChunks) !== queued.extractionSnapshotChunks) {
+    throw new Error('invalid extraction snapshot metadata');
+  }
+  const prefix = getPendingReportSnapshotPrefix_(correlationId,
+    queued.extractionSnapshotId);
+  const snapshot = Array.from({ length: queued.extractionSnapshotChunks },
+    function (_, index) {
+      const chunk = properties[prefix + index];
+      if (chunk === undefined || chunk === '') {
+        throw new Error('extraction snapshot is incomplete');
+      }
+      return chunk;
+    }).join('');
+  return queued.body + '\n' + getLocalization_().reportLabels.extractedSnapshot +
+    ': ' + snapshot;
+}
+
+function clearPendingReportSnapshotChunks_(scriptProperties, correlationId,
+  keepSnapshotId) {
+  const correlationPrefix = getPendingReportSnapshotCorrelationPrefix_(correlationId);
+  const keepPrefix = keepSnapshotId ?
+    getPendingReportSnapshotPrefix_(correlationId, keepSnapshotId) : '';
+  Object.keys(scriptProperties.getProperties()).forEach(function (key) {
+    if (key.indexOf(correlationPrefix) === 0 &&
+      (!keepPrefix || key.indexOf(keepPrefix) !== 0)) {
+      scriptProperties.deleteProperty(key);
+    }
+  });
+}
+
+function deletePendingReportSnapshotChunksByPrefix_(scriptProperties, prefix) {
+  Object.keys(scriptProperties.getProperties()).forEach(function (key) {
+    if (key.indexOf(prefix) === 0) {
+      scriptProperties.deleteProperty(key);
+    }
+  });
 }
 
 function truncatePendingReportBody_(body) {
@@ -3585,7 +3707,7 @@ function logCatalogResult_(file, result) {
   });
 }
 
-function formatResult_(result) {
+function formatResult_(result, includeExtractionSnapshot) {
   const data = result.extracted || {};
   const localization = getLocalization_();
   const labels = localization.reportLabels;
@@ -3601,8 +3723,8 @@ function formatResult_(result) {
   const extractedDataAvailable = Boolean(
     data && Object.keys(data).length > 0
   );
-  const extractionSnapshot = result.status === 'ERROR' && extractedDataAvailable ?
-    labels.extractedSnapshot + ': ' + formatExtractionSnapshot_(data) : '';
+  const extractionSnapshot = includeExtractionSnapshot !== false ?
+    getExtractionSnapshotForErrorResult_(result) : '';
   const errorContext = result.status === 'ERROR' ? [
     labels.failureStage + ': ' + localizeFailureStage_(result.failureStage, labels),
     labels.extractedData + ': ' + (extractedDataAvailable ?
@@ -3623,7 +3745,7 @@ function formatResult_(result) {
     labels.softwareVersion + ': ' + CONFIG.APP_VERSION,
     labels.status + ': ' + localizeStatus_(result.status, localization),
     errorContext.join('\n'),
-    extractionSnapshot,
+    extractionSnapshot ? labels.extractedSnapshot + ': ' + extractionSnapshot : '',
     labels.originalFile + ': ' +
       oneLineReportText_(result.originalName) + ' (' + fileLink + ')',
     labels.assignedName + ': ' +

@@ -3408,7 +3408,7 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
     context
   );
   const store = {};
-  for (let index = 0; index < 40; index += 1) {
+  for (let index = 0; index < 35; index += 1) {
     store[`${prefix}existing-${index}`] = JSON.stringify({
       body: 'x'.repeat(7000)
     });
@@ -3417,12 +3417,18 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
     getProperties: () => ({ ...store }),
     setProperty: (key, value) => {
       store[key] = value;
+    },
+    setProperties: (values) => {
+      Object.assign(store, values);
     }
   };
   context.PropertiesService = {
     getScriptProperties: () => scriptProperties
   };
-  context.formatResult_ = () => 'new report';
+  context.formatResult_ = (_result, includeExtractionSnapshot) => {
+    assert.equal(includeExtractionSnapshot, false);
+    return 'new report';
+  };
   let flushes = 0;
   context.flushPendingReports_ = () => {
     flushes += 1;
@@ -3435,12 +3441,71 @@ function testPendingReportOutboxFlushesBeforeItsStorageBudget() {
   };
 
   context.queuePendingReports_([{
-    fileUrl: 'https://drive.test/abcdefghijklmnopqrstuvwxyz123456'
+    status: 'ERROR',
+    fileUrl: 'https://drive.test/abcdefghijklmnopqrstuvwxyz123456',
+    extracted: {
+      ...validInvoice(),
+      sheet_values: [{ value: 'x'.repeat(20000) }]
+    }
   }]);
 
   assert.equal(flushes, 1);
-  assert.equal(Object.keys(store).length, 1);
-  assert.match(Object.values(store)[0], /new report/);
+  assert.ok(Object.values(store).some((value) => /new report/.test(value)));
+}
+
+function testPendingReportOutboxChunksLargeExtractionSnapshots() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  const reportPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.PENDING_REPORT_PREFIX', context
+  );
+  const snapshotPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.PENDING_REPORT_SNAPSHOT_PREFIX', context
+  );
+  const correlationId = 'abcdefghijklmnopqrstuvwxyz123456';
+  const extraction = {
+    ...validInvoice(),
+    sheet_values: [{
+      header: 'Detailed reading',
+      value: 'x'.repeat(9000)
+    }]
+  };
+  const snapshot = JSON.stringify(extraction);
+  assert.ok(Buffer.byteLength(snapshot, 'utf8') > 8000);
+  const { store } = installScriptPropertyStore(context);
+
+  context.queuePendingReports_([{
+    status: 'ERROR',
+    fileUrl: 'https://drive.test/' + correlationId,
+    originalName: 'invoice.pdf',
+    extracted: extraction,
+    rollbackCompleted: true
+  }]);
+
+  const queued = JSON.parse(store[`${reportPrefix}${correlationId}`]);
+  assert.equal(queued.body.includes(snapshot), false);
+  assert.ok(queued.extractionSnapshotChunks > 1);
+  const storedSnapshot = Array.from({ length: queued.extractionSnapshotChunks },
+    (_, index) => store[`${snapshotPrefix}${correlationId}_` +
+      `${queued.extractionSnapshotId}_${index}`]
+  ).join('');
+  assert.equal(storedSnapshot, snapshot);
+
+  context.sendReportBodies_ = () => {
+    throw new Error('mail unavailable');
+  };
+  assert.throws(() => context.flushPendingReports_(), /mail unavailable/);
+  assert.ok(store[`${reportPrefix}${correlationId}`]);
+  assert.ok(Object.keys(store).some((key) => key.startsWith(snapshotPrefix)));
+
+  const delivered = [];
+  context.sendReportBodies_ = (bodies) => delivered.push(...bodies);
+  assert.equal(context.flushPendingReports_().sent, 1);
+  assert.equal(delivered.length, 1);
+  assert.ok(delivered[0].endsWith('Extracted snapshot: ' + snapshot));
+  assert.equal(Object.keys(store).filter((key) =>
+    key.startsWith(reportPrefix) || key.startsWith(snapshotPrefix)
+  ).length, 0);
 }
 
 function testLockAndLogContracts() {
@@ -3832,6 +3897,7 @@ testSupplementaryValuesCannotOverrideValidatedInvoiceTotal();
 testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();
+testPendingReportOutboxChunksLargeExtractionSnapshots();
 testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
