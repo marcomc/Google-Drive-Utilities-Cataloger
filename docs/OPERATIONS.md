@@ -135,6 +135,14 @@ Drive `AGENTS.md` and read back successfully. The update preserved the
 installation-specific policy content and did not deploy source code or alter
 processing triggers.
 
+On 2026-08-01, the existing Drive `AGENTS.md` was updated and read back
+successfully to require explicit absence evidence before the reviewed ILIAD
+`Spese d'incasso` zero default can apply, retain a printed zero as a printed
+value, and leave unreadable or ambiguous charges for review. The conflicting
+reference-month wording was corrected to require literal `mm` text (`01`
+through `12`). This operational policy update did not deploy source code or
+alter processing triggers.
+
 ## Cadence and cost
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and

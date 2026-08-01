@@ -101,6 +101,9 @@
   without requiring the old resource to still exist. Separate the mutation,
   checkpoint, and downstream refresh error phases; never mark a mutation
   complete from a catch block that also handles the mutation itself.
+- For a replacement-row rollback, snapshot and restore the original cell number
+  formats as well as values and formulas. Exercise a failed replacement after a
+  temporary format change so identifiers retain their original presentation.
 - When rebuilding managed charts, preserve public state beyond the chart
   options map, including source ranges, geometry, chart type, range merge
   strategy, header count, hidden-dimension strategy, null interpolation, and
