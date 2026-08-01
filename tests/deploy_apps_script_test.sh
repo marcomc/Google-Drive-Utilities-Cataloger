@@ -226,7 +226,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | post-update-version-lag | post-update-version-stale | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | post-update-version-lag | post-update-version-stale | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
       "${call_count}" -le 2 ]]; then
       version_number=4
