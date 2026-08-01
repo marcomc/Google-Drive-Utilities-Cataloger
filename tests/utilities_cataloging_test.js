@@ -1181,6 +1181,12 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /two-character text value in the exact format mm/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
+  assert.match(prompt,
+    /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
+  assert.match(prompt,
+    /If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why/);
+  assert.doesNotMatch(prompt,
+    /If a field is genuinely not printed or not applicable, leave it absent and add a concise problem/);
   assert.match(prompt, /recurring Iliad Internet charges/);
   assert.match(prompt, /localized supplier field defaults/);
   assert.match(prompt, /numeric value 0/);

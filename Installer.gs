@@ -820,6 +820,7 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
   const nameKey = key + 'Name';
   const parentKey = key + 'ParentId';
   const statusKey = key + 'Status';
+  const ownershipTokenKey = key + 'OwnershipToken';
   const isNewTemplateFolder = state && key === 'templateFolder' &&
     state.profileRootStatus === 'managed' &&
     state.templateFolderStatus === undefined;
@@ -833,6 +834,7 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
     state[nameKey] = name;
     state[statusKey] = 'planned';
     state[idKey] = '';
+    state[ownershipTokenKey] = createInstallerSupplierProfileFolderOwnershipToken_();
     saveSupplierProfileWorkspaceState_(properties, state);
   } else if (state[statusKey] !== undefined) {
     assertInstallerSupplierProfileFolderState_(state, parent, name, key);
@@ -849,12 +851,18 @@ function ensureInstallerManagedSupplierProfileFolder_(parent, name, key,
   if (state[statusKey] !== 'planned') {
     throw new Error('The supplier profile folder state is invalid.');
   }
-  if (matches.length > 1 || (matches.length === 1 &&
+  const marker = getInstallerSupplierProfileFolderOwnershipMarker_(
+    state[ownershipTokenKey]
+  );
+  if (matches.length === 1 && (matches[0].getDescription() !== marker ||
     !isPristineInstallerSupplierProfileFolder_(matches[0]))) {
-    throw new Error('The planned supplier profile folder is not pristine; ' +
-      'refusing to adopt it.');
+    throw new Error('The planned supplier profile folder does not match the ' +
+      'installer-owned staging marker; refusing to adopt it.');
   }
   const folder = matches.length === 1 ? matches[0] : parent.createFolder(name);
+  if (matches.length === 0) {
+    folder.setDescription(marker);
+  }
   state[idKey] = folder.getId();
   state[statusKey] = 'managed';
   saveSupplierProfileWorkspaceState_(properties, state);
@@ -878,6 +886,26 @@ function getSingleNamedInstallerFolder_(parent, name) {
 
 function isPristineInstallerSupplierProfileFolder_(folder) {
   return !folder.getFiles().hasNext() && !folder.getFolders().hasNext();
+}
+
+function createInstallerSupplierProfileFolderOwnershipToken_() {
+  const token = Utilities.getUuid();
+  if (!isInstallerSupplierProfileFolderOwnershipToken_(token)) {
+    throw new Error('Could not generate a valid supplier profile folder ownership token.');
+  }
+  return token;
+}
+
+function getInstallerSupplierProfileFolderOwnershipMarker_(token) {
+  if (!isInstallerSupplierProfileFolderOwnershipToken_(token)) {
+    throw new Error('The planned supplier profile folder state is incomplete.');
+  }
+  return 'Google Drive Utilities Cataloger supplier profile ownership: ' + token;
+}
+
+function isInstallerSupplierProfileFolderOwnershipToken_(token) {
+  return typeof token === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token);
 }
 
 function getSupplierProfileWorkspaceState_(properties) {
@@ -905,11 +933,22 @@ function saveSupplierProfileWorkspaceState_(properties, state) {
 }
 
 function assertInstallerSupplierProfileFolderState_(state, parent, name, key) {
+  const status = state[key + 'Status'];
+  const id = state[key + 'Id'];
   if ((key === 'profileRoot' && state.rootFolderId !== parent.getId()) ||
     state[key + 'ParentId'] !== parent.getId() ||
     state[key + 'Name'] !== name) {
     throw new Error('The supplier profile folder state does not match the ' +
       'configured parent and name.');
+  }
+  if (status === 'managed' && (typeof id !== 'string' || !id)) {
+    throw new Error('The managed supplier profile folder state is incomplete.');
+  }
+  if (status === 'planned' && (id !== '' ||
+    !isInstallerSupplierProfileFolderOwnershipToken_(
+      state[key + 'OwnershipToken']
+    ))) {
+    throw new Error('The planned supplier profile folder state is incomplete.');
   }
 }
 
