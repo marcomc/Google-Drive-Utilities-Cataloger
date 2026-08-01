@@ -1736,6 +1736,52 @@ function testMutationRecoveryStages() {
   assert.deepEqual(legacyExistingRowAfterRename.refreshedRows, [3]);
 }
 
+function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
+  const context = loadCataloger();
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 10,
+    getUrl: () => 'https://drive.test/file-id'
+  };
+  const extraction = validInvoice();
+  const propertyStore = installScriptPropertyStore(context);
+  const journalKey = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  ) + file.getId();
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityData_ = () => extraction;
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.getDestinationFolder_ = () => {
+    const journal = JSON.parse(propertyStore.store[journalKey]);
+    assert.deepEqual(JSON.parse(JSON.stringify(journal.extracted)), extraction);
+    assert.equal(journal.extractionValidated, true);
+    assert.equal(journal.failureStage, 'preparing-drive-destination');
+    throw new Error('destination preparation interrupted');
+  };
+  context.describeError_ = (error) => error.message;
+  context.classifyCatalogErrorForLog_ = () => 'drive';
+  context.logCatalogEvent_ = () => {};
+
+  const interrupted = context.processIntakeFile_(file, {}, 'policy');
+  assert.equal(interrupted.status, 'ERROR');
+
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => ({ unmarkedRowMayRemain: false });
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+
+  const recovered = context.recoverMutationJournalForFile_({}, file.getId());
+  assert.deepEqual(JSON.parse(JSON.stringify(recovered.extracted)), extraction);
+  assert.equal(recovered.extractionValidated, true);
+  assert.equal(recovered.failureStage, 'preparing-drive-destination');
+}
+
 function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
   const fileId = 'source-file-id';
   const initialJournal = {
@@ -1977,6 +2023,39 @@ function testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched() {
   assert.ok(calls.includes('queue-report'));
   assert.ok(calls.includes('save-state'));
   assert.ok(calls.includes('log-recovered'));
+}
+
+function testRecoveryMarksUnmarkedRowsAsIncomplete() {
+  const context = loadCataloger();
+  const fileId = 'unmarked-row-file-id';
+  const file = {
+    getId: () => fileId,
+    getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/unmarked-row-file-id'
+  };
+  const journalPrefix = vm.runInContext(
+    'CONFIG.PROPERTY_KEYS.MUTATION_JOURNAL_PREFIX', context
+  );
+  const propertyStore = installScriptPropertyStore(context, {
+    [`${journalPrefix}${fileId}`]: JSON.stringify({
+      originalName: 'invoice.pdf',
+      stage: 'sheet-insert-planned'
+    })
+  });
+  context.DriveApp = { getFileById: () => file };
+  context.isFileInFolder_ = () => true;
+  context.rollbackJournalSheetRow_ = () => ({ unmarkedRowMayRemain: true });
+  context.recordIntakeFileOutcome_ = () => {};
+  context.queuePendingReports_ = () => {};
+  context.saveIntakeFileState_ = () => {};
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.recoverMutationJournalForFile_({}, fileId);
+
+  assert.equal(result.rollbackCompleted, false);
+  assert.match(result.actions, /Automatic rollback was incomplete/);
+  assert.match(result.actions, /unmarked spreadsheet row may remain/);
+  assert.equal(propertyStore.store[`${journalPrefix}${fileId}`], undefined);
 }
 
 function testAccessibleRecoveryFailureRequiresManualReview() {
@@ -3491,10 +3570,12 @@ testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
 testMutationRecoveryStages();
+testMutationJournalCapturesValidatedReportingContextBeforeMutations();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
 testMutationRecoveryReportsUnavailableFileOnce();
 testRuntimeExhaustionPersistsOperatorLinks();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
+testRecoveryMarksUnmarkedRowsAsIncomplete();
 testAccessibleRecoveryFailureRequiresManualReview();
 testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();

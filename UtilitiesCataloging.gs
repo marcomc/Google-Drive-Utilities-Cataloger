@@ -242,14 +242,17 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     }
 
     const assignedName = buildAssignedName_(extracted);
+    state.failureStage = 'preparing-drive-destination';
     saveMutationJournal_(file.getId(), {
       originalName: originalName,
       assignedName: assignedName,
       stage: 'planning',
+      extracted: extracted,
+      extractionValidated: state.extractionValidated,
+      failureStage: state.failureStage,
       updatedAt: Date.now()
     });
     state.mutationJournalStarted = true;
-    state.failureStage = 'preparing-drive-destination';
     const destination = getDestinationFolder_(rootFolder, extracted);
     state.createdFolderPath = (destination.createdFolders || []).join(', ');
     updateMutationJournal_(file.getId(), {
@@ -2976,7 +2979,14 @@ function recoverMutationJournalForFile_(
       'A previously interrupted mutation was recovered safely.',
       'Review the PDF in intake; the daily run can retry it on the next day.',
       journal.originalName || file.getName(),
-      { renamed: false, moved: false, imported: false }
+      {
+        renamed: false,
+        moved: false,
+        imported: sheetRecovery.unmarkedRowMayRemain,
+        extracted: journal.extracted || {},
+        extractionValidated: journal.extractionValidated === true,
+        failureStage: journal.failureStage || ''
+      }
     );
     if (journal.createdFolderPath) {
       result.actions += ' Empty destination folders may remain at ' +
