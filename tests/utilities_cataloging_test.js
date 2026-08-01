@@ -587,6 +587,10 @@ function testExtractionSchemaAndCalendarValidation() {
     ...onlyCustomerCode,
     problems: ['Codice contratto assente nel documento.']
   }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyContractNumber,
+    problems: ['Numero cliente assente']
+  }).valid, true);
 
   const noOwnershipIdentifier = {
     ...raw,
@@ -2329,6 +2333,7 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
   const context = loadCataloger();
   const layout = { headers: ['Date', 'Source', 'Total', 'Notes'], lookup: {} };
   const originalDate = new Date('2026-04-09T00:00:00Z');
+  const originalNumberFormats = ['dd/MM/yyyy', '@', '#,##0.00', '@'];
   const writes = [];
   const moves = [];
   const sourceRow = { row: 9, column: 1, numRows: 1, numColumns: 4 };
@@ -2339,7 +2344,8 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
           return {
             ...sourceRow,
             getValues: () => [[originalDate, 'ignored', 14.64, '=untrusted']],
-            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']]
+            getFormulas: () => [['', '=HYPERLINK("url";"invoice")', '', '']],
+            getNumberFormats: () => [originalNumberFormats]
           };
         }
         return { row, column, numRows, numColumns };
@@ -2347,7 +2353,8 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
       return {
         setFormula: (value) => writes.push(['formula', row, column, value]),
         setValue: (value) => writes.push(['value', row, column, value]),
-        setRichTextValue: (value) => writes.push(['rich', row, column, value])
+        setRichTextValue: (value) => writes.push(['rich', row, column, value]),
+        setNumberFormat: (value) => writes.push(['number-format', row, column, value])
       };
     },
     moveRows: (range, destination) => moves.push([range, destination])
@@ -2362,18 +2369,78 @@ function testExistingInvoicePayloadRestoresAndRepositions() {
     { getId: () => 'file-id' }, layout);
   assert.equal(moves.length, 1);
   assert.equal(moves[0][1], 4);
-  assert.equal(writes[0][0], 'value');
-  assert.equal(Object.prototype.toString.call(writes[0][3]), '[object Date]');
-  assert.deepEqual(writes[1], ['formula', 4, 2, '=HYPERLINK("url";"invoice")']);
-  assert.deepEqual(writes[2], ['value', 4, 3, 14.64]);
-  assert.equal(writes[3][0], 'rich');
-  assert.equal(writes[3][3].text, '=untrusted');
+  const restoredValues = writes.filter((entry) => entry[0] !== 'number-format');
+  assert.equal(restoredValues[0][0], 'value');
+  assert.equal(Object.prototype.toString.call(restoredValues[0][3]), '[object Date]');
+  assert.deepEqual(restoredValues[1], ['formula', 4, 2,
+    '=HYPERLINK("url";"invoice")']);
+  assert.deepEqual(restoredValues[2], ['value', 4, 3, 14.64]);
+  assert.equal(restoredValues[3][0], 'rich');
+  assert.equal(restoredValues[3][3].text, '=untrusted');
+  assert.deepEqual(writes.filter((entry) => entry[0] === 'number-format').map(
+    (entry) => entry[3]
+  ), originalNumberFormats);
 
   context.getInsertionRow_ = () => 12;
   context.findSpreadsheetRowBySourceFile_ = () => 11;
   assert.equal(context.repositionImportedRow_(sheet, 9, layout,
     '2026-05-08', { getId: () => 'file-id' }), 11);
   assert.equal(moves[1][1], 12);
+}
+
+function testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement() {
+  const context = loadCataloger();
+  const originalNumberFormat = '00000000';
+  let numberFormat = originalNumberFormat;
+  const layout = {
+    headerRow: 1,
+    headers: ['Contract number', 'Source file'],
+    lookup: { 'contract number': 1, 'source file': 2 }
+  };
+  const sheet = {
+    getSheetId: () => 7,
+    getRange: (row, column, numRows, numColumns) => {
+      if (numRows === 1 && numColumns === 2) {
+        return {
+          getValues: () => [['00001234', 'ignored']],
+          getFormulas: () => [['', '=HYPERLINK("url";"invoice")']],
+          getNumberFormats: () => [[numberFormat, '@']]
+        };
+      }
+      return {
+        setFormula: () => {},
+        setRichTextValue: () => {},
+        setValue: () => {},
+        setNumberFormat: (value) => {
+          if (column === 1) {
+            numberFormat = value;
+          }
+        }
+      };
+    }
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.getSheetLayout_ = () => layout;
+  context.findSpreadsheetRowBySourceFile_ = () => 2;
+  context.clearImportedLiteralCells_ = () => {};
+  context.updateMutationJournal_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+  context.writeInvoiceRow_ = () => {
+    context.setTextValueForHeaders_(sheet, 2, layout, [false, false],
+      ['Contract number'], '00005678');
+    throw new Error('replacement failed');
+  };
+
+  assert.throws(() => context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice()
+  ), /replacement failed/);
+  assert.equal(numberFormat, originalNumberFormat);
 }
 
 function testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice() {
@@ -3436,6 +3503,7 @@ testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
+testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement();
 testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();

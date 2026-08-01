@@ -2000,12 +2000,19 @@ function captureImportedRowPayload_(sheet, row, layout) {
   const range = sheet.getRange(row, 1, 1, layout.headers.length);
   const values = range.getValues()[0];
   const formulas = range.getFormulas()[0];
+  const numberFormats = typeof range.getNumberFormats === 'function' ?
+    range.getNumberFormats()[0] : null;
   return {
     cells: values.map(function (value, index) {
-      return {
+      const cell = {
         formula: formulas[index] || '',
         value: serializeImportedCellValue_(value)
       };
+      if (Array.isArray(numberFormats) &&
+        typeof numberFormats[index] === 'string') {
+        cell.numberFormat = numberFormats[index];
+      }
+      return cell;
     })
   };
 }
@@ -2049,6 +2056,10 @@ function restoreImportedRowPayload_(sheet, row, originalRow, payload, file,
       } else {
         range.setValue(value);
       }
+    }
+    if (typeof cell.numberFormat === 'string' &&
+      typeof range.setNumberFormat === 'function') {
+      range.setNumberFormat(cell.numberFormat);
     }
   });
   return restoredRow;

@@ -59,7 +59,7 @@ function getItalianLocalization_() {
     }),
     subscriberIdentifierProblemPatterns: Object.freeze([
       '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
-      '(?:numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|contract(?:\\s+number)?|id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|codice\\s+(?:cliente|utente))'
+      '(?:numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|contract(?:\\s+number)?|id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     ]),
     supplierFieldDefaults: Object.freeze([
       Object.freeze({
