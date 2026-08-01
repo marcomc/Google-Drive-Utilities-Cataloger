@@ -3492,6 +3492,7 @@ function testPendingReportOutboxChunksLargeExtractionSnapshots() {
   const correlationId = 'abcdefghijklmnopqrstuvwxyz123456';
   const extraction = {
     ...validInvoice(),
+    consumption_description: 'x'.repeat(20000),
     sheet_values: [{
       header: 'Detailed reading',
       value: 'x'.repeat(9000)
@@ -3506,11 +3507,22 @@ function testPendingReportOutboxChunksLargeExtractionSnapshots() {
     fileUrl: 'https://drive.test/' + correlationId,
     originalName: 'invoice.pdf',
     extracted: extraction,
-    rollbackCompleted: true
+    rollbackCompleted: true,
+    actions: 'Automatic rollback completed.',
+    problem: 'Spreadsheet verification failed.',
+    recommendedAction: 'Review the recovered PDF, then retry the import.',
+    supplierProfilesUrl: 'https://drive.test/supplier-profiles',
+    retryUrl: 'https://script.test/retry'
   }]);
 
   const queued = JSON.parse(store[`${reportPrefix}${correlationId}`]);
   assert.equal(queued.body.includes(snapshot), false);
+  assert.ok(Buffer.byteLength(queued.body, 'utf8') < 8000);
+  assert.match(queued.body, /Field truncated; inspect the source PDF/);
+  assert.match(queued.body, /Actions taken: Automatic rollback completed/);
+  assert.match(queued.body, /Review the recovered PDF, then retry the import/);
+  assert.match(queued.body, /Supplier profiles and proposals: https:\/\/drive\.test\/supplier-profiles/);
+  assert.match(queued.body, /Retry import: https:\/\/script\.test\/retry/);
   assert.ok(queued.extractionSnapshotChunks > 1);
   const storedSnapshot = Array.from({ length: queued.extractionSnapshotChunks },
     (_, index) => store[`${snapshotPrefix}${correlationId}_` +
@@ -3529,10 +3541,31 @@ function testPendingReportOutboxChunksLargeExtractionSnapshots() {
   context.sendReportBodies_ = (bodies) => delivered.push(...bodies);
   assert.equal(context.flushPendingReports_().sent, 1);
   assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /Actions taken: Automatic rollback completed/);
+  assert.match(delivered[0], /Retry import: https:\/\/script\.test\/retry/);
   assert.ok(delivered[0].endsWith('Extracted snapshot: ' + snapshot));
   assert.equal(Object.keys(store).filter((key) =>
     key.startsWith(reportPrefix) || key.startsWith(snapshotPrefix)
   ).length, 0);
+}
+
+function testPendingReportTruncationPreservesOperatorSection() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  const operatorSection = [
+    'Actions taken: Automatic rollback completed.',
+    'Issue and recommended action: Review the recovered PDF.',
+    'Supplier profiles and proposals: https://drive.test/supplier-profiles',
+    'Retry import: https://script.test/retry'
+  ].join('\n');
+  const body = 'Consumption or contributions: ' + 'x'.repeat(20000) +
+    '\n' + operatorSection;
+
+  const truncated = context.truncatePendingReportBody_(body);
+
+  assert.ok(Buffer.byteLength(JSON.stringify({ body: truncated }), 'utf8') <= 8000);
+  assert.match(truncated, /Report truncated; inspect the source PDF/);
+  assert.ok(truncated.endsWith(operatorSection));
 }
 
 function testLockAndLogContracts() {
@@ -3925,6 +3958,7 @@ testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();
 testPendingReportOutboxRetriesAndRepairsMalformedEntries();
 testPendingReportOutboxFlushesBeforeItsStorageBudget();
 testPendingReportOutboxChunksLargeExtractionSnapshots();
+testPendingReportTruncationPreservesOperatorSection();
 testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();

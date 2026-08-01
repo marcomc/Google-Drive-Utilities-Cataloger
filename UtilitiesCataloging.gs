@@ -3468,7 +3468,9 @@ function queuePendingReports_(results) {
     const snapshot = extractionSnapshot ?
       buildPendingReportSnapshot_(correlationId, extractionSnapshot, index) : null;
     const queued = {
-      body: truncatePendingReportBody_(formatResult_(result, false))
+      body: truncatePendingReportBody_(formatResult_(
+        buildPendingReportSummaryResult_(result), false
+      ))
     };
     if (snapshot) {
       queued.extractionSnapshotId = snapshot.id;
@@ -3500,6 +3502,31 @@ function queuePendingReports_(results) {
       snapshot ? snapshot.id : '');
     existingProperties = scriptProperties.getProperties();
   });
+}
+
+function buildPendingReportSummaryResult_(result) {
+  const compactResult = Object.assign({}, result);
+  const extracted = result.extracted || {};
+  compactResult.extracted = Object.keys(extracted).reduce(function (summary, key) {
+    summary[key] = truncatePendingReportTextField_(extracted[key]);
+    return summary;
+  }, {});
+  ['actions', 'problem', 'recommendedAction'].forEach(function (key) {
+    compactResult[key] = truncatePendingReportTextField_(result[key]);
+  });
+  return compactResult;
+}
+
+function truncatePendingReportTextField_(value) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  const characters = Array.from(value);
+  if (characters.length <= CONFIG.PENDING_REPORT_TEXT_FIELD_MAX_CHARS) {
+    return value;
+  }
+  return characters.slice(0, CONFIG.PENDING_REPORT_TEXT_FIELD_MAX_CHARS).join('') +
+    ' [Field truncated; inspect the source PDF.]';
 }
 
 function pendingReportStorageBytes_(properties, prefix) {
@@ -3667,15 +3694,39 @@ function deletePendingReportSnapshotChunksByPrefix_(scriptProperties, prefix) {
 
 function truncatePendingReportBody_(body) {
   const marker = '\n[Report truncated; inspect the source PDF.]';
-  let candidate = body;
-  while (candidate.length > 100 &&
-    Utilities.newBlob(JSON.stringify({ body: candidate }))
-      .getBytes().length > 8000) {
-    candidate = candidate.slice(0, Math.floor(candidate.length * 0.8));
+  if (isPendingReportBodyWithinPropertyLimit_(body)) {
+    return body;
   }
-  return candidate.length < body.length ?
-    candidate.slice(0, Math.max(0, candidate.length - marker.length)) + marker :
-    candidate;
+  const actionBoundary = getPendingReportActionBoundary_(body);
+  if (actionBoundary < 0) {
+    return truncatePendingReportPrefix_(body, marker, '');
+  }
+  return truncatePendingReportPrefix_(body.slice(0, actionBoundary), marker,
+    body.slice(actionBoundary));
+}
+
+function getPendingReportActionBoundary_(body) {
+  return body.indexOf('\n' + getLocalization_().reportLabels.actions + ': ');
+}
+
+function truncatePendingReportPrefix_(prefix, marker, suffix) {
+  const characters = Array.from(prefix);
+  let minimum = 0;
+  let maximum = characters.length;
+  while (minimum < maximum) {
+    const candidateLength = Math.ceil((minimum + maximum) / 2);
+    const candidate = characters.slice(0, candidateLength).join('') + marker + suffix;
+    if (isPendingReportBodyWithinPropertyLimit_(candidate)) {
+      minimum = candidateLength;
+    } else {
+      maximum = candidateLength - 1;
+    }
+  }
+  return characters.slice(0, minimum).join('') + marker + suffix;
+}
+
+function isPendingReportBodyWithinPropertyLimit_(body) {
+  return Utilities.newBlob(JSON.stringify({ body: body })).getBytes().length <= 8000;
 }
 
 /**

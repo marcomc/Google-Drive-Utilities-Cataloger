@@ -17,6 +17,9 @@ const CONFIG = Object.freeze({
   // Keep each queued-report snapshot chunk safely below the 9 KB
   // PropertiesService value limit, including multi-byte extracted text.
   PENDING_REPORT_SNAPSHOT_CHUNK_CHARS: 2048,
+  // Keep every variable text field in the queued summary small enough to
+  // retain operator actions and links; the full error extraction is chunked.
+  PENDING_REPORT_TEXT_FIELD_MAX_CHARS: 512,
   // Script Properties have a 500 KB total limit. Reserve most of that space
   // for configuration, per-file state, mutation journals, and transport data.
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
