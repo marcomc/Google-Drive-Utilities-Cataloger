@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-01 - Reliable Apps Script deployment verification
+
+### Fixed
+
+- Wait and poll the Apps Script Deployments API after an accepted versioned
+  deployment update, avoiding a false failure while metadata still reports the
+  prior version. Identity, owner-only access, and entry-point mismatches remain
+  fail-closed and are not retried.
+
 ## [0.3.1] - 2026-07-31 - Actionable failed-import reports
 
 ### Fixed

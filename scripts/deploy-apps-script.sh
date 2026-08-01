@@ -112,25 +112,18 @@ jq -e \
   ' <<<"${deployment_json}" >/dev/null
 
 post_deployment_json=""
-# Helpers explicitly check each fallible command; callers branch for diagnostics.
+# The Deployments API can briefly expose the prior version after an accepted
+# update. Retry only that eventual-consistency mismatch; identity and access
+# failures remain fail-closed in the shared helper.
 # shellcheck disable=SC2310
-if ! read_apps_script_deployment \
+if ! wait_for_expected_apps_script_deployment \
   "${auth_file}" \
   "${script_id}" \
   "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  "${version_id}" \
   post_deployment_json; then
   printf '%s\n' \
     "The deployment was updated but post-update API verification failed." >&2
-  exit 1
-fi
-# shellcheck disable=SC2310
-if ! validate_owner_only_api_deployment \
-  "${post_deployment_json}" \
-  "${script_id}" \
-  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
-  "${version_id}"; then
-  printf '%s\n' \
-    "The updated deployment failed owner-only API executable validation." >&2
   exit 1
 fi
 post_entry_points="$(canonical_deployment_entry_points \

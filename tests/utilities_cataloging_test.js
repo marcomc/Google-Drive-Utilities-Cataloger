@@ -1307,7 +1307,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
     message: 'catalog-file-processing-error',
     component: 'drive-utilities-cataloger',
-    applicationVersion: '0.3.1',
+    applicationVersion: '0.3.2',
     event: 'catalog-file-processing-error',
     fileId: 'file-id',
     errorType: 'Error',

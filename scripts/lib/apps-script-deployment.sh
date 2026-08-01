@@ -176,6 +176,56 @@ validate_owner_only_api_deployment() {
   fi
 }
 
+wait_for_expected_apps_script_deployment() {
+  local auth_file="$1"
+  local script_id="$2"
+  local deployment_id="$3"
+  local expected_version="$4"
+  local result_variable="$5"
+  local deployment_json
+  local verification_attempt
+  local verification_attempts=5
+  local verification_delay_seconds=2
+
+  if [[ ! "${expected_version}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "Invalid expected Apps Script deployment version." >&2
+    return 1
+  fi
+
+  for ((verification_attempt = 1;
+    verification_attempt <= verification_attempts;
+    verification_attempt++)); do
+    if ! sleep "${verification_delay_seconds}"; then
+      printf '%s\n' "Apps Script deployment verification delay was interrupted." >&2
+      return 1
+    fi
+    deployment_json=""
+    if ! read_apps_script_deployment \
+      "${auth_file}" \
+      "${script_id}" \
+      "${deployment_id}" \
+      deployment_json; then
+      return 1
+    fi
+    if ! validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"; then
+      return 1
+    fi
+    if jq -e --argjson version "${expected_version}" \
+      '.deploymentConfig.versionNumber == $version' \
+      <<<"${deployment_json}" >/dev/null; then
+      printf -v "${result_variable}" '%s' "${deployment_json}"
+      return 0
+    fi
+  done
+
+  printf 'The Apps Script deployment did not expose expected version %s after %s checks.\n' \
+    "${expected_version}" "${verification_attempts}" >&2
+  return 1
+}
+
 canonical_deployment_entry_points() {
   local deployment_json="$1"
 

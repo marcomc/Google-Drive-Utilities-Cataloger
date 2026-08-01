@@ -112,6 +112,17 @@ case "${command_name}" in
 esac
 FAKE_CLASP
 
+cat >"${FAKE_BIN}/sleep" <<'FAKE_SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -ne 1 || "$1" != "2" ]]; then
+  printf '%s\n' "Unexpected deployment verification delay." >&2
+  exit 1
+fi
+printf 'sleep-%s\n' "$1" >>"${TEST_COMMAND_LOG}"
+FAKE_SLEEP
+
 cat >"${FAKE_BIN}/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -189,7 +200,15 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | post-update-version-lag | post-update-version-stale | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
+      "${call_count}" -le 2 ]]; then
+      version_number=4
+    fi
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-stale" &&
+      "${call_count}" -gt 1 ]]; then
+      version_number=4
+    fi
     ;;
   missing)
     http_status=404
@@ -281,7 +300,8 @@ jq -n \
   '
 printf '\n200'
 FAKE_CURL
-chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/curl"
+chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/sleep" \
+  "${FAKE_BIN}/curl"
 
 run_fixture() {
   local fixture_dir="$1"
@@ -369,11 +389,40 @@ success_time_zone="$(jq -r '.timeZone' "${success_dir}/appsscript.json")"
 success_commands="$(tr '\n' ' ' <"${success_dir}/commands.log")"
 test "${success_time_zone}" = "Europe/Rome"
 test "${success_commands}" = \
-  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy clasp-deployments api-get-2 "
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy sleep-2 clasp-deployments api-get-2 "
 if grep -q 'token-do-not' "${success_dir}/output.log"; then
   printf '%s\n' "Deployment logs exposed the clasp access token." >&2
   exit 1
 fi
+
+propagation_dir="${TEST_ROOT}/post-update-version-lag"
+mkdir -p "${propagation_dir}"
+run_fixture "${propagation_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-lag"
+propagation_commands="$(tr '\n' ' ' <"${propagation_dir}/commands.log")"
+test "${propagation_commands}" = \
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy sleep-2 clasp-deployments api-get-2 sleep-2 clasp-deployments api-get-3 "
+propagation_mutation_count="$(grep -Ec '^clasp-(push|version|deploy)$' \
+  "${propagation_dir}/commands.log" || true)"
+test "${propagation_mutation_count}" -eq 3
+
+propagation_timeout_dir="${TEST_ROOT}/post-update-version-stale"
+mkdir -p "${propagation_timeout_dir}"
+require_fixture_failure \
+  'A permanently stale post-update version was accepted.' \
+  "${propagation_timeout_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-stale"
+propagation_timeout_api_reads="$(grep -c '^api-get-' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+propagation_timeout_waits="$(grep -c '^sleep-2$' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+propagation_timeout_mutations="$(grep -Ec '^clasp-(push|version|deploy)$' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+test "${propagation_timeout_api_reads}" -eq 6
+test "${propagation_timeout_waits}" -eq 5
+test "${propagation_timeout_mutations}" -eq 3
+grep -q 'did not expose expected version 5 after 5 checks' \
+  "${propagation_timeout_dir}/output.log"
 
 stale_dir="${TEST_ROOT}/stale"
 mkdir -p "${stale_dir}"
@@ -509,6 +558,8 @@ require_fixture_failure \
 changed_deploy_count="$(grep -c '^clasp-deploy$' \
   "${changed_dir}/commands.log")"
 test "${changed_deploy_count}" -eq 1
+changed_api_reads="$(grep -c '^api-get-' "${changed_dir}/commands.log" || true)"
+test "${changed_api_reads}" -eq 2
 
 mismatch_dir="${TEST_ROOT}/mismatch"
 mkdir -p "${mismatch_dir}"
