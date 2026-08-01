@@ -698,6 +698,27 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_(contract).valid, false);
 }
 
+function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+
+  assert.equal(context.validateExtraction_({
+    ...validInvoice(),
+    contract_number: 'CONTRACT-ONLY',
+    customer_code: '',
+    problems: ['Numero cliente assente nel documento.']
+  }).valid, true);
+}
+
 function testSupplierDefaultsUseRuntimeTargetHeaders() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
@@ -3740,6 +3761,7 @@ testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
 testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
+testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();

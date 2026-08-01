@@ -144,11 +144,16 @@ inside the intake folder. A supplier subfolder contributes guidance only when
 it contains the exact approved profile file for the installation locale. The
 importer ignores every pending proposal folder.
 
-Use [the canonical profile template](../supplier-profiles/PROFILE.example.md) for each
-supplier. Record the official website and each bill-reading guide with its
-version/date, source tier (`official` or `external`), and verification date.
-An external guide is reference material only and needs manual approval before
-it appears in the approved profile.
+For each supplier, copy the installer-created localized template from the
+managed supplier-profile folder in the Drive intake folder. It supplies the
+locale's exact profile filename and accepted front-matter keys and values; for
+example, Italian installations require `PROFILO.md` with `stato: approvato`
+and `fornitore`, not the English `PROFILE.md` fields. The repository's
+[canonical profile template](../supplier-profiles/PROFILE.example.md) is an
+English reference only. Record the official website and each bill-reading guide
+with its version/date, source tier (`official` or `external`), and verification
+date. An external guide is reference material only and needs manual approval
+before it appears in the approved profile.
 
 The installer records the localized template it creates. It can update only
 that exact, unmodified managed template (including the known pre-marker
