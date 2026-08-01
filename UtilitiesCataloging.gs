@@ -3601,6 +3601,8 @@ function formatResult_(result) {
   const extractedDataAvailable = Boolean(
     data && Object.keys(data).length > 0
   );
+  const extractionSnapshot = result.status === 'ERROR' && extractedDataAvailable ?
+    labels.extractedSnapshot + ': ' + formatExtractionSnapshot_(data) : '';
   const errorContext = result.status === 'ERROR' ? [
     labels.failureStage + ': ' + localizeFailureStage_(result.failureStage, labels),
     labels.extractedData + ': ' + (extractedDataAvailable ?
@@ -3621,6 +3623,7 @@ function formatResult_(result) {
     labels.softwareVersion + ': ' + CONFIG.APP_VERSION,
     labels.status + ': ' + localizeStatus_(result.status, localization),
     errorContext.join('\n'),
+    extractionSnapshot,
     labels.originalFile + ': ' +
       oneLineReportText_(result.originalName) + ' (' + fileLink + ')',
     labels.assignedName + ': ' +
@@ -3650,6 +3653,10 @@ function formatResult_(result) {
     profileLink,
     retryLink
   ].filter(Boolean).join('\n');
+}
+
+function formatExtractionSnapshot_(extracted) {
+  return JSON.stringify(extracted);
 }
 
 function localizeFailureStage_(failureStage, labels) {

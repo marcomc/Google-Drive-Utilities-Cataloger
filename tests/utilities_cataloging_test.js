@@ -1180,6 +1180,13 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   const cloudPayloads = [];
   const consoleErrors = [];
   const extraction = validInvoice();
+  extraction.contract_number = 'CONTRACT-RECOVERY';
+  extraction.customer_code = 'CUSTOMER-RECOVERY';
+  extraction.frequency = 'monthly';
+  extraction.sheet_values = [
+    { header: 'Consumption quantity F1', value: 368.74 },
+    { header: 'Unit cost F1', value: 0.12 }
+  ];
   const file = {
     getId: () => 'file-id',
     getName: () => 'invoice.pdf',
@@ -1234,6 +1241,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.equal(result.extractionValidated, true);
   assert.match(report, /Failure stage: Writing and verifying spreadsheet row/);
   assert.match(report, /Gemini extracted data: available, not imported/);
+  assert.ok(report.includes('Extracted snapshot: ' + JSON.stringify(extraction)));
   assert.match(report, /Persistence: no import persisted; rollback completed/);
   assert.match(report, /Supply \/ supplier: Water \/ SUPPLIER/);
   assert.match(report, /Total: 14\.64 EUR/);
@@ -1274,6 +1282,8 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   const italianReport = context.formatResult_(result);
   assert.match(italianReport, /Fase errore: Scrittura e verifica riga del foglio/);
   assert.match(italianReport, /Dati estratti da Gemini: disponibili, non importati/);
+  assert.ok(italianReport.includes('Snapshot estrazione: ' +
+    JSON.stringify(extraction)));
   assert.match(italianReport,
     /Stato importazione: nessun import persistito; rollback completato/);
   assert.match(italianReport,

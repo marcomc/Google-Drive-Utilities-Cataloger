@@ -119,6 +119,7 @@ function getItalianLocalization_() {
       reconciliationPassed: 'superata',
       failureStage: 'Fase errore',
       extractedData: 'Dati estratti da Gemini',
+      extractedSnapshot: 'Snapshot estrazione',
       persistence: 'Stato importazione',
       availableNotImported: 'disponibili, non importati',
       rollbackCompleted: 'nessun import persistito; rollback completato',

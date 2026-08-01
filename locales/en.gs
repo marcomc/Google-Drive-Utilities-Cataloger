@@ -122,6 +122,7 @@ function getEnglishLocalization_() {
       reconciliationPassed: 'passed',
       failureStage: 'Failure stage',
       extractedData: 'Gemini extracted data',
+      extractedSnapshot: 'Extracted snapshot',
       persistence: 'Persistence',
       availableNotImported: 'available, not imported',
       rollbackCompleted: 'no import persisted; rollback completed',
