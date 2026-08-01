@@ -62,6 +62,12 @@ case "${command_name}" in
         printf '%s\n' 'authorization refresh failed' >&2
         exit 9
         ;;
+      post-oauth-invalid-grant)
+        if grep -Fxq 'clasp-deployments' "${TEST_COMMAND_LOG}"; then
+          printf '%s\n' 'invalid_grant' >&2
+          exit 9
+        fi
+        ;;
     esac
     ;;
   pull)
@@ -111,6 +117,17 @@ case "${command_name}" in
     ;;
 esac
 FAKE_CLASP
+
+cat >"${FAKE_BIN}/sleep" <<'FAKE_SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -ne 1 || "$1" != "2" ]]; then
+  printf '%s\n' "Unexpected deployment verification delay." >&2
+  exit 1
+fi
+printf 'sleep-%s\n' "$1" >>"${TEST_COMMAND_LOG}"
+FAKE_SLEEP
 
 cat >"${FAKE_BIN}/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
@@ -175,6 +192,26 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
   transport-connect) exit 7 ;;
   transport-timeout) exit 28 ;;
   transport-tls) exit 60 ;;
+  post-transport-dns)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 6
+    fi
+    ;;
+  post-transport-connect)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 7
+    fi
+    ;;
+  post-transport-timeout)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 28
+    fi
+    ;;
+  post-transport-tls)
+    if [[ "${call_count}" -gt 1 ]]; then
+      exit 60
+    fi
+    ;;
 esac
 
 script_id="test-script"
@@ -189,7 +226,19 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
+      "${call_count}" -le 2 ]]; then
+      version_number=4
+    fi
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-stale" &&
+      "${call_count}" -gt 1 ]]; then
+      version_number=4
+    fi
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-conflict" &&
+      "${call_count}" -eq 2 ]]; then
+      version_number=6
+    fi
     ;;
   missing)
     http_status=404
@@ -208,6 +257,11 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
       http_status=403
     fi
     ;;
+  post-api-missing)
+    if [[ "${call_count}" -gt 1 ]]; then
+      http_status=404
+    fi
+    ;;
   post-api-rate-limited)
     if [[ "${call_count}" -gt 1 ]]; then
       http_status=429
@@ -221,11 +275,26 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
   wrong-script)
     script_id="other-script"
     ;;
+  post-wrong-script)
+    if [[ "${call_count}" -gt 1 ]]; then
+      script_id="other-script"
+    fi
+    ;;
   missing-entry-point)
     entry_point_type="WEB_APP"
     ;;
+  post-missing-entry-point)
+    if [[ "${call_count}" -gt 1 ]]; then
+      entry_point_type="WEB_APP"
+    fi
+    ;;
   wrong-access)
     access="ANYONE"
+    ;;
+  post-wrong-access)
+    if [[ "${call_count}" -gt 1 ]]; then
+      access="ANYONE"
+    fi
     ;;
   mixed-public)
     extra_entry_point=true
@@ -281,7 +350,8 @@ jq -n \
   '
 printf '\n200'
 FAKE_CURL
-chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/curl"
+chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/sleep" \
+  "${FAKE_BIN}/curl"
 
 run_fixture() {
   local fixture_dir="$1"
@@ -349,6 +419,22 @@ require_fixture_failure() {
   fi
 }
 
+assert_post_update_failure_is_not_retried() {
+  local fixture_dir="$1"
+  local expected_api_reads="$2"
+  local actual_api_reads
+  local actual_waits
+  local mutation_commands
+
+  actual_api_reads="$(grep -c '^api-get-' "${fixture_dir}/commands.log" || true)"
+  actual_waits="$(grep -c '^sleep-2$' "${fixture_dir}/commands.log" || true)"
+  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
+    "${fixture_dir}/commands.log" || true)"
+  test "${actual_api_reads}" -eq "${expected_api_reads}"
+  test "${actual_waits}" -eq 1
+  test "${mutation_commands}" -eq 3
+}
+
 CURRENT_SHA="1111111111111111111111111111111111111111"
 STALE_SHA="2222222222222222222222222222222222222222"
 
@@ -369,11 +455,50 @@ success_time_zone="$(jq -r '.timeZone' "${success_dir}/appsscript.json")"
 success_commands="$(tr '\n' ' ' <"${success_dir}/commands.log")"
 test "${success_time_zone}" = "Europe/Rome"
 test "${success_commands}" = \
-  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy clasp-deployments api-get-2 "
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy sleep-2 clasp-deployments api-get-2 "
 if grep -q 'token-do-not' "${success_dir}/output.log"; then
   printf '%s\n' "Deployment logs exposed the clasp access token." >&2
   exit 1
 fi
+
+propagation_dir="${TEST_ROOT}/post-update-version-lag"
+mkdir -p "${propagation_dir}"
+run_fixture "${propagation_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-lag"
+propagation_commands="$(tr '\n' ' ' <"${propagation_dir}/commands.log")"
+test "${propagation_commands}" = \
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy sleep-2 clasp-deployments api-get-2 sleep-2 clasp-deployments api-get-3 "
+propagation_mutation_count="$(grep -Ec '^clasp-(push|version|deploy)$' \
+  "${propagation_dir}/commands.log" || true)"
+test "${propagation_mutation_count}" -eq 3
+
+propagation_timeout_dir="${TEST_ROOT}/post-update-version-stale"
+mkdir -p "${propagation_timeout_dir}"
+require_fixture_failure \
+  'A permanently stale post-update version was accepted.' \
+  "${propagation_timeout_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-stale"
+propagation_timeout_api_reads="$(grep -c '^api-get-' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+propagation_timeout_waits="$(grep -c '^sleep-2$' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+propagation_timeout_mutations="$(grep -Ec '^clasp-(push|version|deploy)$' \
+  "${propagation_timeout_dir}/commands.log" || true)"
+test "${propagation_timeout_api_reads}" -eq 6
+test "${propagation_timeout_waits}" -eq 5
+test "${propagation_timeout_mutations}" -eq 3
+grep -q 'did not expose expected version 5 after 5 checks' \
+  "${propagation_timeout_dir}/output.log"
+
+propagation_conflict_dir="${TEST_ROOT}/post-update-version-conflict"
+mkdir -p "${propagation_conflict_dir}"
+require_fixture_failure \
+  'A concurrent post-update deployment version was accepted.' \
+  "${propagation_conflict_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-conflict"
+assert_post_update_failure_is_not_retried "${propagation_conflict_dir}" 2
+grep -q 'unexpected version 6; expected 5 or prior version 4' \
+  "${propagation_conflict_dir}/output.log"
 
 stale_dir="${TEST_ROOT}/stale"
 mkdir -p "${stale_dir}"
@@ -485,6 +610,7 @@ done
 
 for scenario in \
   post-api-forbidden \
+  post-api-missing \
   post-api-rate-limited \
   post-api-unavailable; do
   failure_dir="${TEST_ROOT}/${scenario}"
@@ -493,12 +619,37 @@ for scenario in \
     "Post-update API failure was accepted: ${scenario}" \
     "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
     "deployment-1" "deployment-1" "${scenario}"
-  mutation_commands="$(grep -Ec '^clasp-(push|version|deploy)$' \
-    "${failure_dir}/commands.log")"
-  test "${mutation_commands}" -eq 3
+  assert_post_update_failure_is_not_retried "${failure_dir}" 2
   grep -q 'post-update API verification failed' \
     "${failure_dir}/output.log"
 done
+
+for scenario in \
+  post-transport-dns \
+  post-transport-connect \
+  post-transport-timeout \
+  post-transport-tls \
+  post-wrong-script \
+  post-missing-entry-point \
+  post-wrong-access; do
+  failure_dir="${TEST_ROOT}/${scenario}"
+  mkdir -p "${failure_dir}"
+  require_fixture_failure \
+    "Post-update terminal failure was retried or accepted: ${scenario}" \
+    "${failure_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" "${scenario}"
+  assert_post_update_failure_is_not_retried "${failure_dir}" 2
+done
+
+post_oauth_invalid_grant_dir="${TEST_ROOT}/post-oauth-invalid-grant"
+mkdir -p "${post_oauth_invalid_grant_dir}"
+require_fixture_failure \
+  'A post-update OAuth refresh failure was accepted.' \
+  "${post_oauth_invalid_grant_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-oauth-invalid-grant"
+assert_post_update_failure_is_not_retried "${post_oauth_invalid_grant_dir}" 1
+grep -q 'OAuth refresh token is invalid or expired' \
+  "${post_oauth_invalid_grant_dir}/output.log"
 
 changed_dir="${TEST_ROOT}/changed-after"
 mkdir -p "${changed_dir}"
@@ -509,6 +660,10 @@ require_fixture_failure \
 changed_deploy_count="$(grep -c '^clasp-deploy$' \
   "${changed_dir}/commands.log")"
 test "${changed_deploy_count}" -eq 1
+changed_api_reads="$(grep -c '^api-get-' "${changed_dir}/commands.log" || true)"
+test "${changed_api_reads}" -eq 2
+changed_waits="$(grep -c '^sleep-2$' "${changed_dir}/commands.log" || true)"
+test "${changed_waits}" -eq 1
 
 mismatch_dir="${TEST_ROOT}/mismatch"
 mkdir -p "${mismatch_dir}"

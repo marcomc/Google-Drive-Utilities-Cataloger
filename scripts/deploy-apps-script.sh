@@ -58,6 +58,9 @@ if ! validate_owner_only_api_deployment \
 fi
 pre_entry_points="$(canonical_deployment_entry_points \
   "${pre_deployment_json}")"
+pre_deployment_version="$(jq -er \
+  '.deploymentConfig.versionNumber | select(type == "number")' \
+  <<<"${pre_deployment_json}")"
 
 snapshot_dir="${RUNNER_TEMP}/apps-script-snapshot"
 mkdir -m 700 "${snapshot_dir}"
@@ -112,25 +115,19 @@ jq -e \
   ' <<<"${deployment_json}" >/dev/null
 
 post_deployment_json=""
-# Helpers explicitly check each fallible command; callers branch for diagnostics.
+# The Deployments API can briefly expose the prior version after an accepted
+# update. Retry only the exact pre-update version; identity, access, and an
+# unexpected concurrent version remain fail-closed in the shared helper.
 # shellcheck disable=SC2310
-if ! read_apps_script_deployment \
+if ! wait_for_expected_apps_script_deployment \
   "${auth_file}" \
   "${script_id}" \
   "${APPS_SCRIPT_DEPLOYMENT_ID}" \
+  "${pre_deployment_version}" \
+  "${version_id}" \
   post_deployment_json; then
   printf '%s\n' \
     "The deployment was updated but post-update API verification failed." >&2
-  exit 1
-fi
-# shellcheck disable=SC2310
-if ! validate_owner_only_api_deployment \
-  "${post_deployment_json}" \
-  "${script_id}" \
-  "${APPS_SCRIPT_DEPLOYMENT_ID}" \
-  "${version_id}"; then
-  printf '%s\n' \
-    "The updated deployment failed owner-only API executable validation." >&2
   exit 1
 fi
 post_entry_points="$(canonical_deployment_entry_points \
