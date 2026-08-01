@@ -180,15 +180,19 @@ wait_for_expected_apps_script_deployment() {
   local auth_file="$1"
   local script_id="$2"
   local deployment_id="$3"
-  local expected_version="$4"
-  local result_variable="$5"
+  local retryable_stale_version="$4"
+  local expected_version="$5"
+  local result_variable="$6"
   local deployment_json
+  local observed_version
   local verification_attempt
   local verification_attempts=5
   local verification_delay_seconds=2
 
-  if [[ ! "${expected_version}" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "Invalid expected Apps Script deployment version." >&2
+  if [[ ! "${retryable_stale_version}" =~ ^[0-9]+$ ||
+    ! "${expected_version}" =~ ^[0-9]+$ ||
+    "${retryable_stale_version}" == "${expected_version}" ]]; then
+    printf '%s\n' "Invalid Apps Script deployment version transition." >&2
     return 1
   fi
 
@@ -213,11 +217,18 @@ wait_for_expected_apps_script_deployment() {
       "${deployment_id}"; then
       return 1
     fi
-    if jq -e --argjson version "${expected_version}" \
-      '.deploymentConfig.versionNumber == $version' \
-      <<<"${deployment_json}" >/dev/null; then
+    observed_version="$(jq -er \
+      '.deploymentConfig.versionNumber | select(type == "number")' \
+      <<<"${deployment_json}")"
+    if [[ "${observed_version}" == "${expected_version}" ]]; then
       printf -v "${result_variable}" '%s' "${deployment_json}"
       return 0
+    fi
+    if [[ "${observed_version}" != "${retryable_stale_version}" ]]; then
+      printf 'The Apps Script deployment exposed unexpected version %s; expected %s or prior version %s.\n' \
+        "${observed_version}" "${expected_version}" \
+        "${retryable_stale_version}" >&2
+      return 1
     fi
   done
 

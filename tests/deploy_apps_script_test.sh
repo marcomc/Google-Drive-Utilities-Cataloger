@@ -226,7 +226,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | post-update-version-lag | post-update-version-stale | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
       "${call_count}" -le 2 ]]; then
       version_number=4
@@ -234,6 +234,10 @@ case "${TEST_DEPLOYMENT_SCENARIO}" in
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-stale" &&
       "${call_count}" -gt 1 ]]; then
       version_number=4
+    fi
+    if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-conflict" &&
+      "${call_count}" -eq 2 ]]; then
+      version_number=6
     fi
     ;;
   missing)
@@ -485,6 +489,16 @@ test "${propagation_timeout_waits}" -eq 5
 test "${propagation_timeout_mutations}" -eq 3
 grep -q 'did not expose expected version 5 after 5 checks' \
   "${propagation_timeout_dir}/output.log"
+
+propagation_conflict_dir="${TEST_ROOT}/post-update-version-conflict"
+mkdir -p "${propagation_conflict_dir}"
+require_fixture_failure \
+  'A concurrent post-update deployment version was accepted.' \
+  "${propagation_conflict_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "post-update-version-conflict"
+assert_post_update_failure_is_not_retried "${propagation_conflict_dir}" 2
+grep -q 'unexpected version 6; expected 5 or prior version 4' \
+  "${propagation_conflict_dir}/output.log"
 
 stale_dir="${TEST_ROOT}/stale"
 mkdir -p "${stale_dir}"

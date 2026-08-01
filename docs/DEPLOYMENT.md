@@ -171,10 +171,11 @@ workflow reads it through the official Deployments API and validates its script
 ID, numbered version, `appsscript` manifest, and `EXECUTION_API`/`MYSELF` entry
 point. After
 `clasp deploy --deploymentId`, it waits two seconds before reading the
-deployment again. It retries only a temporarily stale version response, for up
-to five checks, and requires the same deployment ID, the new version, and an
-unchanged entry-point structure. Identity, authorization, and entry-point
-failures remain immediate failures.
+deployment again. It retries only the exact version observed in the preflight
+as a temporarily stale response, for up to five checks, and requires the same
+deployment ID, the new version, and an unchanged entry-point structure. A
+different version, identity, authorization, or entry-point failure remains an
+immediate failure.
 
 The workflow deliberately retains `clasp deploy --deploymentId`. The existing
 manifest already declares owner-only Execution API access, and the pre/post API
