@@ -1342,6 +1342,104 @@ function testServiceIdentityMigrationValidatesBeforeMutating() {
   assert.equal(mutations, 0);
 }
 
+function testServiceIdentityMigrationRejectsReservedControlColumnOverlap() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  context.getInstallerLocalization_ = () => ({
+    headerAliases: {
+      accountHolder: ['Account holder'],
+      serviceAddress: ['Service address']
+    }
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: ['Account holder', 'Supplier', 'Invoice number', 'Service address'],
+    lookup: {
+      'account holder': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'service address': 4
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0].toLowerCase()] || 0;
+  context.validateInstallerSheetHeaders_ = () => {};
+
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_({
+      getName: () => 'Water'
+    }, 'Water', 'en'),
+    /cannot overlap the reserved migration control columns/
+  );
+}
+
+function testServiceIdentityMigrationRejectsReservedInsertionTarget() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  let mutations = 0;
+  context.getInstallerLocalization_ = () => ({
+    installerSheetHeaders: ['Account holder', 'Service address'],
+    headerAliases: {
+      accountHolder: ['Account holder'],
+      serviceAddress: ['Service address'],
+      customerCode: ['Customer code'],
+      contractNumber: ['Contract number']
+    }
+  });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: ['Issue date', 'Customer code'],
+    lookup: {
+      'issue date': 1,
+      'customer code': 2
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0].toLowerCase()] || 0;
+  context.validateInstallerSheetHeaders_ = () => {};
+  const sheet = {
+    getName: () => 'Water',
+    getRange: () => ({ getDisplayValue: () => '' }),
+    insertColumnsBefore: () => { mutations += 1; },
+    insertRowsBefore: () => { mutations += 1; },
+    setFrozenRows: () => { mutations += 1; }
+  };
+
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en'),
+    /cannot overlap the reserved migration control columns/
+  );
+  assert.equal(mutations, 0);
+}
+
+function testServiceIdentityMigrationUsesExistingIdentityColumnAsAnchor() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0].toLowerCase()] || 0;
+  const localization = {
+    headerAliases: {
+      accountHolder: ['Account holder'],
+      serviceAddress: ['Service address'],
+      customerCode: ['Customer code'],
+      contractNumber: ['Contract number']
+    }
+  };
+  const layout = {
+    headers: ['Issue date', 'Customer code', '', '', '', 'Account holder'],
+    lookup: {
+      'issue date': 1,
+      'customer code': 2,
+      'account holder': 6
+    }
+  };
+
+  assert.equal(
+    context.getInstallerServiceIdentityInsertionColumn_(layout, localization),
+    7
+  );
+}
+
 function testServiceIdentityMigrationResumesCheckpointedControlRow() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -1951,6 +2049,9 @@ testServiceIdentityMetadataUsesDetectedColumns();
 testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry();
 testNewSupplySheetInitializesServiceIdentityControls();
 testServiceIdentityMigrationValidatesBeforeMutating();
+testServiceIdentityMigrationRejectsReservedControlColumnOverlap();
+testServiceIdentityMigrationRejectsReservedInsertionTarget();
+testServiceIdentityMigrationUsesExistingIdentityColumnAsAnchor();
 testServiceIdentityMigrationResumesCheckpointedControlRow();
 testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
 testServiceIdentityMigrationRestoresCompleteChartState();

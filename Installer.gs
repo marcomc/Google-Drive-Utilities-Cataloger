@@ -1205,6 +1205,7 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
   const localization = getInstallerLocalization_(locale);
   let layout = getSheetLayout_(sheet, localization.headerAliases);
   validateInstallerSheetHeaders_(sheet, locale);
+  validateInstallerServiceIdentityControlPlacement_(layout, localization);
   const migration = beginInstallerServiceIdentityMigration_(sheet, supply,
     layout);
   const beforeCharts = migration.chartState;
@@ -1246,10 +1247,6 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
     localization.headerAliases.accountHolder);
   const addressColumn = findHeaderIndex_(layout.lookup,
     localization.headerAliases.serviceAddress);
-  const customerColumn = findHeaderIndex_(layout.lookup,
-    localization.headerAliases.customerCode);
-  const contractColumn = findHeaderIndex_(layout.lookup,
-    localization.headerAliases.contractNumber);
   const missingHeaders = [];
   if (!holderColumn) {
     missingHeaders.push(holderHeader);
@@ -1258,15 +1255,15 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
     missingHeaders.push(addressHeader);
   }
   if (missingHeaders.length > 0) {
-    let insertionColumn = customerColumn || contractColumn + 1;
-    if (!holderColumn && addressColumn) {
-      insertionColumn = addressColumn;
-    } else if (!addressColumn && holderColumn) {
-      insertionColumn = holderColumn + 1;
-    }
+    const insertionColumn = getInstallerServiceIdentityInsertionColumn_(layout,
+      localization);
     if (!insertionColumn) {
       throw new Error('Cannot locate the contract or customer header in sheet ' +
         sheet.getName() + '.');
+    }
+    if (insertionColumn <= 3) {
+      throw new Error('Service-identity columns cannot overlap the reserved ' +
+        'migration control columns in sheet ' + sheet.getName() + '.');
     }
     const columnsAlreadyInserted =
       (migration.stages.identityColumns === 'planned' ||
@@ -1335,6 +1332,56 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
   });
   clearInstallerServiceIdentityMigration_(migration);
   return layout;
+}
+
+function validateInstallerServiceIdentityControlPlacement_(layout, localization) {
+  const normalizeHeader = typeof normalizeHeader_ === 'function' ?
+    normalizeHeader_ : function (value) { return String(value || '').trim().toLowerCase(); };
+  const reservedIdentityAliases = localization.headerAliases.accountHolder
+    .concat(localization.headerAliases.serviceAddress)
+    .map(normalizeHeader);
+  (layout.headers || []).forEach(function (header, index) {
+    if (reservedIdentityAliases.indexOf(normalizeHeader(header)) >= 0 &&
+      index + 1 <= 3) {
+      throw new Error('Service-identity columns cannot overlap the reserved ' +
+        'migration control columns.');
+    }
+  });
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  if ((holderColumn && holderColumn <= 3) || (addressColumn && addressColumn <= 3)) {
+    throw new Error('Service-identity columns cannot overlap the reserved ' +
+      'migration control columns.');
+  }
+  if (holderColumn && addressColumn) {
+    return;
+  }
+  const insertionColumn = getInstallerServiceIdentityInsertionColumn_(layout,
+    localization);
+  if (!insertionColumn || insertionColumn <= 3) {
+    throw new Error('Service-identity columns cannot overlap the reserved ' +
+      'migration control columns.');
+  }
+}
+
+function getInstallerServiceIdentityInsertionColumn_(layout, localization) {
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  const customerColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.customerCode);
+  const contractColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.contractNumber);
+  if (!holderColumn && addressColumn) {
+    return addressColumn;
+  }
+  if (!addressColumn && holderColumn) {
+    return holderColumn + 1;
+  }
+  return customerColumn || contractColumn + 1;
 }
 
 function isInstallerPristineControlRow_(sheet, layout, expectedHeaderRow) {
@@ -1450,6 +1497,7 @@ function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
   const headerRow = layout.headerRow;
   const metadataRow = headerRow > 1 ? headerRow - 1 : 1;
   const localization = getInstallerLocalization_(locale || 'en');
+  validateInstallerServiceIdentityControlPlacement_(layout, localization);
   const isItalian = localization.spreadsheetLocale === 'it_IT';
   const holderColumn = findHeaderIndex_(layout.lookup,
     localization.headerAliases.accountHolder);
