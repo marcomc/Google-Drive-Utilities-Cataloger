@@ -59,6 +59,11 @@
   and response budgets; log the finish reason without logging document data,
   and fail closed unless the provider explicitly reports a successful terminal
   reason such as `STOP`.
+- Do not authorize address-derived routing from extracted fields alone:
+  corroborate the configured street, civic number, and city against address
+  evidence. During state-less OAuth recovery, adopt only an exact legacy local
+  auth profile and exactly one owner-only configured deployment; fail closed
+  on ambiguity.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
