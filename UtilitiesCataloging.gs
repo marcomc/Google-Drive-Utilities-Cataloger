@@ -1338,35 +1338,60 @@ function normalizeAddressTokenSequence_(value) {
   return normalizeAddressIdentityText_(value).split(' ').filter(Boolean);
 }
 
-function containsAddressTokenSequence_(haystack, needle) {
-  if (!needle.length || needle.length > haystack.length) {
-    return false;
-  }
-  for (let index = 0; index <= haystack.length - needle.length; index += 1) {
-    if (needle.every(function (token, offset) {
-      return haystack[index + offset] === token;
-    })) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function isAddressPostalCodeToken_(token) {
   return /^\d{5}$/.test(token);
 }
 
-function completeServiceAddressMatches_(configuredAddress, street, civicNumber,
-  city) {
-  const configured = normalizeAddressTokenSequence_(configuredAddress)
-    .filter(function (token) {
-      return !isAddressPostalCodeToken_(token);
+function hasAddressComponentPlacement_(addressTokens, components,
+  requireCompleteIdentity) {
+  const MAX_ADDRESS_TOKENS = 64;
+  if (!addressTokens.length || addressTokens.length > MAX_ADDRESS_TOKENS ||
+    components.length !== 3 || components.some(function (component) {
+      return !component.length || component.length > MAX_ADDRESS_TOKENS;
+    })) {
+    return false;
+  }
+  const componentLength = components.reduce(function (total, component) {
+    return total + component.length;
+  }, 0);
+  if (requireCompleteIdentity && componentLength !== addressTokens.length) {
+    return false;
+  }
+  const placements = components.map(function (component) {
+    const matches = [];
+    for (let start = 0; start <= addressTokens.length - component.length;
+      start += 1) {
+      if (component.every(function (token, offset) {
+        return addressTokens[start + offset] === token;
+      })) {
+        matches.push({ start: start, end: start + component.length });
+      }
+    }
+    return matches;
+  });
+  if (placements.some(function (matches) { return !matches.length; })) {
+    return false;
+  }
+  function placeComponent(index, occupied) {
+    if (index === placements.length) {
+      return true;
+    }
+    return placements[index].some(function (placement) {
+      for (let tokenIndex = placement.start; tokenIndex < placement.end;
+        tokenIndex += 1) {
+        if (occupied[tokenIndex]) {
+          return false;
+        }
+      }
+      const nextOccupied = occupied.slice();
+      for (let tokenIndex = placement.start; tokenIndex < placement.end;
+        tokenIndex += 1) {
+        nextOccupied[tokenIndex] = true;
+      }
+      return placeComponent(index + 1, nextOccupied);
     });
-  const extracted = street.concat(civicNumber, city);
-  return configured.length === extracted.length &&
-    configured.every(function (token, index) {
-      return token === extracted[index];
-    });
+  }
+  return placeComponent(0, Array(addressTokens.length).fill(false));
 }
 
 function validateServiceIdentity_(extracted, expected) {
@@ -1382,22 +1407,23 @@ function validateServiceIdentity_(extracted, expected) {
   const street = normalizeAddressTokenSequence_(extracted && extracted.service_street);
   const civicNumber = normalizeAddressTokenSequence_(extracted && extracted.service_civic_number);
   const city = normalizeAddressTokenSequence_(extracted && extracted.service_city);
+  const addressComponents = [street, civicNumber, city];
+  const configuredAddress = normalizeAddressTokenSequence_(
+    configured.service_address
+  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
   const evidenceAddress = normalizeAddressTokenSequence_(
     extracted && extracted.address_evidence
-  ).filter(function (token) {
-    return !isAddressPostalCodeToken_(token);
-  });
+  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
   if (!holder || !street.length || !civicNumber.length || !city.length) {
     return invalidExtraction_(
       'The invoice account holder or service address is missing or ambiguous.',
       'Verify the account holder and the service address in the PDF.'
     );
   }
-  const addressMatches = completeServiceAddressMatches_(
-    configured.service_address, street, civicNumber, city
-  );
-  const evidenceMatches = containsAddressTokenSequence_(evidenceAddress,
-    street.concat(civicNumber, city));
+  const addressMatches = hasAddressComponentPlacement_(configuredAddress,
+    addressComponents, true);
+  const evidenceMatches = hasAddressComponentPlacement_(evidenceAddress,
+    addressComponents, false);
   if (holder !== normalizeNameIdentity_(configured.account_holder) ||
     !addressMatches || !evidenceMatches) {
     return invalidExtraction_(

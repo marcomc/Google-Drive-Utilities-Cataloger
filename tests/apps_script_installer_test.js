@@ -897,7 +897,9 @@ function testSpreadsheetValidationUsesDetectedHeaderRow() {
 function createMutableInstallerChartFixture() {
   const state = {
     title: 'User chart', width: 500, height: 300, row: 12, column: 8,
-    offsetX: 14, offsetY: 18, ranges: ['D2:E20'], chartType: 'LINE',
+    offsetX: 14, offsetY: 18, ranges: [{
+      a1Notation: 'D2:E20', sheetId: 101, sheetName: 'Electricity'
+    }], chartType: 'LINE',
     hiddenDimensionStrategy: 'SHOW_BOTH', mergeStrategy: 'MERGE_ROWS',
     numHeaders: 2, transposeRowsAndColumns: true,
     options: { legend: { position: 'bottom' }, curveType: 'function' }
@@ -915,8 +917,12 @@ function createMutableInstallerChartFixture() {
       getAnchorRow: () => state.row, getAnchorColumn: () => state.column,
       getOffsetX: () => state.offsetX, getOffsetY: () => state.offsetY
     }),
-    getRanges: () => state.ranges.map((a1Notation) => ({
-      getA1Notation: () => a1Notation
+    getRanges: () => state.ranges.map((range) => ({
+      getA1Notation: () => range.a1Notation,
+      getSheet: () => ({
+        getSheetId: () => range.sheetId,
+        getName: () => range.sheetName
+      })
     })),
     modify: () => {
       const next = JSON.parse(JSON.stringify(state));
@@ -927,7 +933,9 @@ function createMutableInstallerChartFixture() {
         getNumHeaders: () => next.numHeaders,
         getTransposeRowsAndColumns: () => next.transposeRowsAndColumns,
         clearRanges: () => { next.ranges = []; },
-        addRange: (range) => { next.ranges.push(range.getA1Notation()); },
+        addRange: (range) => { next.ranges.push({
+          a1Notation: range.getA1Notation(), sheetId: null, sheetName: ''
+        }); },
         setPosition: (row, column, offsetX, offsetY) => {
           next.row = row; next.column = column;
           next.offsetX = offsetX; next.offsetY = offsetY;
@@ -995,12 +1003,16 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
         cells.splice(row - 1, 0, Array(20).fill(''));
       }
       state.row += count;
-      state.ranges = ['D3:E21'];
+      state.ranges = [{
+        a1Notation: 'D3:E21', sheetId: 101, sheetName: 'Electricity'
+      }];
     },
     insertColumnsBefore: (column, count) => {
       cells.forEach((line) => line.splice(column - 1, 0, ...Array(count).fill('')));
       state.column += count;
-      state.ranges = ['F3:G21'];
+      state.ranges = [{
+        a1Notation: 'F3:G21', sheetId: 101, sheetName: 'Electricity'
+      }];
     },
     getCharts: () => [chart],
     updateChart: (next) => { Object.assign(state, next); },
@@ -1063,9 +1075,15 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   assert.deepEqual(cells[2].slice(3, 7), ['CON-1', '', '', 'CL-1']);
   assert.equal(cells.length, 3);
   assert.equal(sheet.getCharts().length, 1);
+  const migratedChartState = JSON.parse(JSON.stringify(
+    context.captureInstallerSheetChartState_(sheet)
+  ));
+  assert.deepEqual(migratedChartState[0].sourceRanges, [{
+    a1Notation: 'F3:G21', sheetId: 101, sheetName: 'Electricity'
+  }]);
   assert.deepEqual(
-    JSON.parse(JSON.stringify(context.captureInstallerSheetChartState_(sheet))),
-    initialChartState
+    Object.assign({}, migratedChartState[0], { sourceRanges: [] }),
+    Object.assign({}, initialChartState[0], { sourceRanges: [] })
   );
 }
 
@@ -1507,15 +1525,55 @@ function testServiceIdentityMigrationRestoresCompleteChartState() {
   state.column = 9;
   state.offsetX = 0;
   state.offsetY = 0;
-  state.ranges = ['D3:E21'];
+  state.ranges = [{
+    a1Notation: 'D3:E21', sheetId: 101, sheetName: 'Electricity'
+  }];
   state.chartType = 'COLUMN';
   state.options.legend = { position: 'right' };
 
   context.restoreInstallerSheetChartState_(before, sheet);
+  const restored = JSON.parse(JSON.stringify(
+    context.captureInstallerSheetChartState_(sheet)
+  ));
+  assert.deepEqual(restored[0].sourceRanges, [{
+    a1Notation: 'D3:E21', sheetId: 101, sheetName: 'Electricity'
+  }]);
   assert.deepEqual(
-    JSON.parse(JSON.stringify(context.captureInstallerSheetChartState_(sheet))),
-    before
+    Object.assign({}, restored[0], { sourceRanges: [] }),
+    Object.assign({}, before[0], { sourceRanges: [] })
   );
+}
+
+function testInstallerChartRestorePreservesExternalAndMixedRangeBindings() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const { chart, state } = createMutableInstallerChartFixture();
+  state.ranges = [
+    { a1Notation: 'D2:E20', sheetId: 101, sheetName: 'Electricity' },
+    { a1Notation: 'A1:B10', sheetId: 202, sheetName: 'Archive' },
+    { a1Notation: 'C1:C10', sheetId: 303, sheetName: 'Tariffs' }
+  ];
+  const sheet = {
+    getCharts: () => [chart],
+    getRange: () => { throw new Error('chart range must not be rebound'); },
+    updateChart: (next) => { Object.assign(state, next); }
+  };
+  const before = JSON.parse(JSON.stringify(
+    context.captureInstallerSheetChartState_(sheet)
+  ));
+  state.ranges[0].a1Notation = 'F3:G21';
+  state.row = 13;
+
+  context.restoreInstallerSheetChartState_(before, sheet);
+  context.assertInstallerSheetChartStatePreserved_(before, sheet);
+
+  assert.deepEqual(state.ranges, [
+    { a1Notation: 'F3:G21', sheetId: 101, sheetName: 'Electricity' },
+    { a1Notation: 'A1:B10', sheetId: 202, sheetName: 'Archive' },
+    { a1Notation: 'C1:C10', sheetId: 303, sheetName: 'Tariffs' }
+  ]);
+  assert.equal(state.row, before[0].row);
 }
 
 function response(statusCode, body) {
@@ -1896,6 +1954,7 @@ testServiceIdentityMigrationValidatesBeforeMutating();
 testServiceIdentityMigrationResumesCheckpointedControlRow();
 testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
 testServiceIdentityMigrationRestoresCompleteChartState();
+testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

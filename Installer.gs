@@ -1528,12 +1528,29 @@ function captureInstallerSheetChartState_(sheet) {
       column: container ? container.getAnchorColumn() : 0,
       offsetX: container ? container.getOffsetX() : 0,
       offsetY: container ? container.getOffsetY() : 0,
+      // Ranges are deliberately descriptive only. Inserting the control row
+      // or identity columns makes Sheets adjust local chart ranges itself; a
+      // later rebuild from this pre-mutation A1 notation would undo that
+      // adjustment and can also move an external-sheet range onto this sheet.
       sourceRanges: typeof chart.getRanges === 'function' ? chart.getRanges().map(
-        function (range) { return range.getA1Notation(); }) : [],
+        captureInstallerChartRangeDescriptor_) : [],
       options: captureInstallerChartOptions_(options),
       builderState: builderState
     };
   });
+}
+
+function captureInstallerChartRangeDescriptor_(range) {
+  const rangeSheet = range && typeof range.getSheet === 'function' ?
+    range.getSheet() : null;
+  return {
+    a1Notation: range && typeof range.getA1Notation === 'function' ?
+      range.getA1Notation() : '',
+    sheetId: rangeSheet && typeof rangeSheet.getSheetId === 'function' ?
+      rangeSheet.getSheetId() : null,
+    sheetName: rangeSheet && typeof rangeSheet.getName === 'function' ?
+      rangeSheet.getName() : ''
+  };
 }
 
 function captureInstallerChartOptions_(options) {
@@ -1574,13 +1591,9 @@ function restoreInstallerSheetChartState_(before, sheet) {
       return;
     }
     const builder = chart.modify();
-    if (typeof builder.clearRanges === 'function' &&
-      typeof builder.addRange === 'function') {
-      builder.clearRanges();
-      state.sourceRanges.forEach(function (a1Notation) {
-        builder.addRange(sheet.getRange(a1Notation));
-      });
-    }
+    // Do not clear or re-add chart ranges. Apps Script has already preserved
+    // their source-sheet binding and adjusted local coordinates for the row
+    // and column insertions performed by this migration.
     if (typeof builder.setPosition === 'function') {
       builder.setPosition(state.row, state.column, state.offsetX, state.offsetY);
     }
@@ -1613,10 +1626,38 @@ function assertInstallerSheetChartStatePreserved_(before, sheet) {
   }
   const after = captureInstallerSheetChartState_(sheet);
   if (before.length !== after.length || before.some(function (chart, index) {
-    return JSON.stringify(chart) !== JSON.stringify(after[index]);
+    const afterChart = after[index];
+    if (!afterChart || !installerChartRangeBindingsMatch_(chart.sourceRanges,
+      afterChart.sourceRanges)) {
+      return true;
+    }
+    const expectedPresentation = Object.assign({}, chart);
+    const actualPresentation = Object.assign({}, afterChart);
+    delete expectedPresentation.sourceRanges;
+    delete actualPresentation.sourceRanges;
+    return JSON.stringify(expectedPresentation) !== JSON.stringify(actualPresentation);
   })) {
     throw new Error('Supply-sheet chart presentation changed during service-identity migration.');
   }
+}
+
+function installerChartRangeBindingsMatch_(beforeRanges, afterRanges) {
+  if (beforeRanges.length !== afterRanges.length) {
+    return false;
+  }
+  return beforeRanges.every(function (beforeRange, index) {
+    const afterRange = afterRanges[index];
+    if (!afterRange) {
+      return false;
+    }
+    // Older interrupted journals stored bare A1 strings. They do not carry
+    // enough information to validate identity, but must remain resumable.
+    if (typeof beforeRange === 'string') {
+      return true;
+    }
+    return beforeRange.sheetId === afterRange.sheetId &&
+      beforeRange.sheetName === afterRange.sheetName;
+  });
 }
 
 function getInstallerSheetHeaders_(locale, isElectricity) {

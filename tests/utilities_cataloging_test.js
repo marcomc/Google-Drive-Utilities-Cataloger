@@ -119,6 +119,36 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   );
 }
 
+function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
+  const context = loadCataloger();
+  const expectedAddresses = [
+    'Cesena 125 Corso Camillo Benso Conte di Cavour 47521',
+    '47521 125 Cesena Corso Camillo Benso Conte di Cavour',
+    'Corso Camillo Benso Conte di Cavour Cesena 125'
+  ];
+  const evidenceAddresses = [
+    'Account details: Cesena, 47521; 125 Corso Camillo Benso Conte di Cavour.',
+    '125 - Corso Camillo Benso Conte di Cavour - notes - Cesena 47521',
+    'Other text 47521 Cesena Corso Camillo Benso Conte di Cavour 125'
+  ];
+
+  expectedAddresses.forEach((serviceAddress, index) => {
+    const result = context.validateServiceIdentity_({
+      account_holder: 'Laura Fortuna',
+      address_evidence: evidenceAddresses[index],
+      service_street: 'C.so Camillo Benso Conte di Cavour',
+      service_civic_number: '125',
+      service_city: 'Cesena',
+      service_postal_code: '47521'
+    }, {
+      account_holder: 'Laura Fortuna',
+      service_address: serviceAddress
+    });
+
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+  });
+}
+
 function testServiceIdentityRejectsExtractedStreetPrefix() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
@@ -131,6 +161,24 @@ function testServiceIdentityRejectsExtractedStreetPrefix() {
   }, {
     account_holder: 'Laura Fortuna',
     service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsExtractedComponentSuffix() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Via Roma 10, Cesena Centro',
+    service_street: 'Via Roma',
+    service_civic_number: '10',
+    service_city: 'Cesena Centro',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Via Roma 10, Cesena'
   });
 
   assert.equal(result.valid, false);
@@ -183,6 +231,24 @@ function testServiceIdentityRejectsCityMatchedByStreetTokens() {
   }, {
     account_holder: 'Laura Fortuna',
     service_address: 'Via Roma 10, Milano'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Via Roma 10',
+    service_street: 'Via Roma',
+    service_civic_number: '10',
+    service_city: 'Roma',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Via Roma 10 Roma'
   });
 
   assert.equal(result.valid, false);
@@ -4102,9 +4168,12 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceIdentityAcceptsComponentAndEvidencePermutations();
 testServiceIdentityRejectsExtractedStreetPrefix();
+testServiceIdentityRejectsExtractedComponentSuffix();
 testServiceIdentityRejectsWrongAddressAndMissingBaseline();
 testServiceIdentityRejectsCityMatchedByStreetTokens();
+testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents();
 testServiceIdentityRejectsUncorroboratedAddressEvidence();
 testServiceIdentityRejectsCivicNumberAmbiguity();
 testServiceIdentityRejectsMissingAddressComponents();
