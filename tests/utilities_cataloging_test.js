@@ -153,6 +153,24 @@ function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
   );
 }
 
+function testServiceIdentityRejectsCityMatchedByStreetTokens() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Via Roma 10, Roma',
+    service_street: 'Via Roma',
+    service_civic_number: '10',
+    service_city: 'Roma',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Via Roma 10, Milano'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
 function testServiceIdentityRejectsUncorroboratedAddressEvidence() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
@@ -4049,6 +4067,7 @@ testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
 testServiceIdentityRejectsWrongAddressAndMissingBaseline();
+testServiceIdentityRejectsCityMatchedByStreetTokens();
 testServiceIdentityRejectsUncorroboratedAddressEvidence();
 testServiceIdentityRejectsCivicNumberAmbiguity();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();

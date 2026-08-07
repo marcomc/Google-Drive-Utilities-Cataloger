@@ -894,6 +894,63 @@ function testSpreadsheetValidationUsesDetectedHeaderRow() {
   context.validateInstallerSheetHeaders_(sheet, 'it');
 }
 
+function createMutableInstallerChartFixture() {
+  const state = {
+    title: 'User chart', width: 500, height: 300, row: 12, column: 8,
+    offsetX: 14, offsetY: 18, ranges: ['D2:E20'], chartType: 'LINE',
+    hiddenDimensionStrategy: 'SHOW_BOTH', mergeStrategy: 'MERGE_ROWS',
+    numHeaders: 2, transposeRowsAndColumns: true,
+    options: { legend: { position: 'bottom' }, curveType: 'function' }
+  };
+  const chart = {
+    getOptions: () => ({
+      get: (key) => {
+        if (key === 'title') return state.title;
+        if (key === 'width') return state.width;
+        if (key === 'height') return state.height;
+        return state.options[key];
+      }
+    }),
+    getContainerInfo: () => ({
+      getAnchorRow: () => state.row, getAnchorColumn: () => state.column,
+      getOffsetX: () => state.offsetX, getOffsetY: () => state.offsetY
+    }),
+    getRanges: () => state.ranges.map((a1Notation) => ({
+      getA1Notation: () => a1Notation
+    })),
+    modify: () => {
+      const next = JSON.parse(JSON.stringify(state));
+      return {
+        getChartType: () => next.chartType,
+        getHiddenDimensionStrategy: () => next.hiddenDimensionStrategy,
+        getMergeStrategy: () => next.mergeStrategy,
+        getNumHeaders: () => next.numHeaders,
+        getTransposeRowsAndColumns: () => next.transposeRowsAndColumns,
+        clearRanges: () => { next.ranges = []; },
+        addRange: (range) => { next.ranges.push(range.getA1Notation()); },
+        setPosition: (row, column, offsetX, offsetY) => {
+          next.row = row; next.column = column;
+          next.offsetX = offsetX; next.offsetY = offsetY;
+        },
+        setOption: (key, value) => {
+          if (key === 'title' || key === 'width' || key === 'height') {
+            next[key] = value;
+          } else {
+            next.options[key] = value;
+          }
+        },
+        setChartType: (value) => { next.chartType = value; },
+        setHiddenDimensionStrategy: (value) => { next.hiddenDimensionStrategy = value; },
+        setMergeStrategy: (value) => { next.mergeStrategy = value; },
+        setNumHeaders: (value) => { next.numHeaders = value; },
+        setTransposeRowsAndColumns: (value) => { next.transposeRowsAndColumns = value; },
+        build: () => next
+      };
+    }
+  };
+  return { chart, state };
+}
+
 function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   const context = loadInstaller(() => {
     throw new Error('network must not run');
@@ -903,16 +960,17 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
       'Customer code', 'Reference year', 'Reference month'],
     ['2026-07-16', 'ENERGYGAS', 'INV-1', 'CON-1', 'CL-1', 2026, '07']
   ];
-  const chart = {
-    getOptions: () => ({
-      get: (key) => ({ title: 'User chart', width: 500, height: 300 })[key]
-    })
-  };
+  const chartFixture = createMutableInstallerChartFixture();
+  const { chart, state } = chartFixture;
   const sheet = {
     getName: () => 'Electricity',
     getLastRow: () => cells.length,
     getMaxRows: () => 100,
-    getRange: (row, column, rows = 1, columns = 1) => ({
+    getRange: (row, column, rows = 1, columns = 1) => {
+      if (typeof row === 'string') {
+        return { getA1Notation: () => row };
+      }
+      return {
       getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
       setValue: (value) => {
         while (!cells[row - 1]) {
@@ -930,16 +988,22 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
       setFontWeight: () => {},
       setBackground: () => {},
       setNumberFormat: () => {}
-    }),
+      };
+    },
     insertRowsBefore: (row, count) => {
       for (let index = 0; index < count; index += 1) {
         cells.splice(row - 1, 0, Array(20).fill(''));
       }
+      state.row += count;
+      state.ranges = ['D3:E21'];
     },
     insertColumnsBefore: (column, count) => {
       cells.forEach((line) => line.splice(column - 1, 0, ...Array(count).fill('')));
+      state.column += count;
+      state.ranges = ['F3:G21'];
     },
     getCharts: () => [chart],
+    updateChart: (next) => { Object.assign(state, next); },
     setFrozenRows: () => {},
     autoResizeColumns: () => {}
   };
@@ -983,6 +1047,9 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
     throw new Error('header row missing');
   };
   context.validateInstallerSheetHeaders_ = () => {};
+  const initialChartState = JSON.parse(JSON.stringify(
+    context.captureInstallerSheetChartState_(sheet)
+  ));
 
   context.ensureInstallerServiceIdentityFields_(sheet, 'Electricity', 'en');
   context.ensureInstallerServiceIdentityFields_(sheet, 'Electricity', 'en');
@@ -996,7 +1063,10 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   assert.deepEqual(cells[2].slice(3, 7), ['CON-1', '', '', 'CL-1']);
   assert.equal(cells.length, 3);
   assert.equal(sheet.getCharts().length, 1);
-  assert.equal(sheet.getCharts()[0].getOptions().get('title'), 'User chart');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.captureInstallerSheetChartState_(sheet))),
+    initialChartState
+  );
 }
 
 function testServiceIdentityMigrationPreservesUnownedPreHeaderRow() {
@@ -1178,6 +1248,224 @@ function testNewSupplySheetInitializesServiceIdentityControls() {
   assert.equal(cells[0][1], 'Water');
   assert.equal(cells[1][4], 'Account holder');
   assert.equal(cells[1][5], 'Service address');
+}
+
+function testServiceIdentityMigrationValidatesBeforeMutating() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  let mutations = 0;
+  context.getInstallerLocalization_ = () => ({ headerAliases: {} });
+  context.getSheetLayout_ = () => ({ headerRow: 1, headers: [], lookup: {} });
+  context.validateInstallerSheetHeaders_ = () => {
+    throw new Error('missing required header: sourceFile');
+  };
+  const sheet = {
+    getName: () => 'Water',
+    insertRowsBefore: () => { mutations += 1; },
+    insertColumnsBefore: () => { mutations += 1; },
+    setFrozenRows: () => { mutations += 1; }
+  };
+
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en'),
+    /missing required header/
+  );
+  assert.equal(mutations, 0);
+}
+
+function testServiceIdentityMigrationResumesCheckpointedControlRow() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const stored = {};
+  const cells = [
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address', 'Customer code']
+  ];
+  let failMetadata = true;
+  let rowInsertions = 0;
+  context.CONFIG = { PROPERTY_KEYS: {
+    SERVICE_IDENTITY_MIGRATION_PREFIX: 'SERVICE_IDENTITY_MIGRATION_'
+  } };
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (key) => stored[key] || '',
+    setProperty: (key, value) => { stored[key] = value; },
+    deleteProperty: (key) => { delete stored[key]; }
+  }) };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US',
+    installerSheetHeaders: [],
+    headerAliases: {
+      issueDate: ['Issue date'], supplier: ['Supplier'],
+      accountHolder: ['Account holder'], serviceAddress: ['Service address'],
+      customerCode: ['Customer code'], contractNumber: ['Contract number']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.getSheetLayout_ = () => {
+    const headerIndex = cells.findIndex((row) => row[0] === 'Issue date');
+    const lookup = {};
+    cells[headerIndex].forEach((header, index) => { lookup[header] = index + 1; });
+    return { headerRow: headerIndex + 1, headers: cells[headerIndex], lookup };
+  };
+  context.validateInstallerSheetHeaders_ = () => {};
+  const sheet = {
+    getSheetId: () => 42,
+    getName: () => 'Water',
+    getRange: (row, column, rows = 1, columns = 1) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      getDisplayValues: () => Array.from({ length: rows }, (_unused, rowOffset) =>
+        Array.from({ length: columns }, (_unusedColumn, columnOffset) =>
+          String((cells[row - 1 + rowOffset] || [])[column - 1 + columnOffset] || '')
+        )),
+      setValue: (value) => {
+        if (failMetadata && row === 1 && column === 1) {
+          throw new Error('simulated metadata interruption');
+        }
+        cells[row - 1][column - 1] = value;
+      },
+      setFontWeight: () => {}
+    }),
+    insertRowsBefore: (row, count) => {
+      rowInsertions += count;
+      cells.splice(row - 1, 0, ...Array.from({ length: count }, () =>
+        Array(12).fill('')));
+    },
+    getCharts: () => [],
+    setFrozenRows: () => {}
+  };
+
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en'),
+    /simulated metadata interruption/
+  );
+  assert.equal(rowInsertions, 1);
+  assert.ok(stored.SERVICE_IDENTITY_MIGRATION_42);
+
+  cells[0][0] = 'user-owned change';
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en'),
+    /checkpointed control row is no longer pristine/
+  );
+  cells[0][0] = '';
+  failMetadata = false;
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en');
+  assert.equal(rowInsertions, 1);
+  assert.equal(cells[0][0], 'Controllo fornitura');
+  assert.equal(stored.SERVICE_IDENTITY_MIGRATION_42, undefined);
+}
+
+function testServiceIdentityMigrationResumesCheckpointedIdentityColumns() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const stored = {};
+  const cells = [
+    ['Controllo fornitura', 'Water', 'Control note'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Customer code'],
+    ['2026-07-16', 'ENERGYGAS', 'INV-1', 'CON-1', 'CL-1']
+  ];
+  let failHeaderWrite = true;
+  let columnInsertions = 0;
+  context.CONFIG = { PROPERTY_KEYS: {
+    SERVICE_IDENTITY_MIGRATION_PREFIX: 'SERVICE_IDENTITY_MIGRATION_'
+  } };
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (key) => stored[key] || '',
+    setProperty: (key, value) => { stored[key] = value; },
+    deleteProperty: (key) => { delete stored[key]; }
+  }) };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US',
+    installerSheetHeaders: [
+      'Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address', 'Customer code'
+    ],
+    headerAliases: {
+      issueDate: ['Issue date'], supplier: ['Supplier'],
+      accountHolder: ['Account holder'], serviceAddress: ['Service address'],
+      customerCode: ['Customer code'], contractNumber: ['Contract number']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.getSheetLayout_ = () => {
+    const lookup = {};
+    cells[1].forEach((header, index) => { lookup[header] = index + 1; });
+    return { headerRow: 2, headers: cells[1], lookup };
+  };
+  context.validateInstallerSheetHeaders_ = () => {};
+  const sheet = {
+    getSheetId: () => 43,
+    getName: () => 'Water',
+    getRange: (row, column, rows = 1, columns = 1) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      getDisplayValues: () => Array.from({ length: rows }, (_unused, rowOffset) =>
+        Array.from({ length: columns }, (_unusedColumn, columnOffset) =>
+          String((cells[row - 1 + rowOffset] || [])[column - 1 + columnOffset] || '')
+        )),
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setValues: (values) => {
+        if (failHeaderWrite && row === 2 && column === 5) {
+          throw new Error('simulated identity-header interruption');
+        }
+        values.forEach((line, rowOffset) => line.forEach((value, columnOffset) => {
+          cells[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        }));
+      },
+      setFontWeight: () => {}
+    }),
+    insertColumnsBefore: (column, count) => {
+      columnInsertions += count;
+      cells.forEach((row) => row.splice(column - 1, 0, ...Array(count).fill('')));
+    },
+    getCharts: () => [],
+    setFrozenRows: () => {}
+  };
+
+  assert.throws(
+    () => context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en'),
+    /simulated identity-header interruption/
+  );
+  assert.equal(columnInsertions, 2);
+  assert.ok(stored.SERVICE_IDENTITY_MIGRATION_43);
+
+  failHeaderWrite = false;
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en');
+  assert.equal(columnInsertions, 2);
+  assert.deepEqual(cells[1].slice(3, 7), [
+    'Contract number', 'Account holder', 'Service address', 'Customer code'
+  ]);
+  assert.equal(stored.SERVICE_IDENTITY_MIGRATION_43, undefined);
+}
+
+function testServiceIdentityMigrationRestoresCompleteChartState() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const { chart, state } = createMutableInstallerChartFixture();
+  const sheet = {
+    getCharts: () => [chart],
+    getRange: (a1Notation) => ({ getA1Notation: () => a1Notation }),
+    updateChart: (next) => { Object.assign(state, next); }
+  };
+  const before = JSON.parse(JSON.stringify(
+    context.captureInstallerSheetChartState_(sheet)
+  ));
+  state.row = 13;
+  state.column = 9;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  state.ranges = ['D3:E21'];
+  state.chartType = 'COLUMN';
+  state.options.legend = { position: 'right' };
+
+  context.restoreInstallerSheetChartState_(before, sheet);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.captureInstallerSheetChartState_(sheet))),
+    before
+  );
 }
 
 function response(statusCode, body) {
@@ -1553,6 +1841,10 @@ testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
 testNewSupplySheetInitializesServiceIdentityControls();
+testServiceIdentityMigrationValidatesBeforeMutating();
+testServiceIdentityMigrationResumesCheckpointedControlRow();
+testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
+testServiceIdentityMigrationRestoresCompleteChartState();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

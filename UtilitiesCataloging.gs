@@ -1352,6 +1352,30 @@ function containsAddressTokenSequence_(haystack, needle) {
   return false;
 }
 
+function containsAddressComponentTuple_(address, street, civicNumber, city) {
+  const components = [street, civicNumber, city];
+  let start = 0;
+  for (let componentIndex = 0; componentIndex < components.length;
+    componentIndex += 1) {
+    const component = components[componentIndex];
+    let matchedAt = -1;
+    for (let index = start; index <= address.length - component.length;
+      index += 1) {
+      if (component.every(function (token, offset) {
+        return address[index + offset] === token;
+      })) {
+        matchedAt = index;
+        break;
+      }
+    }
+    if (matchedAt < 0) {
+      return false;
+    }
+    start = matchedAt + component.length;
+  }
+  return true;
+}
+
 function validateServiceIdentity_(extracted, expected) {
   const configured = expected || {};
   if (!normalizeNameIdentity_(configured.account_holder) ||
@@ -1375,12 +1399,10 @@ function validateServiceIdentity_(extracted, expected) {
       'Verify the account holder and the service address in the PDF.'
     );
   }
-  const addressMatches = containsAddressTokenSequence_(expectedAddress, street) &&
-    containsAddressTokenSequence_(expectedAddress, civicNumber) &&
-    containsAddressTokenSequence_(expectedAddress, city);
-  const evidenceMatches = containsAddressTokenSequence_(evidenceAddress, street) &&
-    containsAddressTokenSequence_(evidenceAddress, civicNumber) &&
-    containsAddressTokenSequence_(evidenceAddress, city);
+  const addressMatches = containsAddressComponentTuple_(expectedAddress, street,
+    civicNumber, city);
+  const evidenceMatches = containsAddressComponentTuple_(evidenceAddress, street,
+    civicNumber, city);
   if (holder !== normalizeNameIdentity_(configured.account_holder) ||
     !addressMatches || !evidenceMatches) {
     return invalidExtraction_(
