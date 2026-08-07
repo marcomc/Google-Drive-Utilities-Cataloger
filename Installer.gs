@@ -1460,19 +1460,28 @@ function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
       sheet.getName() + '.');
   }
   const currentSupply = String(sheet.getRange(metadataRow, 2).getDisplayValue() || '').trim();
+  const holderControl = sheet.getRange(metadataRow, holderColumn);
+  const addressControl = sheet.getRange(metadataRow, addressColumn);
   const currentHolder = headerRow > 1 ?
-    String(sheet.getRange(metadataRow, holderColumn).getDisplayValue() || '').trim() : '';
+    String(holderControl.getDisplayValue() || '').trim() : '';
   const currentAddress = headerRow > 1 ?
-    String(sheet.getRange(metadataRow, addressColumn).getDisplayValue() || '').trim() : '';
+    String(addressControl.getDisplayValue() || '').trim() : '';
   sheet.getRange(metadataRow, 1).setValue('Controllo fornitura');
   sheet.getRange(metadataRow, 2).setValue(currentSupply || supply);
   sheet.getRange(metadataRow, 3).setValue(
     isItalian ? 'Intestatario / indirizzo: modifica i campi di controllo' :
       'Account holder / address: edit the control fields'
   );
-  sheet.getRange(metadataRow, holderColumn).setValue(currentHolder);
-  sheet.getRange(metadataRow, addressColumn).setValue(currentAddress);
+  writeInstallerServiceIdentityControlValue_(holderControl, currentHolder);
+  writeInstallerServiceIdentityControlValue_(addressControl, currentAddress);
   sheet.getRange(metadataRow, 1, 1, 3).setFontWeight('bold');
+}
+
+function writeInstallerServiceIdentityControlValue_(control, value) {
+  if (typeof control.getFormula === 'function' && control.getFormula()) {
+    return;
+  }
+  control.setValue(value);
 }
 
 function hasInstallerServiceIdentityControls_(sheet) {

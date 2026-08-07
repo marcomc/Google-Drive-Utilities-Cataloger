@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Test fixtures deliberately define globals and callbacks consumed indirectly by
+# the sourced installer; ShellCheck cannot trace those runtime references.
+# shellcheck disable=SC1091,SC2034,SC2329
+
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -720,6 +724,8 @@ test_owner_only_deployment_discovery_requires_unique_identity() {
 
   set +e
   (
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
     run_apps_script_clasp_json() {
       printf -v "$2" '%s' '[
         {"deploymentId":"deployment-1"},
@@ -752,6 +758,157 @@ test_owner_only_deployment_discovery_requires_unique_identity() {
   set -e
   if [[ "${status}" -eq 0 || -n "${result}" ]]; then
     printf 'FAIL: ambiguous owner-only deployment discovery did not fail closed\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_owner_only_deployment_discovery_rejects_list_failures() {
+  local result=""
+  local status
+
+  set +e
+  (
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
+    run_apps_script_clasp_json() {
+      return 91
+    }
+    find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 || -n "${result}" ]]; then
+    printf 'FAIL: failed deployment listing did not fail closed\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_owner_only_deployment_discovery_rejects_zero_matches() {
+  local result=""
+  local status
+
+  set +e
+  (
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
+    run_apps_script_clasp_json() {
+      printf -v "$2" '%s' '[{"deploymentId":"deployment-1"}]'
+    }
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
+    read_apps_script_deployment() {
+      local response_json
+      local response_status
+
+      response_json="$(deployment_fixture \
+        "test-script" "EXECUTION_API" "ANYONE")"
+      response_status=$?
+      if [[ "${response_status}" -ne 0 ]]; then
+        return "${response_status}"
+      fi
+      printf -v "$4" '%s' "${response_json}"
+    }
+    find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 || -n "${result}" ]]; then
+    printf 'FAIL: zero matching deployments did not fail closed\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_owner_only_deployment_discovery_selects_unique_match() {
+  local actual
+  local status
+
+  set +e
+  actual="$(
+    (
+      result=""
+      # Invoked indirectly by find_owner_only_api_deployment.
+      # shellcheck disable=SC2329
+      run_apps_script_clasp_json() {
+        printf -v "$2" '%s' '[
+          {"deploymentId":"deployment-invalid"},
+          {"deploymentId":"deployment-valid"}
+        ]'
+      }
+      # Invoked indirectly by find_owner_only_api_deployment.
+      # shellcheck disable=SC2329
+      read_apps_script_deployment() {
+        local access="ANYONE"
+        local response_json
+        local response_status
+
+        if [[ "$3" == "deployment-valid" ]]; then
+          access="MYSELF"
+        fi
+        response_json="$(deployment_fixture \
+          "test-script" "EXECUTION_API" "${access}")"
+        response_status=$?
+        if [[ "${response_status}" -ne 0 ]]; then
+          return "${response_status}"
+        fi
+        response_json="$(jq -c --arg deployment_id "$3" \
+          '.deploymentId = $deployment_id' <<<"${response_json}")" || return
+        printf -v "$4" '%s' "${response_json}"
+      }
+      find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
+      printf '%s' "${result}"
+    )
+  )"
+  status=$?
+  set -e
+  if [[ "${status}" -ne 0 || "${actual}" != "deployment-valid" ]]; then
+    printf 'FAIL: unique owner-only deployment was not selected\n' >&2
+    failures=$((failures + 1))
+  fi
+}
+
+test_owner_only_deployment_discovery_aborts_on_inspection_failure() {
+  local read_log="${TEST_STATE_DIR}/deployment-discovery-read-log"
+  local result=""
+  local status
+
+  set +e
+  (
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
+    run_apps_script_clasp_json() {
+      printf -v "$2" '%s' '[
+        {"deploymentId":"deployment-valid"},
+        {"deploymentId":"deployment-unreadable"}
+      ]'
+    }
+    # Invoked indirectly by find_owner_only_api_deployment.
+    # shellcheck disable=SC2329
+    read_apps_script_deployment() {
+      local response_json
+      local response_status
+
+      printf '%s\n' "$3" >>"${read_log}"
+      if [[ "$3" == "deployment-unreadable" ]]; then
+        printf '%s\n' 'simulated inspection failure' >&2
+        return 92
+      fi
+      response_json="$(deployment_fixture \
+        "test-script" "EXECUTION_API" "MYSELF")"
+      response_status=$?
+      if [[ "${response_status}" -ne 0 ]]; then
+        return "${response_status}"
+      fi
+      response_json="$(jq -c --arg deployment_id "$3" \
+        '.deploymentId = $deployment_id' <<<"${response_json}")" || return
+      printf -v "$4" '%s' "${response_json}"
+    }
+    find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
+  ) >/dev/null 2>&1
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 || -n "${result}" ]] ||
+    [[ "$(<"${read_log}")" != $'deployment-valid\ndeployment-unreadable' ]]; then
+    printf 'FAIL: unreadable deployment was treated as an ordinary nonmatch\n' >&2
     failures=$((failures + 1))
   fi
 }
@@ -1166,6 +1323,10 @@ test_private_artifacts_are_ignored
 test_restrictive_installer_umask
 test_owner_only_api_deployment_validation
 test_owner_only_deployment_discovery_requires_unique_identity
+test_owner_only_deployment_discovery_rejects_list_failures
+test_owner_only_deployment_discovery_rejects_zero_matches
+test_owner_only_deployment_discovery_selects_unique_match
+test_owner_only_deployment_discovery_aborts_on_inspection_failure
 test_invalid_stored_deployment_is_not_recreated
 test_invalid_new_deployment_is_stored_for_safe_resume
 test_invalid_stored_deployment_blocks_source_push

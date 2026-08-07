@@ -110,13 +110,31 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   };
   const expected = {
     account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, 47521 Cesena'
   };
 
   assert.deepEqual(
     JSON.parse(JSON.stringify(context.validateServiceIdentity_(extracted, expected))),
     { valid: true }
   );
+}
+
+function testServiceIdentityRejectsExtractedStreetPrefix() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Corso Camillo Benso Conte di Cavour 125, Cesena',
+    service_street: 'Corso Camillo',
+    service_civic_number: '125',
+    service_city: 'Cesena',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
 }
 
 function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
@@ -204,6 +222,24 @@ function testServiceIdentityRejectsCivicNumberAmbiguity() {
   });
 
   assert.equal(result.valid, false);
+}
+
+function testServiceIdentityRejectsMissingAddressComponents() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Corso Camillo Benso Conte di Cavour 125, Cesena',
+    service_street: 'Corso Camillo Benso Conte di Cavour',
+    service_civic_number: '',
+    service_city: 'Cesena',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /missing or ambiguous/);
 }
 
 function installScriptPropertyStore(context, initialValues = {}) {
@@ -4066,10 +4102,12 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceIdentityRejectsExtractedStreetPrefix();
 testServiceIdentityRejectsWrongAddressAndMissingBaseline();
 testServiceIdentityRejectsCityMatchedByStreetTokens();
 testServiceIdentityRejectsUncorroboratedAddressEvidence();
 testServiceIdentityRejectsCivicNumberAmbiguity();
+testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testSupplierDefaultsNormalizeConfiguredIdentities();

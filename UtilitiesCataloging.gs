@@ -1352,28 +1352,21 @@ function containsAddressTokenSequence_(haystack, needle) {
   return false;
 }
 
-function containsAddressComponentTuple_(address, street, civicNumber, city) {
-  const components = [street, civicNumber, city];
-  let start = 0;
-  for (let componentIndex = 0; componentIndex < components.length;
-    componentIndex += 1) {
-    const component = components[componentIndex];
-    let matchedAt = -1;
-    for (let index = start; index <= address.length - component.length;
-      index += 1) {
-      if (component.every(function (token, offset) {
-        return address[index + offset] === token;
-      })) {
-        matchedAt = index;
-        break;
-      }
-    }
-    if (matchedAt < 0) {
-      return false;
-    }
-    start = matchedAt + component.length;
-  }
-  return true;
+function isAddressPostalCodeToken_(token) {
+  return /^\d{5}$/.test(token);
+}
+
+function completeServiceAddressMatches_(configuredAddress, street, civicNumber,
+  city) {
+  const configured = normalizeAddressTokenSequence_(configuredAddress)
+    .filter(function (token) {
+      return !isAddressPostalCodeToken_(token);
+    });
+  const extracted = street.concat(civicNumber, city);
+  return configured.length === extracted.length &&
+    configured.every(function (token, index) {
+      return token === extracted[index];
+    });
 }
 
 function validateServiceIdentity_(extracted, expected) {
@@ -1389,20 +1382,22 @@ function validateServiceIdentity_(extracted, expected) {
   const street = normalizeAddressTokenSequence_(extracted && extracted.service_street);
   const civicNumber = normalizeAddressTokenSequence_(extracted && extracted.service_civic_number);
   const city = normalizeAddressTokenSequence_(extracted && extracted.service_city);
-  const expectedAddress = normalizeAddressTokenSequence_(configured.service_address);
   const evidenceAddress = normalizeAddressTokenSequence_(
     extracted && extracted.address_evidence
-  );
+  ).filter(function (token) {
+    return !isAddressPostalCodeToken_(token);
+  });
   if (!holder || !street.length || !civicNumber.length || !city.length) {
     return invalidExtraction_(
       'The invoice account holder or service address is missing or ambiguous.',
       'Verify the account holder and the service address in the PDF.'
     );
   }
-  const addressMatches = containsAddressComponentTuple_(expectedAddress, street,
-    civicNumber, city);
-  const evidenceMatches = containsAddressComponentTuple_(evidenceAddress, street,
-    civicNumber, city);
+  const addressMatches = completeServiceAddressMatches_(
+    configured.service_address, street, civicNumber, city
+  );
+  const evidenceMatches = containsAddressTokenSequence_(evidenceAddress,
+    street.concat(civicNumber, city));
   if (holder !== normalizeNameIdentity_(configured.account_holder) ||
     !addressMatches || !evidenceMatches) {
     return invalidExtraction_(

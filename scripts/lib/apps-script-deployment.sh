@@ -204,15 +204,19 @@ find_owner_only_api_deployment() {
   while IFS= read -r candidate_id; do
     [[ -n "${candidate_id}" ]] || continue
     deployment_json=""
-    if read_apps_script_deployment \
+    if ! read_apps_script_deployment \
       "${auth_file}" \
       "${script_id}" \
       "${candidate_id}" \
-      deployment_json 2>/dev/null &&
-      validate_owner_only_api_deployment \
-        "${deployment_json}" \
-        "${script_id}" \
-        "${candidate_id}" >/dev/null 2>&1; then
+      deployment_json; then
+      printf 'Could not inspect Apps Script deployment %s during discovery.\n' \
+        "${candidate_id}" >&2
+      return 1
+    fi
+    if validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${candidate_id}" >/dev/null 2>&1; then
       selected_id="${candidate_id}"
       match_count=$((match_count + 1))
     fi

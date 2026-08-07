@@ -1194,6 +1194,56 @@ function testServiceIdentityMetadataUsesDetectedColumns() {
   assert.equal(cells[0][2], 'Account holder / address: edit the control fields');
 }
 
+function testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [
+    ['Control', 'Water', 'Existing note', '', '', 'Laura Fortuna',
+      'Via Roma 10, Cesena'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Customer code', 'Account holder', 'Service address']
+  ];
+  const formulas = [
+    ['', '', '', '', '', '=Settings!B2', '=Settings!B3'],
+    ['', '', '', '', '', '', '']
+  ];
+  const writes = [];
+  const sheet = {
+    getName: () => 'Water',
+    getRange: (row, column) => ({
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      getFormula: () => formulas[row - 1][column - 1],
+      setValue: (value) => {
+        writes.push([row, column, value]);
+        cells[row - 1][column - 1] = value;
+        formulas[row - 1][column - 1] = '';
+      },
+      setFontWeight: () => {}
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US',
+    headerAliases: {
+      accountHolder: ['Account holder'], serviceAddress: ['Service address']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  const layout = {
+    headerRow: 2,
+    lookup: { 'Account holder': 6, 'Service address': 7 }
+  };
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Water', layout, 'en');
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Water', layout, 'en');
+
+  assert.equal(formulas[0][5], '=Settings!B2');
+  assert.equal(formulas[0][6], '=Settings!B3');
+  assert.equal(cells[0][5], 'Laura Fortuna');
+  assert.equal(cells[0][6], 'Via Roma 10, Cesena');
+  assert.deepEqual(writes.filter(([, column]) => column === 6 || column === 7), []);
+}
+
 function testNewSupplySheetInitializesServiceIdentityControls() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -1840,6 +1890,7 @@ testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
 testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
+testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry();
 testNewSupplySheetInitializesServiceIdentityControls();
 testServiceIdentityMigrationValidatesBeforeMutating();
 testServiceIdentityMigrationResumesCheckpointedControlRow();
