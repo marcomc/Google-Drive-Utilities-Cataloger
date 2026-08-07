@@ -134,6 +134,11 @@
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.
+- After an accepted Apps Script deployment update, verify metadata with a
+  bounded read-only poll. Retry only the exact validated pre-update version;
+  treat authorization, identity, entry-point, transport, and any other
+  unexpected version as immediate failures, and test their exact read and wait
+  counts.
 - Classify automatic paid-backend fallback only from provider-specific,
   explicit terminal quota or credit signals. Never infer it from an HTTP status
   or documentation URL alone; retain negative tests for transient rate limits
