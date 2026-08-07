@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-07 - Supply identity verification
+
+### Added
+
+- Store the expected account holder and service address in the metadata row of
+  every configured supply sheet.
+- Store the printed account holder and service address on every imported invoice
+  row for historical traceability.
+- Compare invoice identity using normalized holder, street, civic number, and
+  city values, independently of supplier, contract number, or customer code.
+- Add an idempotent owner-controlled migration for existing supply tabs.
+
+### Changed
+
+- A new supplier can import when the persistent holder and service address
+  match; a missing baseline or mismatch remains `NEEDS REVIEW`.
+- Preserve source-sheet charts during identity-field migration and rebuild
+  electricity statistics only through the existing managed dashboard path.
+- Preserve legacy formula-based electricity dashboards without adopting or
+  rebuilding their user-owned charts.
+- Discover the saved local Desktop OAuth client automatically and provide
+  `make renew-clasp-auth` to renew isolated clasp authorization without a
+  source deployment.
+
 ## [0.3.2] - 2026-08-01 - Reliable Apps Script deployment verification
 
 ### Fixed

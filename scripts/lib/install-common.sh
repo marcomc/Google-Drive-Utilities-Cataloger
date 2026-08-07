@@ -20,6 +20,22 @@ extract_google_resource_id() {
   return 1
 }
 
+find_saved_oauth_client() {
+  local config_home="${XDG_CONFIG_HOME:-${HOME:+${HOME}/.config}}"
+  local candidate
+
+  [[ -n "${config_home}" ]] || return 0
+  for candidate in \
+    "${config_home}/gduc/ci-deployment-oauth.json" \
+    "${config_home}/gduc/oauth-client.json"; do
+    if [[ -f "${candidate}" && ! -L "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 0
+}
+
 is_valid_project_id() {
   local project_id="${1:-}"
 

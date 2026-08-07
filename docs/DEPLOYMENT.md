@@ -263,6 +263,23 @@ left in `Testing`: authorizations requesting non-basic scopes can expire after
 seven days. Do not replace the deployment ID or Apps Script source for this
 failure.
 
+For a local installation, first run:
+
+```bash
+make renew-clasp-auth
+```
+
+The command discovers the saved Desktop client at
+`$XDG_CONFIG_HOME/gduc/ci-deployment-oauth.json` or
+`$HOME/.config/gduc/ci-deployment-oauth.json`, recreates only the ignored
+local `.installer/clasp-auth/.clasprc.json` when necessary, and verifies the
+existing owner-only deployment. It adopts an unmarked local profile only when
+that exact file is the sole legacy installer state. If installer state is
+absent and several owner-only deployments exist, it stops rather than choosing
+one by version. It does not push source or change the deployment. Use
+`GDUC_OAUTH_CLIENT_JSON=/secure/path/oauth-client.json` only when the canonical
+saved client is unavailable.
+
 1. In Google Cloud Console, open **Google Auth Platform > Audience** for the
    installation project and move an external app to **In production**. This
    changes OAuth consent publication status; it does not publish Apps Script

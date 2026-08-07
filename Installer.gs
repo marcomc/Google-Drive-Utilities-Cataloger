@@ -90,6 +90,42 @@ function bootstrapCatalogerInstallation(options) {
 }
 
 /**
+ * Add the supply-identity fields to every configured supply tab. This is an
+ * owner-controlled migration for existing installations; it is idempotent
+ * and refreshes the managed electricity dashboard after the source tab
+ * changes.
+ */
+function migrateCatalogerServiceIdentityFields() {
+  assertCatalogConfiguration_();
+  return withCatalogLifecycleLock_('service-identity-sheet-migration', function () {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const seenSheets = Object.create(null);
+    const migrated = [];
+    automationConfig.canonical_supplies.forEach(function (supply) {
+      const sheetName = automationConfig.sheet_by_supply[supply];
+      if (seenSheets[sheetName]) {
+        return;
+      }
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) {
+        throw new Error('Configured spreadsheet tab is missing: ' + sheetName);
+      }
+      ensureInstallerServiceIdentityFields_(sheet, supply,
+        automationConfig.locale || 'en');
+      migrated.push({
+        supply: supply,
+        sheet: sheetName,
+        identityConfigured: hasInstallerServiceIdentityControls_(sheet)
+      });
+      seenSheets[sheetName] = true;
+    });
+    initializeElectricityDashboard_(spreadsheet, automationConfig);
+    return { migrated: true, sheets: migrated };
+  });
+}
+
+/**
  * Reconfigure only the installed time zone without reading the deleted
  * installer handoff or changing triggers and event transport.
  */
@@ -1136,22 +1172,160 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     const sheet = spreadsheet.getSheetByName(sheetName) ||
       spreadsheet.insertSheet(sheetName);
     if (sheet.getLastRow() === 0) {
-      const headerRange = sheet.getRange(1, 1, 1, headers.length);
+      const headerRange = sheet.getRange(2, 1, 1, headers.length);
       headerRange.setValues([headers]);
       headerRange.setFontWeight('bold');
       headerRange.setBackground('#d9ead3');
-      sheet.setFrozenRows(1);
-      sheet.getRange(2, 1, Math.max(1, sheet.getMaxRows() - 1), 1)
+      const lookup = Object.create(null);
+      headers.forEach(function (header, index) {
+        lookup[normalizeHeader_(header)] = index + 1;
+      });
+      writeInstallerServiceIdentityMetadata_(sheet, sheetName, {
+        headerRow: 2,
+        lookup: lookup
+      }, automationConfig.locale || 'en');
+      sheet.setFrozenRows(2);
+      sheet.getRange(3, 1, Math.max(1, sheet.getMaxRows() - 2), 1)
         .setNumberFormat('yyyy-mm-dd');
-      sheet.getRange(2, 7, Math.max(1, sheet.getMaxRows() - 1), 4)
+      sheet.getRange(3, 11, Math.max(1, sheet.getMaxRows() - 2), 4)
         .setNumberFormat('#,##0.00');
       sheet.autoResizeColumns(1, headers.length);
     } else {
-      validateInstallerSheetHeaders_(sheet, automationConfig.locale || 'en');
+      ensureInstallerServiceIdentityFields_(sheet, supply,
+        automationConfig.locale || 'en');
     }
   });
   initializeElectricityDashboard_(spreadsheet, automationConfig);
 
+}
+
+function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
+  const localization = getInstallerLocalization_(locale);
+  const beforeCharts = captureInstallerSheetChartState_(sheet);
+  let layout = getSheetLayout_(sheet, localization.headerAliases);
+  if (layout.headerRow === 1) {
+    sheet.insertRowsBefore(1, 1);
+    layout = getSheetLayout_(sheet, localization.headerAliases);
+  }
+
+  const holderHeader = localization.installerSheetHeaders[
+    localization.installerSheetHeaders.indexOf('Account holder') >= 0 ?
+      localization.installerSheetHeaders.indexOf('Account holder') :
+      localization.installerSheetHeaders.indexOf('Intestatario')
+  ];
+  const addressHeader = localization.installerSheetHeaders[
+    localization.installerSheetHeaders.indexOf('Service address') >= 0 ?
+      localization.installerSheetHeaders.indexOf('Service address') :
+      localization.installerSheetHeaders.indexOf('Indirizzo di fornitura')
+  ];
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  const customerColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.customerCode);
+  const contractColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.contractNumber);
+  const missingHeaders = [];
+  if (!holderColumn) {
+    missingHeaders.push(holderHeader);
+  }
+  if (!addressColumn) {
+    missingHeaders.push(addressHeader);
+  }
+  if (missingHeaders.length > 0) {
+    let insertionColumn = customerColumn || contractColumn + 1;
+    if (!holderColumn && addressColumn) {
+      insertionColumn = addressColumn;
+    } else if (!addressColumn && holderColumn) {
+      insertionColumn = holderColumn + 1;
+    }
+    if (!insertionColumn) {
+      throw new Error('Cannot locate the contract or customer header in sheet ' +
+        sheet.getName() + '.');
+    }
+    sheet.insertColumnsBefore(insertionColumn, missingHeaders.length);
+    sheet.getRange(layout.headerRow, insertionColumn, 1,
+      missingHeaders.length).setValues([missingHeaders]);
+    layout = getSheetLayout_(sheet, localization.headerAliases);
+  }
+
+  writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale);
+  sheet.setFrozenRows(Math.max(2, layout.headerRow));
+  assertInstallerSheetChartStatePreserved_(beforeCharts, sheet);
+  validateInstallerSheetHeaders_(sheet, locale);
+  return layout;
+}
+
+function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
+  const headerRow = layout.headerRow;
+  const metadataRow = headerRow > 1 ? headerRow - 1 : 1;
+  const localization = getInstallerLocalization_(locale || 'en');
+  const isItalian = localization.spreadsheetLocale === 'it_IT';
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  if (!holderColumn || !addressColumn) {
+    throw new Error('Cannot locate service-identity headers in sheet ' +
+      sheet.getName() + '.');
+  }
+  const currentSupply = String(sheet.getRange(metadataRow, 2).getDisplayValue() || '').trim();
+  const currentHolder = headerRow > 1 ?
+    String(sheet.getRange(metadataRow, holderColumn).getDisplayValue() || '').trim() : '';
+  const currentAddress = headerRow > 1 ?
+    String(sheet.getRange(metadataRow, addressColumn).getDisplayValue() || '').trim() : '';
+  sheet.getRange(metadataRow, 1).setValue('Controllo fornitura');
+  sheet.getRange(metadataRow, 2).setValue(currentSupply || supply);
+  sheet.getRange(metadataRow, 3).setValue(
+    isItalian ? 'Intestatario / indirizzo: modifica i campi di controllo' :
+      'Account holder / address: edit the control fields'
+  );
+  sheet.getRange(metadataRow, holderColumn).setValue(currentHolder);
+  sheet.getRange(metadataRow, addressColumn).setValue(currentAddress);
+  sheet.getRange(metadataRow, 1, 1, 3).setFontWeight('bold');
+}
+
+function hasInstallerServiceIdentityControls_(sheet) {
+  const layout = getSheetLayout_(sheet);
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  if (layout.headerRow <= 1 || !holderColumn || !addressColumn) {
+    return false;
+  }
+  return Boolean(
+    String(sheet.getRange(layout.headerRow - 1, holderColumn).getDisplayValue() || '').trim() &&
+    String(sheet.getRange(layout.headerRow - 1, addressColumn).getDisplayValue() || '').trim()
+  );
+}
+
+function captureInstallerSheetChartState_(sheet) {
+  if (!sheet || typeof sheet.getCharts !== 'function') {
+    return [];
+  }
+  return sheet.getCharts().map(function (chart) {
+    const options = typeof chart.getOptions === 'function' ? chart.getOptions() : null;
+    return {
+      title: options ? String(options.get('title') || '') : '',
+      width: options ? Number(options.get('width')) || 0 : 0,
+      height: options ? Number(options.get('height')) || 0 : 0
+    };
+  });
+}
+
+function assertInstallerSheetChartStatePreserved_(before, sheet) {
+  if (!before || typeof sheet.getCharts !== 'function') {
+    return;
+  }
+  const after = captureInstallerSheetChartState_(sheet);
+  if (before.length !== after.length || before.some(function (chart, index) {
+    return chart.title !== after[index].title ||
+      chart.width !== after[index].width || chart.height !== after[index].height;
+  })) {
+    throw new Error('Supply-sheet chart presentation changed during service-identity migration.');
+  }
 }
 
 function getInstallerSheetHeaders_(locale, isElectricity) {

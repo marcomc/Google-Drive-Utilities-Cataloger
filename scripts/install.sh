@@ -78,6 +78,7 @@ Install Google Drive Utilities Cataloger using a resumable CLI-first workflow.
 Options:
   --check             Check local tools and authentication without provisioning.
   --resume            Continue after the documented Google browser steps.
+  --reauthorize       Renew isolated clasp authorization and verify deployment.
   --reconfigure-time-zone
                       Update an installed instance's IANA time zone only.
   --debug             Show additional non-secret diagnostic information.
@@ -89,6 +90,7 @@ Options:
 Make targets:
   make install
   make install-resume
+  make renew-clasp-auth
   make install-reconfigure-time-zone
   make install-check
   make install-debug
@@ -179,6 +181,34 @@ directory_contains_only_installer_state() {
   return 0
 }
 
+directory_is_legacy_reauthorization_profile() {
+  local directory="$1"
+  local auth_file="${directory}/clasp-auth/.clasprc.json"
+  local entry
+
+  [[ -d "${directory}/clasp-auth" && ! -L "${directory}/clasp-auth" ]] || return 1
+  [[ -f "${auth_file}" && ! -L "${auth_file}" ]] || return 1
+  for entry in \
+    "${directory}"/* \
+    "${directory}"/.[!.]* \
+    "${directory}"/..?*; do
+    if [[ ! -e "${entry}" && ! -L "${entry}" ]]; then
+      continue
+    fi
+    [[ "${entry}" == "${directory}/clasp-auth" ]] || return 1
+  done
+  for entry in \
+    "${directory}/clasp-auth"/* \
+    "${directory}/clasp-auth"/.[!.]* \
+    "${directory}/clasp-auth"/..?*; do
+    if [[ ! -e "${entry}" && ! -L "${entry}" ]]; then
+      continue
+    fi
+    [[ "${entry}" == "${auth_file}" ]] || return 1
+  done
+  return 0
+}
+
 canonicalize_state_target() {
   local requested="${1%/}"
   local parent
@@ -208,6 +238,7 @@ validate_state_directory_setting() {
   local requested_state_dir="${STATE_DIR%/}"
   local canonical_state_dir
   local canonical_status
+  local legacy_profile=0
   local marker_value
 
   if [[ "${requested_state_dir}" != /* ]]; then
@@ -261,14 +292,24 @@ validate_state_directory_setting() {
         "${INSTALL_DOC}#environment-variable-reference"
     fi
   else
-    evaluate_predicate directory_is_empty "${STATE_DIR}"
-    if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
-      if [[ "${CUSTOM_STATE_DIR_REQUESTED}" -eq 1 ]]; then
-        die "GDUC_STATE_DIR must be empty or already installer-owned." \
-          "${INSTALL_DOC}#environment-variable-reference"
+    if [[ "${MODE}" == "reauthorize" &&
+      "${CUSTOM_STATE_DIR_REQUESTED}" -eq 0 ]]; then
+      evaluate_predicate directory_is_legacy_reauthorization_profile "${STATE_DIR}"
+      if [[ "${PREDICATE_STATUS}" -eq 0 ]]; then
+        legacy_profile=1
+        info "Adopting the exact legacy local clasp profile for reauthorization."
       fi
-      die "The default installer state is not installer-owned." \
-        "${INSTALL_DOC}#resetting-private-installer-state"
+    fi
+    if [[ "${legacy_profile}" -eq 0 ]]; then
+      evaluate_predicate directory_is_empty "${STATE_DIR}"
+      if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+        if [[ "${CUSTOM_STATE_DIR_REQUESTED}" -eq 1 ]]; then
+          die "GDUC_STATE_DIR must be empty or already installer-owned." \
+            "${INSTALL_DOC}#environment-variable-reference"
+        fi
+        die "The default installer state is not installer-owned." \
+          "${INSTALL_DOC}#resetting-private-installer-state"
+      fi
     fi
   fi
 
@@ -358,6 +399,9 @@ parse_arguments() {
         ;;
       --resume)
         MODE="resume"
+        ;;
+      --reauthorize)
+        MODE="reauthorize"
         ;;
       --reconfigure-time-zone)
         MODE="reconfigure-time-zone"
@@ -1421,7 +1465,8 @@ open_browser_handoff() {
     "${project_number}"
   printf '  6. Customize config.local.json if the installer created it.\n\n'
   printf 'Then resume:\n'
-  printf '  GDUC_OAUTH_CLIENT_JSON=/path/to/client.json make install-resume\n\n'
+  printf '  make install-resume\n'
+  printf '  # Or set GDUC_OAUTH_CLIENT_JSON for a non-default client path.\n\n'
   printf 'Detailed procedure: %s#browser-handoff\n' "${INSTALL_DOC}"
 
   if [[ "${NO_OPEN}" -eq 0 ]]; then
@@ -1469,6 +1514,7 @@ validate_oauth_client() {
   local canonical_client_file
   local client_basename
   local client_id
+  local project_id
   local project_number
 
   if [[ ! -f "${client_file}" ]]; then
@@ -1506,7 +1552,17 @@ validate_oauth_client() {
     die "OAuth client JSON has no installed.client_id." \
       "${INSTALL_DOC}#desktop-oauth-client"
   fi
-  project_number="$(state_get '.projectNumber')"
+  if [[ -f "${STATE_FILE}" ]]; then
+    project_number="$(state_get '.projectNumber')"
+  else
+    project_id="$(jq -er '.projectId' "${PROJECT_ROOT}/.clasp.json" 2>/dev/null)" ||
+      die "Cannot determine the Apps Script Cloud project for OAuth validation." \
+        "${INSTALL_DOC}#desktop-oauth-client"
+    project_number="$(gcloud projects describe "${project_id}" \
+      --format='value(projectNumber)' 2>/dev/null)" ||
+      die "Cannot determine the Cloud project number for OAuth validation." \
+        "${INSTALL_DOC}#desktop-oauth-client"
+  fi
   if [[ "${client_id}" != "${project_number}-"* ]]; then
     die "The OAuth client belongs to a different Cloud project." \
       "${INSTALL_DOC}#desktop-oauth-client"
@@ -1528,6 +1584,11 @@ authorize_installer_execution() {
       return 0
     fi
     warning "Stored installer authorization is invalid; recreating it."
+    if [[ ! -f "${STATE_MARKER}" ||
+      "$(<"${STATE_MARKER}")" != "google-drive-utilities-cataloger" ]]; then
+      die "Refusing to replace an authorization outside installer-owned state." \
+        "${INSTALL_DOC}#renew-clasp-authorization"
+    fi
     rm -rf "${AUTH_DIR}"
   fi
 
@@ -1546,7 +1607,7 @@ authorize_installer_execution() {
 ensure_api_executable_deployment() {
   local creation_description
   local deployment_count
-  local deployment_id
+  local deployment_id=""
   local deployments_json
   local deployment_json
   local deployment_output
@@ -2135,6 +2196,12 @@ complete_installation() {
   local bootstrap_secret_version
 
   if [[ -z "${client_file}" ]]; then
+    client_file="$(find_saved_oauth_client 2>/dev/null)"
+    if [[ -n "${client_file}" ]]; then
+      info "Using the saved Desktop OAuth client from the local GDUC config directory."
+    fi
+  fi
+  if [[ -z "${client_file}" ]]; then
     prompt_value client_file \
       "Path to the Desktop OAuth client JSON downloaded from Google Cloud" \
       "" \
@@ -2169,6 +2236,88 @@ complete_installation() {
   fi
   printf '  Next: add a controlled PDF and follow %s#controlled-validation\n' \
     "${INSTALL_DOC}"
+}
+
+reauthorize_clasp() {
+  local client_file="${GDUC_OAUTH_CLIENT_JSON:-}"
+  local deployment_id=""
+  local deployment_json
+  local phase
+  local script_id
+  local has_installer_state=0
+  local discovery_status=0
+  local read_status=0
+
+  if [[ -f "${STATE_FILE}" ]]; then
+    has_installer_state=1
+    validate_installer_state
+    phase="$(state_get '.phase')"
+    if [[ "${phase}" != "complete" ]]; then
+      die "Complete the installation before renewing clasp authorization." \
+        "${INSTALL_DOC}#renew-clasp-authorization"
+    fi
+    script_id="$(state_get '.scriptId')"
+    deployment_id="$(state_get '.deploymentId')"
+  else
+    if [[ ! -f "${PROJECT_ROOT}/.clasp.json" ]]; then
+      die "No completed installer state or Apps Script mapping exists." \
+        "${INSTALL_DOC}#renew-clasp-authorization"
+    fi
+    script_id="$(jq -er '.scriptId' "${PROJECT_ROOT}/.clasp.json")"
+  fi
+  if [[ -z "${client_file}" ]]; then
+    client_file="$(find_saved_oauth_client 2>/dev/null)"
+    if [[ -n "${client_file}" ]]; then
+      info "Using the saved Desktop OAuth client from the local GDUC config directory."
+    fi
+  fi
+  if [[ -z "${client_file}" ]]; then
+    prompt_value client_file \
+      "Path to the Desktop OAuth client JSON downloaded from Google Cloud" \
+      "" \
+      ""
+  fi
+  validate_oauth_client "${client_file}"
+  authorize_installer_execution "${client_file}"
+
+  if [[ -z "${deployment_id}" ]]; then
+    if [[ "${has_installer_state}" -eq 1 ]]; then
+      die "No stored Apps Script deployment ID exists; explicit deployment recovery is required." \
+        "${INSTALL_DOC}#renew-clasp-authorization"
+    fi
+    set +e
+    find_owner_only_api_deployment \
+      "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" \
+      deployment_id
+    discovery_status=$?
+    set -e
+    if [[ "${discovery_status}" -ne 0 ]]; then
+      die "Could not discover a unique owner-only Apps Script deployment." \
+        "${INSTALL_DOC}#renew-clasp-authorization"
+    fi
+  fi
+  deployment_json=""
+  set +e
+  read_apps_script_deployment \
+    "${AUTH_DIR}/.clasprc.json" \
+    "${script_id}" \
+    "${deployment_id}" \
+    deployment_json
+  read_status=$?
+  if [[ "${read_status}" -eq 0 ]]; then
+    validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${deployment_id}"
+    read_status=$?
+  fi
+  set -e
+  if [[ "${read_status}" -ne 0 ]]; then
+    die "The renewed clasp authorization could not validate the stored owner-only deployment." \
+      "${INSTALL_DOC}#renew-clasp-authorization"
+  fi
+  success "Isolated clasp authorization renewed and Apps Script deployment verified."
 }
 
 resume_installation() {
@@ -2242,6 +2391,12 @@ reconfigure_time_zone() {
   fi
   state_set "pendingTimeZone" "${requested_time_zone}"
 
+  if [[ -z "${client_file}" ]]; then
+    client_file="$(find_saved_oauth_client 2>/dev/null)"
+    if [[ -n "${client_file}" ]]; then
+      info "Using the saved Desktop OAuth client from the local GDUC config directory."
+    fi
+  fi
   if [[ -z "${client_file}" ]]; then
     prompt_value client_file \
       "Path to the Desktop OAuth client JSON downloaded from Google Cloud" \
@@ -2446,7 +2601,7 @@ main() {
       reset_installer_state
       exit 0
       ;;
-    install | resume | reconfigure-time-zone)
+    install | resume | reauthorize | reconfigure-time-zone)
       ;;
     *)
       die "Unsupported installer mode: ${MODE}" "${INSTALL_DOC}#quick-start"
@@ -2457,6 +2612,10 @@ main() {
   run_preflight
   if [[ "${MODE}" == "reconfigure-time-zone" ]]; then
     reconfigure_time_zone
+    exit 0
+  fi
+  if [[ "${MODE}" == "reauthorize" ]]; then
+    reauthorize_clasp
     exit 0
   fi
   if [[ "${MODE}" == "resume" ]]; then

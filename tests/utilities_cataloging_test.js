@@ -74,7 +74,13 @@ function validInvoice() {
     supplier: 'SUPPLIER',
     supply_type: 'Water',
     address_type: 'import',
+    account_holder: 'Laura Fortuna',
     issue_date: '2026-07-16',
+    address_evidence: 'Laura Fortuna, Corso Camillo Benso Conte di Cavour 125, Cesena',
+    service_street: 'Corso Camillo Benso Conte di Cavour',
+    service_civic_number: '125',
+    service_city: 'Cesena',
+    service_postal_code: '47521',
     identifier: 'INV-1',
     contract_number: 'CONTRACT-1',
     customer_code: 'CUSTOMER-1',
@@ -90,6 +96,96 @@ function validInvoice() {
     problems: [],
     sheet_values: []
   };
+}
+
+function testServiceIdentityMatchesNormalizedHolderAndAddress() {
+  const context = loadCataloger();
+  const extracted = {
+    account_holder: 'FORTUNA, Laura',
+    address_evidence: 'Corso Camillo Benso Conte di Cavour, 125 - 47521 CESENA',
+    service_street: 'C.so Camillo Benso Conte di Cavour',
+    service_civic_number: '125',
+    service_city: 'CESENA',
+    service_postal_code: '47521'
+  };
+  const expected = {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  };
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.validateServiceIdentity_(extracted, expected))),
+    { valid: true }
+  );
+}
+
+function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
+  const context = loadCataloger();
+  const extracted = {
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Via dello Studio 126, Cesena',
+    service_street: 'Via dello Studio',
+    service_civic_number: '126',
+    service_city: 'Cesena',
+    service_postal_code: '47521'
+  };
+
+  assert.equal(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: 'Laura Fortuna',
+      service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+    }).valid,
+    false
+  );
+  assert.match(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: 'Laura Fortuna',
+      service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+    }).problem,
+    /does not match/
+  );
+  assert.match(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: '',
+      service_address: ''
+    }).problem,
+    /no configured account holder/
+  );
+}
+
+function testServiceIdentityRejectsUncorroboratedAddressEvidence() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Via dello Studio 126, Cesena',
+    service_street: 'Corso Camillo Benso Conte di Cavour',
+    service_civic_number: '125',
+    service_city: 'Cesena',
+    service_postal_code: '47521'
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsCivicNumberAmbiguity() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Corso Camillo Benso Conte di Cavour 125/A, Cesena',
+    service_street: 'Corso Camillo Benso Conte di Cavour',
+    service_civic_number: '125/A',
+    service_city: 'Cesena',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  });
+
+  assert.equal(result.valid, false);
 }
 
 function installScriptPropertyStore(context, initialValues = {}) {
@@ -945,6 +1041,11 @@ function testDeveloperApiKeyUsesHeader() {
       'supply_type',
       'address_type',
       'address_evidence',
+      'account_holder',
+      'service_street',
+      'service_civic_number',
+      'service_city',
+      'service_postal_code',
       'issue_date',
       'identifier',
       'contract_number',
@@ -1262,6 +1363,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1307,7 +1409,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
     message: 'catalog-file-processing-error',
     component: 'drive-utilities-cataloger',
-    applicationVersion: '0.3.2',
+    applicationVersion: '0.4.0',
     event: 'catalog-file-processing-error',
     fileId: 'file-id',
     errorType: 'Error',
@@ -1443,6 +1545,7 @@ function testDestinationFolderCreationCheckpointsEachCreatedPath() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => validInvoice();
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1915,6 +2018,7 @@ function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1977,6 +2081,7 @@ function testMutationJournalPersistsFailureStageAtProcessingCheckpoints() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -3942,6 +4047,10 @@ testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
 testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
+testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceIdentityRejectsWrongAddressAndMissingBaseline();
+testServiceIdentityRejectsUncorroboratedAddressEvidence();
+testServiceIdentityRejectsCivicNumberAmbiguity();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testSupplierDefaultsNormalizeConfiguredIdentities();

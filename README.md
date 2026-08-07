@@ -64,9 +64,12 @@ Follow the printed one-time Google browser handoff, customize the generated
 `config.local.json`, then resume:
 
 ```bash
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
-  make install-resume
+make install-resume
 ```
+
+The installer discovers the saved Desktop OAuth client under
+`$HOME/.config/gduc/` automatically; set `GDUC_OAUTH_CLIENT_JSON` only for a
+different client path.
 
 See the [installation guide](docs/INSTALLATION.md) for tool setup, supported
 environment variables, Gemini runtime choices, and troubleshooting.

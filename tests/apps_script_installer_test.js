@@ -894,6 +894,204 @@ function testSpreadsheetValidationUsesDetectedHeaderRow() {
   context.validateInstallerSheetHeaders_(sheet, 'it');
 }
 
+function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  const cells = [
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Customer code', 'Reference year', 'Reference month'],
+    ['2026-07-16', 'ENERGYGAS', 'INV-1', 'CON-1', 'CL-1', 2026, '07']
+  ];
+  const chart = {
+    getOptions: () => ({
+      get: (key) => ({ title: 'User chart', width: 500, height: 300 })[key]
+    })
+  };
+  const sheet = {
+    getName: () => 'Electricity',
+    getLastRow: () => cells.length,
+    getMaxRows: () => 100,
+    getRange: (row, column, rows = 1, columns = 1) => ({
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      setValue: (value) => {
+        while (!cells[row - 1]) {
+          cells.push([]);
+        }
+        cells[row - 1][column - 1] = value;
+      },
+      setValues: (values) => values.forEach((line, rowOffset) =>
+        line.forEach((value, columnOffset) => {
+          while (!cells[row - 1 + rowOffset]) {
+            cells.push([]);
+          }
+          cells[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        })),
+      setFontWeight: () => {},
+      setBackground: () => {},
+      setNumberFormat: () => {}
+    }),
+    insertRowsBefore: (row, count) => {
+      for (let index = 0; index < count; index += 1) {
+        cells.splice(row - 1, 0, Array(20).fill(''));
+      }
+    },
+    insertColumnsBefore: (column, count) => {
+      cells.forEach((line) => line.splice(column - 1, 0, ...Array(count).fill('')));
+    },
+    getCharts: () => [chart],
+    setFrozenRows: () => {},
+    autoResizeColumns: () => {}
+  };
+  context.getInstallerLocalization_ = () => ({
+    installerSheetHeaders: [
+      'Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address', 'Customer code',
+      'Reference year', 'Reference month'
+    ],
+    headerAliases: {
+      issueDate: ['Issue date'], supplier: ['Supplier'],
+      identifier: ['Invoice number'], contractNumber: ['Contract number'],
+      accountHolder: ['Account holder'], serviceAddress: ['Service address'],
+      customerCode: ['Customer code'], sourceFile: ['Source file']
+    }
+  });
+  context.normalizeHeader_ = (value) => String(value).trim().toLowerCase();
+  context.findHeaderIndex_ = (lookup, aliases) => {
+    for (const alias of aliases) {
+      const column = lookup[String(alias).trim().toLowerCase()];
+      if (column) {
+        return column;
+      }
+    }
+    return 0;
+  };
+  context.getSheetLayout_ = (_sheet, localizationAliases) => {
+    for (let row = 0; row < cells.length; row += 1) {
+      const headers = cells[row];
+      const lookup = {};
+      headers.forEach((header, index) => {
+        if (header) {
+          lookup[String(header).trim().toLowerCase()] = index + 1;
+        }
+      });
+      if (context.findHeaderIndex_(lookup, localizationAliases.issueDate) &&
+        context.findHeaderIndex_(lookup, localizationAliases.supplier)) {
+        return { headerRow: row + 1, headers, lookup };
+      }
+    }
+    throw new Error('header row missing');
+  };
+  context.validateInstallerSheetHeaders_ = () => {};
+
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Electricity', 'en');
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Electricity', 'en');
+
+  assert.deepEqual(cells[0].slice(0, 2), [
+    'Controllo fornitura', 'Electricity'
+  ]);
+  assert.deepEqual(cells[1].slice(3, 7), [
+    'Contract number', 'Account holder', 'Service address', 'Customer code'
+  ]);
+  assert.deepEqual(cells[2].slice(3, 7), ['CON-1', '', '', 'CL-1']);
+  assert.equal(cells.length, 3);
+  assert.equal(sheet.getCharts().length, 1);
+  assert.equal(sheet.getCharts()[0].getOptions().get('title'), 'User chart');
+}
+
+function testServiceIdentityMetadataUsesDetectedColumns() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [
+    ['Control', 'Water', 'Existing note', '', '', 'Laura Fortuna',
+      'Via Roma 10, Cesena'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Customer code', 'Account holder', 'Service address']
+  ];
+  const sheet = {
+    getName: () => 'Water',
+    getRange: (row, column) => ({
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setFontWeight: () => {}
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US',
+    headerAliases: {
+      accountHolder: ['Account holder'], serviceAddress: ['Service address']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Water', {
+    headerRow: 2,
+    lookup: { 'Account holder': 6, 'Service address': 7 }
+  }, 'en');
+
+  assert.equal(cells[0][5], 'Laura Fortuna');
+  assert.equal(cells[0][6], 'Via Roma 10, Cesena');
+  assert.equal(cells[0][4], '');
+  assert.equal(cells[0][2], 'Account holder / address: edit the control fields');
+}
+
+function testNewSupplySheetInitializesServiceIdentityControls() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [];
+  const sheet = {
+    getLastRow: () => 0,
+    getMaxRows: () => 10,
+    getRange: (row, column, rows = 1, columns = 1) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      setValue: (value) => {
+        cells[row - 1] = cells[row - 1] || [];
+        cells[row - 1][column - 1] = value;
+      },
+      setValues: (values) => values.forEach((line, rowOffset) =>
+        line.forEach((value, columnOffset) => {
+          cells[row - 1 + rowOffset] = cells[row - 1 + rowOffset] || [];
+          cells[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        })),
+      setFontWeight: () => {},
+      setBackground: () => {},
+      setNumberFormat: () => {}
+    }),
+    setFrozenRows: () => {},
+    autoResizeColumns: () => {}
+  };
+  context.getInstallerSheetHeaders_ = () => [
+    'Issue date', 'Supplier', 'Invoice number', 'Contract number',
+    'Account holder', 'Service address', 'Customer code'
+  ];
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'en_US',
+    headerAliases: {
+      accountHolder: ['Account holder'], serviceAddress: ['Service address']
+    }
+  });
+  context.normalizeHeader_ = (value) => String(value).toLowerCase();
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0].toLowerCase()] || 0;
+  context.initializeElectricityDashboard_ = () => {};
+  const spreadsheet = {
+    getSheets: () => [],
+    getSheetByName: () => null,
+    insertSheet: () => sheet
+  };
+
+  context.initializeInstallerSheets_(spreadsheet, {
+    canonical_supplies: ['Water'],
+    sheet_by_supply: { Water: 'Water' },
+    locale: 'en'
+  }, false);
+
+  assert.equal(cells[0][1], 'Water');
+  assert.equal(cells[1][4], 'Account holder');
+  assert.equal(cells[1][5], 'Service address');
+}
+
 function response(statusCode, body) {
   return {
     getContentText: () => JSON.stringify(body),
@@ -1262,6 +1460,9 @@ testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testSpreadsheetValidationUsesDetectedHeaderRow();
+testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
+testServiceIdentityMetadataUsesDetectedColumns();
+testNewSupplySheetInitializesServiceIdentityControls();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

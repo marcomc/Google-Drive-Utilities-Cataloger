@@ -118,6 +118,14 @@
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
   command name.
+  Treat the saved Desktop OAuth client at
+  `$XDG_CONFIG_HOME/gduc/ci-deployment-oauth.json` or
+  `$HOME/.config/gduc/ci-deployment-oauth.json` as the canonical local recovery
+  source. When `invalid_grant` occurs, run `make renew-clasp-auth`; it must
+  recreate the isolated local profile from that client and validate the stored
+  owner-only deployment before any source mutation. Do not assume an existing
+  `.clasprc.json` is valid and do not ask for a new client download unless the
+  canonical path is absent or invalid.
   Route every installer or CI `clasp --json` deployment list, creation, and
   inspection operation through the shared authorization-aware helper. Preserve
   the actionable `invalid_grant` remediation without relaying provider stderr,

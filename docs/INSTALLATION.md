@@ -14,10 +14,12 @@ account controls that have no supported CLI.
 - [clasp](#clasp)
 - [Project settings](#project-settings)
 - [Drive and spreadsheet](#drive-and-spreadsheet)
+- [Supply identity controls](#supply-identity-controls)
 - [Gemini runtime](#gemini-runtime)
 - [Gemini API key](#gemini-api-key)
 - [Google resource bootstrap](#google-resource-bootstrap)
 - [Environment variable reference](#environment-variable-reference)
+- [Renew clasp authorization](#renew-clasp-authorization)
 - [Reconfigure time zone](#reconfigure-time-zone)
 - [Browser handoff](#browser-handoff)
 - [Apps Script API](#apps-script-api)
@@ -45,9 +47,13 @@ the Apps Script project, and prints the browser handoff. Customize the generated
 `config.local.json`, complete the browser steps, then resume:
 
 ```bash
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
-  make install-resume
+make install-resume
 ```
+
+The installer automatically discovers the saved Desktop OAuth client at
+`$XDG_CONFIG_HOME/gduc/ci-deployment-oauth.json` or
+`$HOME/.config/gduc/ci-deployment-oauth.json`. Set
+`GDUC_OAUTH_CLIENT_JSON` only when using another client path.
 
 The resume step prompts privately for `GEMINI_API_KEY` when the selected
 runtime needs one. The direct-script equivalents are:
@@ -237,6 +243,20 @@ If no intake `AGENTS.md` exists, the installer creates one from the public
 fails if the folder contains duplicates or a policy larger than 40 KiB.
 Customize the Drive copy, not the repository template.
 
+## Supply identity controls
+
+The installer creates or migrates each configured supply tab with two control
+fields above the headers: account holder and service address. These values are
+the persistent ownership check across supplier changes; contract and customer
+identifiers are recorded but are not used as the cross-supplier identity.
+
+After deploying this release to an existing installation, run the owner-only
+Apps Script function `migrateCatalogerServiceIdentityFields`. It inserts the
+new columns between contract number and customer code, preserves existing rows,
+and checks that source-sheet chart presentation is unchanged. Set the holder
+and address in the control row before importing the next invoice. The migration
+is idempotent and does not recreate unmanaged charts.
+
 Required ownership and access:
 
 | Resource | Installer account needs |
@@ -346,7 +366,7 @@ non-interactive installation:
 | `GDUC_GEMINI_MODE` | `gemini_api`, `vertex_ai`, or `gemini_api_with_vertex_fallback` |
 | `GDUC_GEMINI_MODEL` | Optional model; default `gemini-3.6-flash`; may override the pending value on resume |
 | `GDUC_VERTEX_AI_LOCATION` | Optional Vertex location; default `global`; may override the pending value on resume |
-| `GDUC_OAUTH_CLIENT_JSON` | Desktop OAuth client JSON outside the checkout, used on resume |
+| `GDUC_OAUTH_CLIENT_JSON` | Optional Desktop OAuth client JSON; otherwise the saved GDUC config path is discovered automatically |
 | `GDUC_GEMINI_API_KEY` | Secret; required on resume for Gemini API |
 | `GDUC_STATE_DIR` | Optional absolute state path outside the checkout; it must be absent, empty, or already installer-owned |
 | `NO_COLOR` | Disable terminal colors when non-empty |
@@ -381,7 +401,6 @@ IFS= read -r -s GDUC_GEMINI_API_KEY
 printf '\n'
 export GDUC_GEMINI_API_KEY
 
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
 ./scripts/install.sh --resume --non-interactive
 
 unset GDUC_GEMINI_API_KEY
@@ -390,12 +409,34 @@ unset GDUC_GEMINI_API_KEY
 For unattended use, inject `GDUC_GEMINI_API_KEY` from the process secret
 manager instead.
 
+## Renew clasp authorization
+
+When a deployment reports `invalid_grant`, renew the ignored local clasp
+profile without changing Apps Script source or the stable deployment:
+
+```bash
+make renew-clasp-auth
+```
+
+This command discovers the saved Desktop OAuth client using the same paths as
+the installer, launches the browser only if the stored refresh token is no
+longer valid, and validates the existing owner-only deployment afterward. Pass
+`GDUC_OAUTH_CLIENT_JSON=/secure/path/oauth-client.json` only when the saved
+client is unavailable.
+
+The command reuses a legacy local profile only when `.installer` contains
+exactly `clasp-auth/.clasprc.json`; it then marks that exact layout as
+installer-owned before replacing an invalid token. If the installer state is
+absent and more than one owner-only API deployment exists, recovery stops
+instead of guessing which deployment is stable. Restore the installation state
+or use the known deployment identity through the normal installer recovery
+path.
+
 ## Reconfigure time zone
 
 Edit `time_zone` in `config.local.json`, then run:
 
 ```bash
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
 ./scripts/install.sh --reconfigure-time-zone --non-interactive
 ```
 
@@ -408,7 +449,6 @@ The equivalent Make target is `make install-reconfigure-time-zone`. Set
 
 ```bash
 GDUC_TIME_ZONE="Pacific/Auckland" \
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
 ./scripts/install.sh --reconfigure-time-zone --non-interactive
 ```
 
@@ -497,7 +537,9 @@ select the installation's Cloud project, then:
 1. Select **Create client**.
 2. Choose **Desktop app**.
 3. Download the JSON file.
-4. Pass its path through `GDUC_OAUTH_CLIENT_JSON` on resume.
+4. Keep the JSON in the default `$HOME/.config/gduc/` location when possible;
+   the installer discovers it automatically. Otherwise pass its path through
+   `GDUC_OAUTH_CLIENT_JSON` on resume.
 
 Google's [OAuth guide for desktop
 applications](https://developers.google.com/identity/protocols/oauth2/native-app)

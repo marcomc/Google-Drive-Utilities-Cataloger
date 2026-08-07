@@ -9,6 +9,7 @@ repository, documentation, and issue trackers.
 - [Gemini runtime](#gemini-runtime)
 - [Script Properties](#script-properties)
 - [Local configuration file](#local-configuration-file)
+- [Supply identity controls](#supply-identity-controls)
 - [Drive policy](#drive-policy)
 - [Localization](#localization)
 - [Configuration validation](#configuration-validation)
@@ -99,8 +100,12 @@ margin below the official
 | `sheet_by_supply` | Exact spreadsheet tab for each imported supply. |
 | `frequency_overrides` | Optional supplier-and-supply frequency overrides. |
 
-A non-empty printed address that does not match an `address_rules` entry always
-produces `NEEDS REVIEW`; `address_missing_type` does not weaken that rule.
+For invoices, `address_rules` is not the ownership baseline. The importer
+compares the printed account holder and service address with the control values
+in the target supply sheet. Supplier, contract, and customer identifiers may
+change when the provider changes. `address_rules` continues to classify
+non-invoice documents and archive-only cases; it does not override invoice
+identity verification.
 Each frequency override has this shape:
 
 ```json
@@ -110,6 +115,29 @@ Each frequency override has this shape:
   "frequency": "bimonthly"
 }
 ```
+
+## Supply identity controls
+
+Every configured supply tab has two control fields immediately above its
+headers:
+
+| Field | Purpose |
+| --- | --- |
+| `Account holder` / `Intestatario` | Expected full name of the contract holder. |
+| `Service address` / `Indirizzo di fornitura` | Expected street, civic number, and city. |
+
+For an existing installation, run the owner-controlled
+`migrateCatalogerServiceIdentityFields` function once after deployment. The
+operation inserts the two columns between contract number and customer code,
+adds the control row, and is safe to repeat. Complete the control values
+manually before processing invoices. Imported rows retain the printed holder
+and address, so address changes remain visible in the historical record.
+
+Comparison ignores case, punctuation, repeated whitespace, line breaks, and
+common Italian street abbreviations. Street, civic number, and city must all
+be present; field order, CAP, and formatting do not have to match. A missing
+control value or mismatch produces `NEEDS REVIEW` without changing Drive or
+Sheets.
 
 ## Drive policy
 

@@ -151,6 +151,23 @@ validate_test_default_state_directory() {
   ) >/dev/null 2>&1
 }
 
+# Invoked indirectly through the assertion helpers.
+# shellcheck disable=SC2317,SC2329
+validate_test_legacy_reauthorization_profile() {
+  local test_state_dir="$1"
+
+  (
+    MODE="reauthorize"
+    CUSTOM_STATE_DIR_REQUESTED=0
+    DEFAULT_STATE_DIR="${test_state_dir}"
+    STATE_DIR="${test_state_dir}"
+    STATE_FILE="${STATE_DIR}/state.json"
+    AUTH_DIR="${STATE_DIR}/clasp-auth"
+    STATE_MARKER="${STATE_DIR}/.gduc-installer-state"
+    validate_state_directory_setting
+  ) >/dev/null 2>&1
+}
+
 test_custom_state_directory_safety() {
   local ancestor_link_root
   local default_link
@@ -184,6 +201,16 @@ test_custom_state_directory_safety() {
   assert_failure "reject unmarked default installer state" \
     validate_test_default_state_directory "${default_unowned}"
 
+  local legacy_profile
+  legacy_profile="$(mktemp -d)"
+  mkdir -p "${legacy_profile}/clasp-auth"
+  printf '%s\n' '{}' >"${legacy_profile}/clasp-auth/.clasprc.json"
+  assert_success "adopt an exact legacy local clasp profile for reauthorization" \
+    validate_test_legacy_reauthorization_profile "${legacy_profile}"
+  printf '%s\n' 'unexpected' >"${legacy_profile}/unrelated.txt"
+  assert_failure "reject a legacy profile with unrelated state" \
+    validate_test_legacy_reauthorization_profile "${legacy_profile}"
+
   state_entry_link="$(mktemp -d)"
   printf '%s\n' "google-drive-utilities-cataloger" \
     >"${state_entry_link}/.gduc-installer-state"
@@ -200,6 +227,7 @@ test_custom_state_directory_safety() {
   rm -rf \
     "${external_state_dir}" \
     "${default_unowned}" \
+    "${legacy_profile}" \
     "${nonempty_state_dir}" \
     "${state_entry_link}" \
     "${symlink_parent}" \
@@ -316,6 +344,30 @@ test_secret_input_assignment() {
   unset GDUC_GEMINI_API_KEY
   assert_equal "test-secret" "${actual}" \
     "return a Gemini key to the caller without logging it"
+}
+
+test_saved_oauth_client_discovery() {
+  local config_home
+  local actual
+
+  config_home="$(mktemp -d)"
+  mkdir -p "${config_home}/gduc"
+  printf '%s\n' '{}' >"${config_home}/gduc/ci-deployment-oauth.json"
+  XDG_CONFIG_HOME="${config_home}"
+  actual="$(find_saved_oauth_client)"
+  unset XDG_CONFIG_HOME
+  assert_equal \
+    "${config_home}/gduc/ci-deployment-oauth.json" \
+    "${actual}" \
+    "discover the saved GDUC OAuth client"
+  rm -rf "${config_home}"
+}
+
+test_reauthorize_argument() {
+  MODE="install"
+  parse_arguments --reauthorize
+  assert_equal "reauthorize" "${MODE}" \
+    "accept the explicit clasp reauthorization mode"
 }
 
 test_bootstrap_payload_keeps_key_off_disk() {
@@ -660,6 +712,48 @@ test_owner_only_api_deployment_validation() {
   assert_failure "reject a mixed deployment with a public web app" \
     validate_owner_only_api_deployment \
     "${mixed_public}" "test-script" "deployment-1"
+}
+
+test_owner_only_deployment_discovery_requires_unique_identity() {
+  local result=""
+  local status
+
+  set +e
+  (
+    run_apps_script_clasp_json() {
+      printf -v "$2" '%s' '[
+        {"deploymentId":"deployment-1"},
+        {"deploymentId":"deployment-2"}
+      ]'
+    }
+    read_apps_script_deployment() {
+      local deployment_id="$3"
+      local response_json
+
+      response_json="$(jq -cn --arg deployment_id "${deployment_id}" '
+        {
+          deploymentId: $deployment_id,
+          deploymentConfig: {
+            scriptId: "test-script",
+            versionNumber: 4,
+            manifestFileName: "appsscript"
+          },
+          entryPoints: [{
+            entryPointType: "EXECUTION_API",
+            executionApi: {entryPointConfig: {access: "MYSELF"}}
+          }]
+        }
+      ')"
+      printf -v "$4" '%s' "${response_json}"
+    }
+    find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
+  )
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 || -n "${result}" ]]; then
+    printf 'FAIL: ambiguous owner-only deployment discovery did not fail closed\n' >&2
+    failures=$((failures + 1))
+  fi
 }
 
 test_invalid_stored_deployment_is_not_recreated() {
@@ -1053,6 +1147,8 @@ test_invalid_authorization_blocks_new_deployment_creation() {
 
 test_drive_id_extraction
 test_input_validation
+test_saved_oauth_client_discovery
+test_reauthorize_argument
 test_version_parsing
 test_noninteractive_optional_input
 test_custom_state_directory_safety
@@ -1069,6 +1165,7 @@ test_reset_removes_private_state_after_releasing_lock
 test_private_artifacts_are_ignored
 test_restrictive_installer_umask
 test_owner_only_api_deployment_validation
+test_owner_only_deployment_discovery_requires_unique_identity
 test_invalid_stored_deployment_is_not_recreated
 test_invalid_new_deployment_is_stored_for_safe_resume
 test_invalid_stored_deployment_blocks_source_push
