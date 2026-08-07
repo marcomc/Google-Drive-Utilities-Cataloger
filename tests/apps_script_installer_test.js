@@ -999,6 +999,94 @@ function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   assert.equal(sheet.getCharts()[0].getOptions().get('title'), 'User chart');
 }
 
+function testServiceIdentityMigrationPreservesUnownedPreHeaderRow() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [
+    ['Customer instruction', '=SUM(1, 2)', 'Leave this row unchanged', '',
+      '', 'Laura Fortuna', 'Via Roma 10, Cesena'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Customer code', 'Account holder', 'Service address'],
+    ['2026-07-16', 'ENERGYGAS', 'INV-1', 'CON-1', 'CL-1', '', '']
+  ];
+  const sheet = {
+    getName: () => 'Water',
+    getLastRow: () => cells.length,
+    getMaxRows: () => 100,
+    getRange: (row, column, rows = 1, columns = 1) => ({
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setValues: (values) => values.forEach((line, rowOffset) =>
+        line.forEach((value, columnOffset) => {
+          cells[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        })),
+      setFontWeight: () => {}
+    }),
+    insertRowsBefore: (row, count) => {
+      for (let index = 0; index < count; index += 1) {
+        cells.splice(row - 1, 0, Array(20).fill(''));
+      }
+    },
+    insertColumnsBefore: () => { throw new Error('headers already exist'); },
+    getCharts: () => [],
+    setFrozenRows: () => {}
+  };
+  const localization = {
+    installerSheetHeaders: [],
+    headerAliases: {
+      issueDate: ['Issue date'], supplier: ['Supplier'],
+      accountHolder: ['Account holder'], serviceAddress: ['Service address'],
+      customerCode: ['Customer code'], contractNumber: ['Contract number']
+    }
+  };
+  context.getInstallerLocalization_ = () => localization;
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.getSheetLayout_ = () => {
+    const headerIndex = cells.findIndex((row) => row[0] === 'Issue date');
+    const lookup = {};
+    cells[headerIndex].forEach((header, index) => { lookup[header] = index + 1; });
+    return { headerRow: headerIndex + 1, headers: cells[headerIndex], lookup };
+  };
+  context.validateInstallerSheetHeaders_ = () => {};
+
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en');
+  context.ensureInstallerServiceIdentityFields_(sheet, 'Water', 'en');
+
+  assert.deepEqual(cells[0].slice(0, 3), [
+    'Customer instruction', '=SUM(1, 2)', 'Leave this row unchanged'
+  ]);
+  assert.deepEqual(cells[1].slice(0, 2), ['Controllo fornitura', 'Water']);
+  assert.equal(cells[2][0], 'Issue date');
+  assert.equal(cells.length, 4);
+}
+
+function testExistingSheetInitializationUsesDeterministicSupply() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const migratedSupplies = [];
+  const sheet = { getLastRow: () => 1 };
+  context.getInstallerSheetHeaders_ = () => [];
+  context.ensureInstallerServiceIdentityFields_ = (_sheet, supply) => {
+    migratedSupplies.push(supply);
+  };
+  context.initializeElectricityDashboard_ = () => {};
+  const spreadsheet = {
+    getSheets: () => [],
+    getSheetByName: () => sheet,
+    insertSheet: () => { throw new Error('existing sheet must be reused'); }
+  };
+
+  context.initializeInstallerSheets_(spreadsheet, {
+    canonical_supplies: ['Water', 'Water legacy alias'],
+    sheet_by_supply: { Water: 'Water', 'Water legacy alias': 'Water' },
+    locale: 'en'
+  }, false);
+
+  assert.deepEqual(migratedSupplies, ['Water']);
+}
+
 function testServiceIdentityMetadataUsesDetectedColumns() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -1082,8 +1170,8 @@ function testNewSupplySheetInitializesServiceIdentityControls() {
   };
 
   context.initializeInstallerSheets_(spreadsheet, {
-    canonical_supplies: ['Water'],
-    sheet_by_supply: { Water: 'Water' },
+    canonical_supplies: ['Water', 'Water legacy alias'],
+    sheet_by_supply: { Water: 'Shared supply tab', 'Water legacy alias': 'Shared supply tab' },
     locale: 'en'
   }, false);
 
@@ -1461,6 +1549,8 @@ testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testSpreadsheetValidationUsesDetectedHeaderRow();
 testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
+testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
+testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
 testNewSupplySheetInitializesServiceIdentityControls();
 testGeminiDeveloperApiValidation();

@@ -1143,6 +1143,7 @@ function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,
 
 function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
   const sheetNames = [];
+  const supplyBySheetName = Object.create(null);
   const electricitySheetNames = Object.create(null);
   automationConfig.canonical_supplies.forEach(function (supply) {
     const sheetName = automationConfig.sheet_by_supply[supply];
@@ -1151,6 +1152,7 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     }
     if (sheetNames.indexOf(sheetName) === -1) {
       sheetNames.push(sheetName);
+      supplyBySheetName[sheetName] = supply;
     }
     if (/^(electricity|luce)$/i.test(String(supply))) {
       electricitySheetNames[sheetName] = true;
@@ -1180,7 +1182,7 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
       headers.forEach(function (header, index) {
         lookup[normalizeHeader_(header)] = index + 1;
       });
-      writeInstallerServiceIdentityMetadata_(sheet, sheetName, {
+      writeInstallerServiceIdentityMetadata_(sheet, supplyBySheetName[sheetName], {
         headerRow: 2,
         lookup: lookup
       }, automationConfig.locale || 'en');
@@ -1191,7 +1193,7 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
         .setNumberFormat('#,##0.00');
       sheet.autoResizeColumns(1, headers.length);
     } else {
-      ensureInstallerServiceIdentityFields_(sheet, supply,
+      ensureInstallerServiceIdentityFields_(sheet, supplyBySheetName[sheetName],
         automationConfig.locale || 'en');
     }
   });
@@ -1203,8 +1205,9 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
   const localization = getInstallerLocalization_(locale);
   const beforeCharts = captureInstallerSheetChartState_(sheet);
   let layout = getSheetLayout_(sheet, localization.headerAliases);
-  if (layout.headerRow === 1) {
-    sheet.insertRowsBefore(1, 1);
+  if (layout.headerRow === 1 ||
+    !hasInstallerServiceIdentityMetadataRow_(sheet, layout)) {
+    sheet.insertRowsBefore(layout.headerRow, 1);
     layout = getSheetLayout_(sheet, localization.headerAliases);
   }
 
@@ -1255,6 +1258,15 @@ function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
   assertInstallerSheetChartStatePreserved_(beforeCharts, sheet);
   validateInstallerSheetHeaders_(sheet, locale);
   return layout;
+}
+
+function hasInstallerServiceIdentityMetadataRow_(sheet, layout) {
+  if (!sheet || !layout || layout.headerRow <= 1) {
+    return false;
+  }
+  return String(
+    sheet.getRange(layout.headerRow - 1, 1).getDisplayValue() || ''
+  ).trim() === 'Controllo fornitura';
 }
 
 function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
