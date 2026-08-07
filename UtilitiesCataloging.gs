@@ -2427,7 +2427,10 @@ function getSheetLayout_(sheet, headerAliases) {
   const supplierAliases = headerAliases ?
     headerAliases.supplier || [] : getHeaderAliases_('supplier');
   const width = sheet.getLastColumn();
-  const rowsToInspect = Math.min(10, Math.max(1, sheet.getLastRow()));
+  // The installer can insert its control row immediately before an existing
+  // row-10 header. Keep discovery bounded while allowing that supported
+  // migration recovery state (header row 11).
+  const rowsToInspect = Math.min(11, Math.max(1, sheet.getLastRow()));
   const rows = sheet.getRange(1, 1, rowsToInspect, width).getDisplayValues();
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const headers = rows[rowIndex];
@@ -2569,18 +2572,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   // `sheet_values` carries supplementary line items. It must never replace a
   // canonical field merely because the model also returned a matching header.
   // In particular, keep identifiers and the reference month as literal text.
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'),
-    extracted.identifier);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('contractNumber'),
-    extracted.contract_number);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('accountHolder'),
-    extracted.account_holder);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('serviceAddress'),
-    extracted.address_evidence);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'),
-    extracted.customer_code);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'),
-    extracted.reference_month);
+  setCanonicalInvoiceFieldValues_(values, layout.lookup, extracted);
 
   Object.keys(values).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
@@ -2681,26 +2673,48 @@ function setValueForHeaders_(values, lookup, aliases, value) {
   }
 }
 
+function getCanonicalInvoiceFieldKeys_() {
+  return [
+    'identifier',
+    'contractNumber',
+    'accountHolder',
+    'serviceAddress',
+    'customerCode',
+    'month'
+  ];
+}
+
+function setCanonicalInvoiceFieldValues_(values, lookup, extracted) {
+  const fieldValues = {
+    identifier: extracted.identifier,
+    contractNumber: extracted.contract_number,
+    accountHolder: extracted.account_holder,
+    serviceAddress: extracted.address_evidence,
+    customerCode: extracted.customer_code,
+    month: extracted.reference_month
+  };
+  getCanonicalInvoiceFieldKeys_().forEach(function (key) {
+    setValueForHeaders_(values, lookup, getHeaderAliases_(key), fieldValues[key]);
+  });
+}
+
+function isCanonicalInvoiceHeader_(normalizedHeader) {
+  return getCanonicalInvoiceFieldKeys_().some(function (key) {
+    return getHeaderAliases_(key).some(function (alias) {
+      return normalizeHeader_(alias) === normalizedHeader;
+    });
+  });
+}
+
 function verifyImportedRow_(sheet, row, layout, file, extracted) {
   const expected = Object.create(null);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('issueDate'),
     isoDateToDate_(extracted.issue_date));
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('supplier'),
     extracted.supplier);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('identifier'),
-    extracted.identifier);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('contractNumber'),
-    extracted.contract_number);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('accountHolder'),
-    extracted.account_holder);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('serviceAddress'),
-    extracted.address_evidence);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('customerCode'),
-    extracted.customer_code);
+  setCanonicalInvoiceFieldValues_(expected, layout.lookup, extracted);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('year'),
     extracted.reference_year);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('month'),
-    extracted.reference_month);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('frequency'),
     extracted.frequency || '');
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('consumptionCost'),
@@ -2711,7 +2725,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('total'), extracted.total);
   extracted.sheet_values.forEach(function (entry) {
     const normalized = normalizeHeader_(entry.header);
-    if (layout.lookup[normalized] &&
+    if (layout.lookup[normalized] && !isCanonicalInvoiceHeader_(normalized) &&
       (expected[normalized] === undefined ||
       isOverridableReconciliationCostHeader_(normalized))) {
       expected[normalized] = entry.value;

@@ -74,13 +74,13 @@ function validInvoice() {
     supplier: 'SUPPLIER',
     supply_type: 'Water',
     address_type: 'import',
-    account_holder: 'Laura Fortuna',
+    account_holder: 'Avery North',
     issue_date: '2026-07-16',
-    address_evidence: 'Laura Fortuna, Corso Camillo Benso Conte di Cavour 125, Cesena',
-    service_street: 'Corso Camillo Benso Conte di Cavour',
+    address_evidence: 'Avery North, Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
     service_civic_number: '125',
-    service_city: 'Cesena',
-    service_postal_code: '47521',
+    service_city: 'Rivermouth',
+    service_postal_code: '99991',
     identifier: 'INV-1',
     contract_number: 'CONTRACT-1',
     customer_code: 'CUSTOMER-1',
@@ -101,16 +101,16 @@ function validInvoice() {
 function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   const context = loadCataloger();
   const extracted = {
-    account_holder: 'FORTUNA, Laura',
-    address_evidence: 'Corso Camillo Benso Conte di Cavour, 125 - 47521 CESENA',
-    service_street: 'C.so Camillo Benso Conte di Cavour',
+    account_holder: 'NORTH, Avery',
+    address_evidence: 'Corso Cedar Meridian Boulevard, 125 - 99991 RIVERMOUTH',
+    service_street: 'C.so Cedar Meridian Boulevard',
     service_civic_number: '125',
-    service_city: 'CESENA',
-    service_postal_code: '47521'
+    service_city: 'RIVERMOUTH',
+    service_postal_code: '99991'
   };
   const expected = {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, 47521 Cesena'
+    account_holder: 'Avery North',
+    service_address: 'Corso Cedar Meridian Boulevard 125, 99991 Rivermouth'
   };
 
   assert.deepEqual(
@@ -122,26 +122,26 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
 function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
   const context = loadCataloger();
   const expectedAddresses = [
-    'Cesena 125 Corso Camillo Benso Conte di Cavour 47521',
-    '47521 125 Cesena Corso Camillo Benso Conte di Cavour',
-    'Corso Camillo Benso Conte di Cavour Cesena 125'
+    'Rivermouth 125 Corso Cedar Meridian Boulevard 99991',
+    '99991 125 Rivermouth Corso Cedar Meridian Boulevard',
+    'Corso Cedar Meridian Boulevard Rivermouth 125'
   ];
   const evidenceAddresses = [
-    'Account details: Cesena, 47521; 125 Corso Camillo Benso Conte di Cavour.',
-    '125 - Corso Camillo Benso Conte di Cavour - notes - Cesena 47521',
-    'Other text 47521 Cesena Corso Camillo Benso Conte di Cavour 125'
+    'Account details: Rivermouth, 99991; 125 Corso Cedar Meridian Boulevard.',
+    '125 - Corso Cedar Meridian Boulevard - notes - Rivermouth 99991',
+    'Other text 99991 Rivermouth Corso Cedar Meridian Boulevard 125'
   ];
 
   expectedAddresses.forEach((serviceAddress, index) => {
     const result = context.validateServiceIdentity_({
-      account_holder: 'Laura Fortuna',
+      account_holder: 'Avery North',
       address_evidence: evidenceAddresses[index],
-      service_street: 'C.so Camillo Benso Conte di Cavour',
+      service_street: 'C.so Cedar Meridian Boulevard',
       service_civic_number: '125',
-      service_city: 'Cesena',
-      service_postal_code: '47521'
+      service_city: 'Rivermouth',
+      service_postal_code: '99991'
     }, {
-      account_holder: 'Laura Fortuna',
+      account_holder: 'Avery North',
       service_address: serviceAddress
     });
 
@@ -152,15 +152,15 @@ function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
 function testServiceIdentityRejectsExtractedStreetPrefix() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Corso Camillo Benso Conte di Cavour 125, Cesena',
-    service_street: 'Corso Camillo',
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian',
     service_civic_number: '125',
-    service_city: 'Cesena',
+    service_city: 'Rivermouth',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+    account_holder: 'Avery North',
+    service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
   });
 
   assert.equal(result.valid, false);
@@ -170,15 +170,15 @@ function testServiceIdentityRejectsExtractedStreetPrefix() {
 function testServiceIdentityRejectsExtractedComponentSuffix() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Via Roma 10, Cesena Centro',
-    service_street: 'Via Roma',
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10, Rivermouth Center',
+    service_street: 'Birch Loop',
     service_civic_number: '10',
-    service_city: 'Cesena Centro',
+    service_city: 'Rivermouth Center',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Via Roma 10, Cesena'
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10, Rivermouth'
   });
 
   assert.equal(result.valid, false);
@@ -188,25 +188,25 @@ function testServiceIdentityRejectsExtractedComponentSuffix() {
 function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
   const context = loadCataloger();
   const extracted = {
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Via dello Studio 126, Cesena',
-    service_street: 'Via dello Studio',
+    account_holder: 'Avery North',
+    address_evidence: 'Alder Workshop Way 126, Rivermouth',
+    service_street: 'Alder Workshop Way',
     service_civic_number: '126',
-    service_city: 'Cesena',
-    service_postal_code: '47521'
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
   };
 
   assert.equal(
     context.validateServiceIdentity_(extracted, {
-      account_holder: 'Laura Fortuna',
-      service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
     }).valid,
     false
   );
   assert.match(
     context.validateServiceIdentity_(extracted, {
-      account_holder: 'Laura Fortuna',
-      service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
     }).problem,
     /does not match/
   );
@@ -222,15 +222,15 @@ function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
 function testServiceIdentityRejectsCityMatchedByStreetTokens() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Via Roma 10, Roma',
-    service_street: 'Via Roma',
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10, Birch Loop',
+    service_street: 'Birch Loop',
     service_civic_number: '10',
-    service_city: 'Roma',
+    service_city: 'Birch Loop',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Via Roma 10, Milano'
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10, Stonehaven'
   });
 
   assert.equal(result.valid, false);
@@ -240,15 +240,15 @@ function testServiceIdentityRejectsCityMatchedByStreetTokens() {
 function testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Via Roma 10',
-    service_street: 'Via Roma',
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10',
+    service_street: 'Birch Loop',
     service_civic_number: '10',
-    service_city: 'Roma',
+    service_city: 'Birch Loop',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Via Roma 10 Roma'
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10 Birch Loop'
   });
 
   assert.equal(result.valid, false);
@@ -258,15 +258,15 @@ function testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents() {
 function testServiceIdentityRejectsUncorroboratedAddressEvidence() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Via dello Studio 126, Cesena',
-    service_street: 'Corso Camillo Benso Conte di Cavour',
+    account_holder: 'Avery North',
+    address_evidence: 'Alder Workshop Way 126, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
     service_civic_number: '125',
-    service_city: 'Cesena',
-    service_postal_code: '47521'
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
   });
 
   assert.equal(result.valid, false);
@@ -276,15 +276,15 @@ function testServiceIdentityRejectsUncorroboratedAddressEvidence() {
 function testServiceIdentityRejectsCivicNumberAmbiguity() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Corso Camillo Benso Conte di Cavour 125/A, Cesena',
-    service_street: 'Corso Camillo Benso Conte di Cavour',
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125/A, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
     service_civic_number: '125/A',
-    service_city: 'Cesena',
+    service_city: 'Rivermouth',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
   });
 
   assert.equal(result.valid, false);
@@ -293,15 +293,15 @@ function testServiceIdentityRejectsCivicNumberAmbiguity() {
 function testServiceIdentityRejectsMissingAddressComponents() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Corso Camillo Benso Conte di Cavour 125, Cesena',
-    service_street: 'Corso Camillo Benso Conte di Cavour',
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
     service_civic_number: '',
-    service_city: 'Cesena',
+    service_city: 'Rivermouth',
     service_postal_code: ''
   }, {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
   });
 
   assert.equal(result.valid, false);
@@ -1965,6 +1965,63 @@ function testSheetLayoutAcceptsPendingLocaleAliases() {
   assert.equal(layout.lookup.fornitore, 2);
 }
 
+function testSheetLayoutAcceptsInstallerControlRowShiftAtBoundary() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier']
+  })[key] || [];
+  const rows = Array.from({ length: 11 }, () => ['', '']);
+  rows[9] = ['Controllo fornitura', 'Water'];
+  rows[10] = ['Issue date', 'Supplier'];
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 11,
+    getName: () => 'Water',
+    getRange: (row, column, numberOfRows, numberOfColumns) => {
+      assert.equal(row, 1);
+      assert.equal(column, 1);
+      assert.equal(numberOfRows, 11);
+      assert.equal(numberOfColumns, 2);
+      return { getDisplayValues: () => rows };
+    }
+  };
+
+  const layout = context.getSheetLayout_(sheet);
+
+  assert.equal(layout.headerRow, 11);
+  assert.equal(layout.lookup['issue date'], 1);
+  assert.equal(layout.lookup.supplier, 2);
+}
+
+function testSheetLayoutAcceptsHeaderAtRowTen() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier']
+  })[key] || [];
+  const rows = Array.from({ length: 10 }, () => ['', '']);
+  rows[9] = ['Issue date', 'Supplier'];
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 10,
+    getName: () => 'Water',
+    getRange: (row, column, numberOfRows, numberOfColumns) => {
+      assert.equal(row, 1);
+      assert.equal(column, 1);
+      assert.equal(numberOfRows, 10);
+      assert.equal(numberOfColumns, 2);
+      return { getDisplayValues: () => rows };
+    }
+  };
+
+  const layout = context.getSheetLayout_(sheet);
+
+  assert.equal(layout.headerRow, 10);
+  assert.equal(layout.lookup['issue date'], 1);
+  assert.equal(layout.lookup.supplier, 2);
+}
+
 function testMutationRecoveryStages() {
   function scenario(journal, markedRows) {
     const deletedRows = [];
@@ -2866,6 +2923,65 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
   ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
   assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 4),
     false);
+}
+
+function testVerifyImportedRowKeepsExtractedIdentityAgainstSheetValues() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    identifier: ['Identifier'],
+    contractNumber: ['Contract number'],
+    accountHolder: ['Account holder'],
+    serviceAddress: ['Service address'],
+    customerCode: ['Customer code'],
+    month: ['Reference month'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  const layout = {
+    headerRow: 1,
+    headers: ['Identifier', 'Contract number', 'Account holder',
+      'Service address', 'Customer code', 'Reference month', 'Source file'],
+    lookup: {
+      identifier: 1,
+      'contract number': 2,
+      'account holder': 3,
+      'service address': 4,
+      'customer code': 5,
+      'reference month': 6,
+      'source file': 7
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    sheet_values: [
+      { header: 'Identifier', value: 'Wrong identifier' },
+      { header: 'Contract number', value: 'Wrong contract number' },
+      { header: 'Account holder', value: 'Wrong account holder' },
+      { header: 'Service address', value: 'Wrong service address' },
+      { header: 'Customer code', value: 'Wrong customer code' },
+      { header: 'Reference month', value: '01' }
+    ]
+  };
+  const actualValues = [extracted.identifier, extracted.contract_number,
+    extracted.account_holder, extracted.address_evidence, extracted.customer_code,
+    extracted.reference_month, 'invoice'];
+  const sheet = {
+    getLastRow: () => 2,
+    getRange: (_row, column, _rows, width) => {
+      if (width === 7) {
+        return { getFormulas: () => [['', '', '', '', '', '', '']] };
+      }
+      return {
+        getValue: () => actualValues[column - 1],
+        getRichTextValue: () => null,
+        getFormula: () => column === 7 ?
+          '=HYPERLINK("https://drive.test/file-id";"invoice")' : '',
+        getDisplayValue: () => column === 7 ? 'invoice' : actualValues[column - 1]
+      };
+    }
+  };
+
+  assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted));
 }
 
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
@@ -4200,6 +4316,8 @@ testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
+testSheetLayoutAcceptsInstallerControlRowShiftAtBoundary();
+testSheetLayoutAcceptsHeaderAtRowTen();
 testMutationRecoveryStages();
 testMutationJournalCapturesValidatedReportingContextBeforeMutations();
 testMutationJournalPersistsFailureStageAtProcessingCheckpoints();
@@ -4214,6 +4332,7 @@ testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testDetailedCostSheetValuesOverrideBroadReconciliationValues();
 testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields();
+testVerifyImportedRowKeepsExtractedIdentityAgainstSheetValues();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();

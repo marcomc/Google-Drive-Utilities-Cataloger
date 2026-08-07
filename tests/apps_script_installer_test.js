@@ -1093,7 +1093,7 @@ function testServiceIdentityMigrationPreservesUnownedPreHeaderRow() {
   });
   const cells = [
     ['Customer instruction', '=SUM(1, 2)', 'Leave this row unchanged', '',
-      '', 'Laura Fortuna', 'Via Roma 10, Cesena'],
+      '', 'Test Holder', '42 Example Road, Testville'],
     ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
       'Customer code', 'Account holder', 'Service address'],
     ['2026-07-16', 'ENERGYGAS', 'INV-1', 'CON-1', 'CL-1', '', '']
@@ -1180,8 +1180,8 @@ function testServiceIdentityMetadataUsesDetectedColumns() {
     throw new Error('fetch must not run');
   });
   const cells = [
-    ['Control', 'Water', 'Existing note', '', '', 'Laura Fortuna',
-      'Via Roma 10, Cesena'],
+    ['Control', 'Water', 'Existing note', '', '', 'Test Holder',
+      '42 Example Road, Testville'],
     ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
       'Customer code', 'Account holder', 'Service address']
   ];
@@ -1206,8 +1206,8 @@ function testServiceIdentityMetadataUsesDetectedColumns() {
     lookup: { 'Account holder': 6, 'Service address': 7 }
   }, 'en');
 
-  assert.equal(cells[0][5], 'Laura Fortuna');
-  assert.equal(cells[0][6], 'Via Roma 10, Cesena');
+  assert.equal(cells[0][5], 'Test Holder');
+  assert.equal(cells[0][6], '42 Example Road, Testville');
   assert.equal(cells[0][4], '');
   assert.equal(cells[0][2], 'Account holder / address: edit the control fields');
 }
@@ -1217,8 +1217,8 @@ function testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry() {
     throw new Error('fetch must not run');
   });
   const cells = [
-    ['Control', 'Water', 'Existing note', '', '', 'Laura Fortuna',
-      'Via Roma 10, Cesena'],
+    ['Control', 'Water', 'Existing note', '', '', 'Test Holder',
+      '42 Example Road, Testville'],
     ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
       'Customer code', 'Account holder', 'Service address']
   ];
@@ -1257,8 +1257,8 @@ function testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry() {
 
   assert.equal(formulas[0][5], '=Settings!B2');
   assert.equal(formulas[0][6], '=Settings!B3');
-  assert.equal(cells[0][5], 'Laura Fortuna');
-  assert.equal(cells[0][6], 'Via Roma 10, Cesena');
+  assert.equal(cells[0][5], 'Test Holder');
+  assert.equal(cells[0][6], '42 Example Road, Testville');
   assert.deepEqual(writes.filter(([, column]) => column === 6 || column === 7), []);
 }
 
