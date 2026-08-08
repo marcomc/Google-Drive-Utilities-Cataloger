@@ -8,6 +8,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
+const { hasRequiredEntrypoint } = require(
+  path.join(projectRoot, 'scripts/validate-apps-script.js')
+);
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(path.join(projectRoot, file), 'utf8'));
@@ -132,6 +135,26 @@ function testCommittedJsonAndRuntimeConfig() {
   assert.ok(latestReleaseMatch, 'CHANGELOG.md must start with a release heading.');
   assert.equal(applicationVersion, latestReleaseMatch[1]);
   assert.doesNotThrow(() => context.validateAutomationConfig_(automationConfig));
+}
+
+function testRequiredEntrypointValidationIsTopLevelAndNegativeSafe() {
+  assert.equal(
+    hasRequiredEntrypoint('function processSingleIntakeFileByName() {}',
+      'processSingleIntakeFileByName'),
+    true
+  );
+  assert.equal(
+    hasRequiredEntrypoint('// function processSingleIntakeFileByName() {}',
+      'processSingleIntakeFileByName'),
+    false
+  );
+  assert.equal(
+    hasRequiredEntrypoint(
+      'function wrapper() { function processSingleIntakeFileByName() {} }',
+      'processSingleIntakeFileByName'
+    ),
+    false
+  );
 }
 
 function testNormalizedConfigurationCollisions() {
@@ -261,6 +284,8 @@ function testDeploymentContract() {
   assert.match(deployScript, /A newer main revision exists; skipping stale deployment/);
   assert.match(deployScript, /read_apps_script_deployment/);
   assert.match(deployScript, /validate_owner_only_api_deployment/);
+  assert.match(deployScript, /read_apps_script_version_content/);
+  assert.match(deployScript, /validate_apps_script_version_entrypoints/);
   assert.match(deploymentHelper, /run_apps_script_clasp_json/);
   assert.match(
     deploymentHelper,
@@ -292,6 +317,11 @@ function testDeploymentContract() {
     deployScript.indexOf('remote_time_zone=') < deployScript.indexOf('push --force'),
     'the installation time zone must be preserved before pushing source'
   );
+  assert.ok(
+    deployScript.indexOf('validate_apps_script_version_entrypoints') <
+      deployScript.indexOf('deploy \\'),
+    'required entrypoints must be verified before deployment mutation'
+  );
   assert.match(
     deploymentGuide,
     /installable triggers[\s\S]{0,160}project HEAD/i
@@ -300,6 +330,7 @@ function testDeploymentContract() {
 }
 
 testCommittedJsonAndRuntimeConfig();
+testRequiredEntrypointValidationIsTopLevelAndNegativeSafe();
 testNormalizedConfigurationCollisions();
 testLocaleParity();
 testDeploymentContract();
