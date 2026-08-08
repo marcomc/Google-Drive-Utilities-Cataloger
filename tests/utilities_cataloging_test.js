@@ -1993,6 +1993,10 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /measurements, and reference year\./);
   assert.doesNotMatch(prompt, /reference year\/month/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
+  assert.match(prompt, /mutually exclusive top-level printed cost row/);
+  assert.match(prompt, /If one target header represents a combined category, sum only the mutually exclusive top-level rows/);
+  assert.match(prompt, /same printed parent section/);
+  assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
     /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
