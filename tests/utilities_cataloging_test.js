@@ -890,6 +890,7 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -4307,7 +4308,7 @@ function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   context.getRootFolderId_ = () => 'root-folder-id';
   context.isCatalogMaintenanceActive_ = () => false;
   context.logCatalogEvent_ = () => {};
-  context.processSingleIntakeFile = (fileId) => {
+  context.processSingleIntakeFileWithinLock_ = (fileId) => {
     calls.push(fileId);
     return { status: 'IMPORTED' };
   };

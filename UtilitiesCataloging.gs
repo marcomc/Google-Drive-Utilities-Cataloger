@@ -18,9 +18,6 @@ function retryFailedUtilitiesCataloging() {
  */
 function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
-  if (arguments.length > 1 && arguments[1] === true) {
-    return processSingleIntakeFileWithinLock_(fileId);
-  }
   return withCatalogProcessingLock_('manual', function () {
     return processSingleIntakeFileWithinLock_(fileId);
   });
@@ -93,7 +90,7 @@ function processSingleIntakeFileByName(fileName) {
     if (matches.length > 1) {
       throw new Error('Multiple matching PDFs were found in the direct intake folder.');
     }
-    return processSingleIntakeFile(matches[0].getId(), true);
+    return processSingleIntakeFileWithinLock_(matches[0].getId());
   });
 }
 
@@ -2987,7 +2984,7 @@ function isMissingFrequencyProblem_(problem) {
   if (!text || !isStandaloneInformationalProblem_(text)) {
     return false;
   }
-  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent)/i.test(text)) {
+  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent|period|periodo|billing\s+period)/i.test(text)) {
     return false;
   }
   return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b[\s\S]*\b(?:non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata)|assente|mancante|not\s+(?:explicitly\s+)?(?:indicated|specified|present|printed|reported)|missing|absent)\b[\s\S]*[.!?]?$/i.test(text);
@@ -3099,7 +3096,7 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     if (extracted.issue_date && !currentDate) {
       return { frequency: '', conflict: true };
     }
-    if (currentDate && !dateColumn) {
+    if (!dateColumn) {
       return { frequency: '', conflict: false };
     }
     const counts = Object.create(null);
