@@ -185,11 +185,17 @@ if [[ "${url}" == "${expected_content_url}" ]]; then
   content_call_count=$((content_call_count + 1))
   printf '%s\n' "${content_call_count}" >"${TEST_CONTENT_CALL_COUNT_FILE}"
   content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nfunction processSingleIntakeFileByName() {}'
+  content_other_source=''
   if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-missing-entrypoint' ]]; then
     content_source=$'function runDailyUtilitiesCataloging() {}'
+  elif [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-entrypoint-other-file' ]]; then
+    content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}'
+    content_other_source=$'function processSingleIntakeFileByName() {}'
+  elif [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-nested-entrypoint' ]]; then
+    content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nfunction wrapper() { function processSingleIntakeFileByName() {} }'
   fi
-  jq -n --arg source "${content_source}" \
-    '{files: [{name: "UtilitiesCataloging", source: $source}]}'
+  jq -n --arg source "${content_source}" --arg other_source "${content_other_source}" \
+    '{files: [{name: "UtilitiesCataloging", source: $source}, {name: "Other", source: $other_source}]}'
   printf '\n200'
   exit 0
 fi
@@ -243,7 +249,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | content-missing-entrypoint | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | content-missing-entrypoint | content-entrypoint-other-file | content-nested-entrypoint | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
       "${call_count}" -le 2 ]]; then
       version_number=4
@@ -606,6 +612,27 @@ test "${content_missing_commands}" = \
   "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version "
 grep -q 'does not expose the required processing entrypoints' \
   "${content_missing_dir}/output.log"
+
+content_other_dir="${TEST_ROOT}/content-entrypoint-other-file"
+mkdir -p "${content_other_dir}"
+run_fixture "${content_other_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "content-entrypoint-other-file"
+
+content_nested_dir="${TEST_ROOT}/content-nested-entrypoint"
+mkdir -p "${content_nested_dir}"
+set +e
+run_fixture "${content_nested_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "content-nested-entrypoint"
+nested_status=$?
+set -e
+if [[ "${nested_status}" -eq 0 ]]; then
+  printf '%s\n' 'A nested entrypoint declaration was accepted.' >&2
+  exit 1
+fi
+if grep -Eq '^clasp-deploy$' "${content_nested_dir}/commands.log"; then
+  printf '%s\n' 'Nested entrypoint validation allowed deployment mutation.' >&2
+  exit 1
+fi
 
 for scenario_and_message in \
   "api-forbidden:authorization was denied" \

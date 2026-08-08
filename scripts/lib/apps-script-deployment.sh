@@ -217,15 +217,58 @@ validate_apps_script_version_entrypoints() {
   local content_json="$1"
   shift
   local entrypoint
+  local sources_json
+
+  sources_json="$(jq -c '[.files[]? | select((.type? == "SERVER_JS" or .type? == null) and (.source | type == "string")) | .source]' <<<"${content_json}")" || {
+    printf '%s\n' 'Apps Script version content sources were invalid.' >&2
+    return 1
+  }
 
   for entrypoint in "$@"; do
-    if ! jq -e --arg entrypoint "${entrypoint}" '
-      [.files[]? |
-        select(.name == "UtilitiesCataloging") |
-        (.source // "")] |
-      any(.[]; test("(?m)^function[[:space:]]+" + $entrypoint +
-        "[[:space:]]*[(]"))
-    ' <<<"${content_json}" >/dev/null; then
+    if ! printf '%s' "${sources_json}" | node -e '
+      const entrypoint = process.argv[1];
+      let input = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { input += chunk; });
+      process.stdin.on("end", () => {
+        const sources = JSON.parse(input);
+        const isTopLevel = (source) => {
+          let depth = 0;
+          let state = "code";
+          for (let i = 0; i < source.length; i += 1) {
+            const character = source[i];
+            const next = source[i + 1];
+            if (state === "line-comment") {
+              if (character === "\\n") state = "code";
+              continue;
+            }
+            if (state === "block-comment") {
+              if (character === "*" && next === "/") { state = "code"; i += 1; }
+              continue;
+            }
+            if (state === "single" || state === "double" || state === "template") {
+              if (character === "\\") { i += 1; continue; }
+              if ((state === "single" && character === String.fromCharCode(39)) ||
+                  (state === "double" && character === String.fromCharCode(34)) ||
+                  (state === "template" && character === String.fromCharCode(96))) state = "code";
+              continue;
+            }
+            if (character === "/" && next === "/") { state = "line-comment"; i += 1; continue; }
+            if (character === "/" && next === "*") { state = "block-comment"; i += 1; continue; }
+            if (character === String.fromCharCode(39)) { state = "single"; continue; }
+            if (character === String.fromCharCode(34)) { state = "double"; continue; }
+            if (character === String.fromCharCode(96)) { state = "template"; continue; }
+            if (character === "{") { depth += 1; continue; }
+            if (character === "}") { depth = Math.max(0, depth - 1); continue; }
+            if (depth === 0 && source.slice(i).match(new RegExp("^function\\s+" + entrypoint + "\\s*\\("))) {
+              return true;
+            }
+          }
+          return false;
+        };
+        process.exit(sources.some(isTopLevel) ? 0 : 1);
+      });
+    ' "${entrypoint}"; then
       printf 'Apps Script version is missing required entrypoint %s.\n' \
         "${entrypoint}" >&2
       return 1

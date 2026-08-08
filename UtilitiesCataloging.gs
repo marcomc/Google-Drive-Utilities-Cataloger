@@ -18,7 +18,15 @@ function retryFailedUtilitiesCataloging() {
  */
 function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
+  if (arguments.length > 1 && arguments[1] === true) {
+    return processSingleIntakeFileWithinLock_(fileId);
+  }
   return withCatalogProcessingLock_('manual', function () {
+    return processSingleIntakeFileWithinLock_(fileId);
+  });
+}
+
+function processSingleIntakeFileWithinLock_(fileId) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
 
     if (hasMutationJournal_(fileId)) {
@@ -53,7 +61,6 @@ function processSingleIntakeFile(fileId) {
     logCatalogResult_(file, result);
     finalizeCatalogResults_(state, [result]);
     return result;
-  });
 }
 
 /**
@@ -69,23 +76,25 @@ function processSingleIntakeFileByName(fileName) {
   }
 
   assertCatalogConfiguration_();
-  const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-  const iterator = rootFolder.getFilesByName(fileName.trim());
-  const matches = [];
-  while (iterator.hasNext()) {
-    const file = iterator.next();
-    if (isDirectIntakePdf_(file, rootFolder)) {
-      matches.push(file);
+  return withCatalogProcessingLock_('manual', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    const iterator = rootFolder.getFilesByName(fileName.trim());
+    const matches = [];
+    while (iterator.hasNext()) {
+      const file = iterator.next();
+      if (isDirectIntakePdf_(file, rootFolder)) {
+        matches.push(file);
+      }
     }
-  }
 
-  if (matches.length === 0) {
-    throw new Error('No matching PDF was found in the direct intake folder.');
-  }
-  if (matches.length > 1) {
-    throw new Error('Multiple matching PDFs were found in the direct intake folder.');
-  }
-  return processSingleIntakeFile(matches[0].getId());
+    if (matches.length === 0) {
+      throw new Error('No matching PDF was found in the direct intake folder.');
+    }
+    if (matches.length > 1) {
+      throw new Error('Multiple matching PDFs were found in the direct intake folder.');
+    }
+    return processSingleIntakeFile(matches[0].getId(), true);
+  });
 }
 
 function runUtilitiesCataloging_(triggerSource) {
@@ -2978,7 +2987,10 @@ function isMissingFrequencyProblem_(problem) {
   if (!text || !isStandaloneInformationalProblem_(text)) {
     return false;
   }
-  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b[\s\S]*\b(?:non\s+(?:[\wàèéìòù]+\s+)*indicata|non\s+(?:[\wàèéìòù]+\s+)*presente|assente|mancante|not\s+(?:explicitly\s+)?(?:indicated|specified|present)|missing|absent)\b[\s\S]*[.!?]?$/i.test(text);
+  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent)/i.test(text)) {
+    return false;
+  }
+  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b[\s\S]*\b(?:non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata)|assente|mancante|not\s+(?:explicitly\s+)?(?:indicated|specified|present|printed|reported)|missing|absent)\b[\s\S]*[.!?]?$/i.test(text);
 }
 
 function isInvoiceReconciliationComplete_(extracted) {
@@ -3054,20 +3066,24 @@ function inferFrequencyFromPeriod_(extracted) {
 }
 
 function getHistoricalInvoiceFrequency_(extracted) {
+  return getHistoricalInvoiceFrequencyEvidence_(extracted).frequency;
+}
+
+function getHistoricalInvoiceFrequencyEvidence_(extracted) {
   if (typeof SpreadsheetApp === 'undefined' || !extracted.supply_type ||
     !extracted.supplier) {
-    return '';
+    return { frequency: '', conflict: false };
   }
   try {
     const config = getAutomationConfig_();
     const sheetName = config.sheet_by_supply[extracted.supply_type];
     if (!sheetName) {
-      return '';
+      return { frequency: '', conflict: false };
     }
     const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
     const sheet = spreadsheet.getSheetByName(sheetName);
     if (!sheet) {
-      return '';
+      return { frequency: '', conflict: false };
     }
     const layout = getSheetLayout_(sheet);
     const supplierColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('supplier'));
@@ -3075,19 +3091,25 @@ function getHistoricalInvoiceFrequency_(extracted) {
     const dateColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('issueDate'));
     const dataRows = Math.max(0, sheet.getLastRow() - layout.headerRow);
     if (!supplierColumn || !frequencyColumn || !dataRows) {
-      return '';
+      return { frequency: '', conflict: false };
     }
     const values = sheet.getRange(layout.headerRow + 1, 1, dataRows,
       layout.headers.length).getValues();
-    const currentDate = extracted.issue_date || '';
+    const currentDate = dateForValue_(extracted.issue_date);
+    if (extracted.issue_date && !currentDate) {
+      return { frequency: '', conflict: true };
+    }
+    if (currentDate && !dateColumn) {
+      return { frequency: '', conflict: false };
+    }
     const counts = Object.create(null);
     values.forEach(function (row) {
       if (normalizeCellText_(row[supplierColumn - 1]) !== normalizeCellText_(extracted.supplier)) {
         return;
       }
-      if (currentDate && dateColumn) {
+      if (dateColumn) {
         const priorDate = dateForValue_(row[dateColumn - 1]);
-        if (priorDate && currentDate && priorDate >= currentDate) {
+        if (!priorDate || (currentDate && priorDate >= currentDate)) {
           return;
         }
       }
@@ -3099,12 +3121,15 @@ function getHistoricalInvoiceFrequency_(extracted) {
     const ranked = Object.keys(counts).sort(function (left, right) {
       return counts[right] - counts[left];
     });
-    if (!ranked.length || ranked.length > 1 && counts[ranked[0]] === counts[ranked[1]]) {
-      return '';
+    if (!ranked.length) {
+      return { frequency: '', conflict: false };
     }
-    return ranked[0];
+    if (ranked.length > 1 && counts[ranked[0]] === counts[ranked[1]]) {
+      return { frequency: '', conflict: true };
+    }
+    return { frequency: ranked[0], conflict: false };
   } catch (error) {
-    return '';
+    return { frequency: '', conflict: false };
   }
 }
 
@@ -3113,8 +3138,14 @@ function inferInvoiceFrequency_(extracted) {
     return;
   }
   const periodFrequency = inferFrequencyFromPeriod_(extracted);
-  const historicalFrequency = getHistoricalInvoiceFrequency_(extracted);
-  extracted.frequency = periodFrequency || historicalFrequency || '';
+  const historicalEvidence = getHistoricalInvoiceFrequencyEvidence_(extracted);
+  if (historicalEvidence.conflict ||
+    (periodFrequency && historicalEvidence.frequency &&
+      periodFrequency !== historicalEvidence.frequency)) {
+    extracted.frequency = '';
+    return;
+  }
+  extracted.frequency = periodFrequency || historicalEvidence.frequency || '';
   if (extracted.frequency) {
     extracted.problems = (extracted.problems || []).filter(function (problem) {
       return !isMissingFrequencyProblem_(problem);

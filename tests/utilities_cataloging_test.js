@@ -888,6 +888,8 @@ function testExtractionSchemaAndCalendarValidation() {
   };
   assert.equal(context.validateExtraction_(missingFrequency).valid, true);
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
+  assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -1064,6 +1066,32 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(tiedHistory);
   assert.equal(tiedHistory.frequency, '');
+
+  const conflictingPeriod = {
+    ...extracted,
+    period_start: '2026-06-01',
+    period_end: '2026-06-30',
+    frequency: ''
+  };
+  const differentSheet = {
+    getLastRow: () => 2,
+    getRange: () => ({
+      getValues: () => [['SUPPLIER', 'quarterly', '2026-05-16']]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => differentSheet })
+  };
+  context.inferInvoiceFrequency_(conflictingPeriod);
+  assert.equal(conflictingPeriod.frequency, '');
+
+  const malformedDate = {
+    ...historyOnly,
+    issue_date: 'not-a-date',
+    frequency: ''
+  };
+  context.inferInvoiceFrequency_(malformedDate);
+  assert.equal(malformedDate.frequency, '');
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
@@ -4267,10 +4295,18 @@ function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   const context = loadCataloger({
     DriveApp: {
       getFolderById: () => rootFolder
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => {}
+      })
     }
   });
   context.assertCatalogConfiguration_ = () => {};
   context.getRootFolderId_ = () => 'root-folder-id';
+  context.isCatalogMaintenanceActive_ = () => false;
+  context.logCatalogEvent_ = () => {};
   context.processSingleIntakeFile = (fileId) => {
     calls.push(fileId);
     return { status: 'IMPORTED' };
@@ -4297,11 +4333,19 @@ function testSingleFileByNameRejectsMissingOrAmbiguousMatches() {
   const context = loadCataloger({
     DriveApp: {
       getFolderById: () => rootFolder
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => true,
+        releaseLock: () => {}
+      })
     }
   });
   context.assertCatalogConfiguration_ = () => {};
   context.getRootFolderId_ = () => 'root-folder-id';
   context.isDirectIntakePdf_ = () => true;
+  context.isCatalogMaintenanceActive_ = () => false;
+  context.logCatalogEvent_ = () => {};
 
   assert.throws(
     () => context.processSingleIntakeFileByName('  '),
