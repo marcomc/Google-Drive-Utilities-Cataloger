@@ -889,8 +889,8 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_(missingFrequency).valid, true);
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), true);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the supplier invoice.'), true);
@@ -909,6 +909,17 @@ function testExtractionSchemaAndCalendarValidation() {
   [
     'Quantità consumi F1 incerta.',
     'Quantity absent because supplier is missing.',
+    'Identifier is ambiguous.',
+    'Numero documento illeggibile.',
+    'N. fattura illeggibile.',
+    'Billing period unreadable.',
+    'Periodo di fatturazione ambiguo.',
+    'Billed period unavailable.',
+    'Reference period unclear.',
+    'Periodo di competenza non disponibile.',
+    'Identificativo ambiguo.',
+    'Electricity consumption unreadable.',
+    'Consumo elettrico illeggibile.',
     'Quantità consumi F1 non riportata.',
     'F1 unreadable.',
     'Fascia F2 illeggibile.',
@@ -917,11 +928,19 @@ function testExtractionSchemaAndCalendarValidation() {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
   });
   [
+    'Frequency absent because the reference period is unclear.',
+    'Frequenza assente perche il periodo di riferimento e ambiguo.'
+  ].forEach((problem) => {
+    assert.equal(context.isMissingFrequencyProblem_(problem), false);
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
+  });
+  [
     'Unità di misura non leggibile.',
-    'Quantity absent because the billing period is missing.',
     'Charges are inconsistent.',
     'Tariff is unclear.',
-    'Payment method unreadable.'
+    'Payment method unreadable.',
+    'Sconto non riportato in fattura.',
+    'Frequenza non indicata in fattura.'
   ].forEach((problem) => {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
   });

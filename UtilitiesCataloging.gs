@@ -2986,7 +2986,7 @@ function isMissingFrequencyProblem_(problem) {
     return false;
   }
   return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b/i.test(text) &&
-    !isRequiredInvoiceContextProblem_(text);
+    !hasCriticalInvoiceFieldMention_(text);
 }
 
 function isUncertainInvoiceEvidence_(text) {
@@ -2995,10 +2995,23 @@ function isUncertainInvoiceEvidence_(text) {
 
 function isRequiredInvoiceContextProblem_(text) {
   const statement = normalizeInvoiceProblemStatement_(text);
-  const field = '(?:supplier|fornitore|supply|fornitura|account\\s+holder|intestatario|service\\s+address|indirizzo(?:\\s+di\\s+fornitura)?|contract|contratto|customer\\s+code|codice\\s+cliente|invoice\\s+(?:identifier|number)|numero\\s+fattura|issue\\s+date|data\\s+di\\s+emissione|reference\\s+(?:year|month)|(?:anno|mese)\\s+di\\s+riferimento|cost\\s+consumption|costo\\s+(?:del\\s+)?consumo|non[ -]?consumption\\s+cost|iva|vat|total|totale)';
+  const field = getCriticalInvoiceProblemFieldPattern_();
   const absence = '(?:missing|absent|unavailable|not\\s+(?:identified|available|present|printed|reported)|non\\s+(?:identificat[oa]|disponibile|presente|stampat[oa]|riportat[oa])|assente|mancante|non\\s+indicat[oa])';
   return new RegExp('\\b' + field + '\\b[^.!?;]{0,80}\\b' + absence + '\\b|' +
     '\\b' + absence + '\\b[^.!?;]{0,80}\\b' + field + '\\b', 'i').test(statement);
+}
+
+function getCriticalInvoiceProblemFieldPattern_() {
+  return '(?:supplier|fornitore|supply|fornitura|account\\s+holder|intestatario|' +
+    'service\\s+address|indirizzo(?:\\s+di\\s+fornitura)?|contract|contratto|' +
+    'customer\\s+code|codice\\s+cliente|invoice\\s+(?:identifier|number)|' +
+    'identifier|invoice\\s+number|document\\s+number|numero\\s+(?:fattura|documento|identificativo)|' +
+    'identificativo|codice\\s+documento|riferimento\\s+documento|\\bn\\s*\\.?\\s*fattura\\b|' +
+    'issue\\s+date|data\\s+di\\s+emissione|reference\\s+(?:year|month|period)|' +
+    '(?:anno|mese)\\s+di\\s+riferimento|(?:billing|billed)\\s+period|' +
+    'periodo\\s+di\\s+(?:fatturazione|competenza|riferimento)|' +
+    'cost\\s+consumption|costo\\s+(?:del\\s+)?consumo|non[ -]?consumption\\s+cost|' +
+    'iva|vat|total|totale)';
 }
 
 function normalizeInvoiceProblemStatement_(text) {
@@ -3008,14 +3021,13 @@ function normalizeInvoiceProblemStatement_(text) {
 }
 
 function hasCriticalInvoiceFieldMention_(text) {
-  return /(?:supplier|fornitore|supply|fornitura|account\s+holder|intestatario|service\s+address|indirizzo(?:\s+di\s+fornitura)?|contract|contratto|customer\s+code|codice\s+cliente|invoice\s+(?:identifier|number)|numero\s+fattura|issue\s+date|data\s+di\s+emissione|reference\s+(?:year|month)|(?:anno|mese)\s+di\s+riferimento|cost\s+consumption|costo\s+(?:del\s+)?consumo|non[ -]?consumption\s+cost|iva|vat|total|totale)/i.test(
-    normalizeInvoiceProblemStatement_(text)
-  );
+  return new RegExp(getCriticalInvoiceProblemFieldPattern_(), 'i').test(
+    normalizeInvoiceProblemStatement_(text));
 }
 
 function isGraphCriticalInvoiceProblem_(text) {
   return hasCriticalInvoiceFieldMention_(text) ||
-    /\b(?:f[123]|fascia\s+f?[123])\b/i.test(text);
+    /\b(?:f[123]|fascia\s+f?[123])\b|electricity\s+consumption|consumo\s+elettrico/i.test(text);
 }
 
 function getNonBlockingInvoiceWarnings_(extracted) {
