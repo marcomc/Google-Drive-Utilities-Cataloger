@@ -242,8 +242,16 @@ applied to invoice, contract, or customer identifiers.
 For invoices whose billing frequency is not printed explicitly, extraction does
 not fail solely for that absence. The runtime derives `monthly`, `bimonthly`,
 or `quarterly` from the complete billed period and the prior frequency of the
-same supplier in the same supply tab. An explicit printed frequency or reviewed
-configuration override remains authoritative.
+same supplier in the same supply tab. A unique historical majority is required;
+conflicting history or insufficient period data leaves the frequency blank but
+does not copy a value from another invoice. An explicit printed frequency or
+reviewed configuration override remains authoritative.
+
+Problems about optional line-item fields are non-blocking only when the invoice
+costs, VAT, and total are complete and reconcile. Identity, period, invoice
+number, reconciliation, and materially ambiguous values remain blocking.
+Supplier-specific defaults and collection-charge evidence keep their stricter
+reviewed behavior.
 
 When a report contains the localized supplier-profile link, open that folder to
 review a pending profile or the approved profile. The localized retry-import

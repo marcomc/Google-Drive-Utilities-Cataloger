@@ -68,6 +68,11 @@
   evidence. During state-less OAuth recovery, adopt only an exact legacy local
   auth profile and exactly one owner-only configured deployment; fail closed
   on ambiguity.
+- Treat optional invoice-field problems as non-blocking only when the core
+  monetary reconciliation passes and the problem explicitly states absence or
+  non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
+  remain blocking; a tied historical cadence must fail closed rather than pick
+  an arbitrary frequency.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled

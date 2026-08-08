@@ -895,11 +895,18 @@ function testExtractionSchemaAndCalendarValidation() {
     ]
   }).valid, false);
   [
-    'Unità di misura non leggibile.',
-    'Sconto non indicato.',
-    'Quantità consumi F1 assente o illeggibile.'
+    'Unità di misura non indicata.',
+    'Sconto non applicabile.',
+    'Quantità consumi F1 non riportata.'
   ].forEach((problem) => {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
+  });
+  [
+    'Unità di misura non leggibile.',
+    'Quantità consumi F1 assente o illeggibile.',
+    'Charges are inconsistent.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
   });
   assert.equal(context.validateExtraction_({
     ...raw,
@@ -1038,6 +1045,25 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(historyOnly);
   assert.equal(historyOnly.frequency, 'monthly');
+
+  const tieSheet = {
+    getLastRow: () => 3,
+    getRange: () => ({
+      getValues: () => [
+        ['SUPPLIER', 'monthly', '2026-05-16'],
+        ['SUPPLIER', 'quarterly', '2026-06-16']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => tieSheet })
+  };
+  const tiedHistory = {
+    ...historyOnly,
+    frequency: ''
+  };
+  context.inferInvoiceFrequency_(tiedHistory);
+  assert.equal(tiedHistory.frequency, '');
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {

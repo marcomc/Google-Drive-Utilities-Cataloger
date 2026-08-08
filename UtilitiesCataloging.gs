@@ -3004,6 +3004,12 @@ function isNonBlockingOptionalInvoiceProblem_(problem, extracted) {
   if (/default value|not established by printed evidence|spese\s+d['’]?incasso|collection\s+charges/i.test(text)) {
     return false;
   }
+  if (/(?:ambigu[oa]|ambiguous|illeggibil[ei]|unreadable|inconsistent|incoerent[ei]|sbagliat[oa]|wrong|mismatch)/i.test(text)) {
+    return false;
+  }
+  if (!/(?:assente|mancante|non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata|applicabile)|non\s+applicabile|not\s+(?:[\w\s]+\s+)?(?:indicated|present|printed|reported|applicable)|not\s+applicable|omitted|unavailable)/i.test(text)) {
+    return false;
+  }
   return /(?:unit[àa]\s+di\s+misura|unit\s+of\s+measure|descrizione\s+del\s+consumo|consumption\s+description|quantit[àa]|quantity|scont[io]|discount|oneri?|charges?|spese\s+d['’]?incasso|addebiti?|recurring|ricorrent[ei]|costo\s+unitario|unit\s+cost|tariffa|tariff|fascia\s+f?[123]|\bf[123]\b)/i.test(text);
 }
 
@@ -3090,9 +3096,13 @@ function getHistoricalInvoiceFrequency_(extracted) {
         counts[frequency] = (counts[frequency] || 0) + 1;
       }
     });
-    return Object.keys(counts).sort(function (left, right) {
+    const ranked = Object.keys(counts).sort(function (left, right) {
       return counts[right] - counts[left];
-    })[0] || '';
+    });
+    if (!ranked.length || ranked.length > 1 && counts[ranked[0]] === counts[ranked[1]]) {
+      return '';
+    }
+    return ranked[0];
   } catch (error) {
     return '';
   }

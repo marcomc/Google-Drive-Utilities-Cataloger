@@ -20,7 +20,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   version before updating the owner-only API deployment.
 - Treat an unprinted invoice billing frequency as recoverable: infer monthly,
   bimonthly, or quarterly cadence from the billed period and prior matching
-  supplier invoices instead of blocking the import.
+  supplier invoices instead of blocking the import; conflicting history leaves
+  the field blank rather than choosing an arbitrary cadence.
+- Treat optional line-item problems as non-blocking only when invoice costs,
+  VAT, and total reconcile; identity, period, and material value problems still
+  require review.
 
 ## [0.4.0] - 2026-08-07 - Supply identity verification
 
