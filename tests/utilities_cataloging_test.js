@@ -891,6 +891,7 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -1085,6 +1086,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(conflictingPeriod);
   assert.equal(conflictingPeriod.frequency, '');
+  assert.match(conflictingPeriod.problems.join(' '), /conflicting/);
 
   const malformedDate = {
     ...historyOnly,
