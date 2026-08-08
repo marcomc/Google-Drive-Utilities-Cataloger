@@ -176,6 +176,60 @@ validate_owner_only_api_deployment() {
   fi
 }
 
+find_owner_only_api_deployment() {
+  local auth_file="$1"
+  local script_id="$2"
+  local result_variable="$3"
+  local deployments_json
+  local candidate_id
+  local deployment_json
+  local deployment_ids
+  local selected_id=""
+  local match_count=0
+
+  deployments_json=""
+  if ! run_apps_script_clasp_json \
+    "${auth_file}" \
+    deployments_json \
+    deployments; then
+    return 1
+  fi
+  if ! jq -e 'type == "array"' <<<"${deployments_json}" >/dev/null; then
+    printf '%s\n' "The Apps Script deployment list is invalid." >&2
+    return 1
+  fi
+  deployment_ids="$(jq -r '.[] | .deploymentId // empty' \
+    <<<"${deployments_json}")"
+
+  while IFS= read -r candidate_id; do
+    [[ -n "${candidate_id}" ]] || continue
+    deployment_json=""
+    if ! read_apps_script_deployment \
+      "${auth_file}" \
+      "${script_id}" \
+      "${candidate_id}" \
+      deployment_json; then
+      printf 'Could not inspect Apps Script deployment %s during discovery.\n' \
+        "${candidate_id}" >&2
+      return 1
+    fi
+    if validate_owner_only_api_deployment \
+      "${deployment_json}" \
+      "${script_id}" \
+      "${candidate_id}" >/dev/null 2>&1; then
+      selected_id="${candidate_id}"
+      match_count=$((match_count + 1))
+    fi
+  done <<<"${deployment_ids}"
+
+  if [[ "${match_count}" -ne 1 ]]; then
+    printf 'Expected exactly one owner-only Apps Script deployment; found %s.\n' \
+      "${match_count}" >&2
+    return 1
+  fi
+  printf -v "${result_variable}" '%s' "${selected_id}"
+}
+
 wait_for_expected_apps_script_deployment() {
   local auth_file="$1"
   local script_id="$2"

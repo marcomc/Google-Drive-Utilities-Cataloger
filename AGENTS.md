@@ -59,6 +59,11 @@
   and response budgets; log the finish reason without logging document data,
   and fail closed unless the provider explicitly reports a successful terminal
   reason such as `STOP`.
+- Do not authorize address-derived routing from extracted fields alone:
+  corroborate the configured street, civic number, and city against address
+  evidence. During state-less OAuth recovery, adopt only an exact legacy local
+  auth profile and exactly one owner-only configured deployment; fail closed
+  on ambiguity.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
@@ -118,6 +123,14 @@
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
   command name.
+  Treat the saved Desktop OAuth client at
+  `$XDG_CONFIG_HOME/gduc/ci-deployment-oauth.json` or
+  `$HOME/.config/gduc/ci-deployment-oauth.json` as the canonical local recovery
+  source. When `invalid_grant` occurs, run `make renew-clasp-auth`; it must
+  recreate the isolated local profile from that client and validate the stored
+  owner-only deployment before any source mutation. Do not assume an existing
+  `.clasprc.json` is valid and do not ask for a new client download unless the
+  canonical path is absent or invalid.
   Route every installer or CI `clasp --json` deployment list, creation, and
   inspection operation through the shared authorization-aware helper. Preserve
   the actionable `invalid_grant` remediation without relaying provider stderr,
@@ -134,6 +147,11 @@
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.
+- After an accepted Apps Script deployment update, verify metadata with a
+  bounded read-only poll. Retry only the exact validated pre-update version;
+  treat authorization, identity, entry-point, transport, and any other
+  unexpected version as immediate failures, and test their exact read and wait
+  counts.
 - Classify automatic paid-backend fallback only from provider-specific,
   explicit terminal quota or credit signals. Never infer it from an HTTP status
   or documentation URL alone; retain negative tests for transient rate limits

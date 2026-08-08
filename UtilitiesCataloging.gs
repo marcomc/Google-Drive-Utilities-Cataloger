@@ -220,6 +220,15 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
     if (!validation.valid) {
       return buildVerifyResult_(file, extracted, validation.problem, validation.action);
     }
+    if (extracted.document_type === 'Invoice') {
+      state.failureStage = 'validating-service-identity';
+      const identityValidation = validateServiceIdentityForInvoice_(extracted);
+      if (!identityValidation.valid) {
+        return buildVerifyResult_(file, extracted,
+          identityValidation.problem, identityValidation.action);
+      }
+      extracted.address_type = 'import';
+    }
     state.extractionValidated = true;
     state.failureStage = 'validating-target-spreadsheet';
     const sheetValueValidation = validateTargetSheetValues_(extracted);
@@ -901,6 +910,11 @@ function buildExtractionResponseSchema_() {
     'supply_type',
     'address_type',
     'address_evidence',
+    'account_holder',
+    'service_street',
+    'service_civic_number',
+    'service_city',
+    'service_postal_code',
     'issue_date',
     'identifier',
     'contract_number',
@@ -934,6 +948,11 @@ function buildExtractionResponseSchema_() {
         enum: ['import', 'archive_only', 'unknown']
       },
       address_evidence: nullableString,
+      account_holder: nullableString,
+      service_street: nullableString,
+      service_civic_number: nullableString,
+      service_city: nullableString,
+      service_postal_code: nullableString,
       issue_date: nullableString,
       identifier: nullableString,
       contract_number: nullableString,
@@ -1124,6 +1143,11 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "supply_type": "configured canonical supply or null",',
     '  "address_type": "import|archive_only|unknown",',
     '  "address_evidence": "printed service address or null",',
+    '  "account_holder": "printed account holder or null",',
+    '  "service_street": "printed service street without civic number or null",',
+    '  "service_civic_number": "printed service civic number or null",',
+    '  "service_city": "printed service city or null",',
+    '  "service_postal_code": "printed postal code or null",',
     '  "issue_date": "YYYY-MM-DD or null",',
     '  "identifier": "invoice number, optional contract/report identifier, or null",',
     '  "contract_number": "printed contract number or null",',
@@ -1151,9 +1175,9 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
       JSON.stringify(localization.supplierFieldDefaults || []) + '.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
-    'Classify a printed address only with these configured rules: ' +
-      JSON.stringify(automationConfig.address_rules) + '. If no printed service address is present, do not add a problem for that alone; the configured missing-address fallback is ' +
-      String(automationConfig.address_missing_type || 'unknown') + '.',
+    'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
+    'For non-invoice documents, classify a printed address only with these configured rules: ' +
+      JSON.stringify(automationConfig.address_rules) + '. For invoices, address_type is finalized by the runtime comparison with the target supply identity. If no printed service address is present, return null address components and add a concise problem.',
     'Apply these frequency overrides when supplier and supply match: ' +
       JSON.stringify(automationConfig.frequency_overrides || []) + '.',
     'The reference year and month are the end of the last billed period.',
@@ -1189,6 +1213,11 @@ function validateRawExtractionShape_(extracted) {
     'supply_type',
     'address_type',
     'address_evidence',
+    'account_holder',
+    'service_street',
+    'service_civic_number',
+    'service_city',
+    'service_postal_code',
     'issue_date',
     'identifier',
     'contract_number',
@@ -1255,6 +1284,12 @@ function normalizeExtraction_(extracted) {
   normalized.supplier = normalizeSupplier_(normalized.supplier);
   normalized.supply_type = normalizeSupplyType_(normalized.supply_type);
   normalized.address_type = classifyAddress_(normalized.address_evidence);
+  normalized.address_evidence = String(normalized.address_evidence || '').trim();
+  normalized.account_holder = String(normalized.account_holder || '').trim();
+  normalized.service_street = String(normalized.service_street || '').trim();
+  normalized.service_civic_number = String(normalized.service_civic_number || '').trim();
+  normalized.service_city = String(normalized.service_city || '').trim();
+  normalized.service_postal_code = String(normalized.service_postal_code || '').trim();
   normalized.issue_date = normalizeIsoDate_(normalized.issue_date);
   normalized.identifier = String(normalized.identifier || '').trim();
   normalized.contract_number = String(normalized.contract_number || '').trim();
@@ -1283,6 +1318,154 @@ function normalizeExtraction_(extracted) {
     normalized.problems.slice() : [];
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
+}
+
+function normalizeNameIdentity_(value) {
+  return normalizeCellText_(value).split(' ').filter(Boolean).sort().join(' ');
+}
+
+function normalizeAddressIdentityText_(value) {
+  return normalizeCellText_(value)
+    .replace(/\bc\s+so\b/g, 'corso')
+    .replace(/\bcso\b/g, 'corso')
+    .replace(/\bv\s*le\b/g, 'viale')
+    .replace(/\bv\b/g, 'via')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeAddressTokenSequence_(value) {
+  return normalizeAddressIdentityText_(value).split(' ').filter(Boolean);
+}
+
+function isAddressPostalCodeToken_(token) {
+  return /^\d{5}$/.test(token);
+}
+
+function hasAddressComponentPlacement_(addressTokens, components,
+  requireCompleteIdentity) {
+  const MAX_ADDRESS_TOKENS = 64;
+  if (!addressTokens.length || addressTokens.length > MAX_ADDRESS_TOKENS ||
+    components.length !== 3 || components.some(function (component) {
+      return !component.length || component.length > MAX_ADDRESS_TOKENS;
+    })) {
+    return false;
+  }
+  const componentLength = components.reduce(function (total, component) {
+    return total + component.length;
+  }, 0);
+  if (requireCompleteIdentity && componentLength !== addressTokens.length) {
+    return false;
+  }
+  const placements = components.map(function (component) {
+    const matches = [];
+    for (let start = 0; start <= addressTokens.length - component.length;
+      start += 1) {
+      if (component.every(function (token, offset) {
+        return addressTokens[start + offset] === token;
+      })) {
+        matches.push({ start: start, end: start + component.length });
+      }
+    }
+    return matches;
+  });
+  if (placements.some(function (matches) { return !matches.length; })) {
+    return false;
+  }
+  function placeComponent(index, occupied) {
+    if (index === placements.length) {
+      return true;
+    }
+    return placements[index].some(function (placement) {
+      for (let tokenIndex = placement.start; tokenIndex < placement.end;
+        tokenIndex += 1) {
+        if (occupied[tokenIndex]) {
+          return false;
+        }
+      }
+      const nextOccupied = occupied.slice();
+      for (let tokenIndex = placement.start; tokenIndex < placement.end;
+        tokenIndex += 1) {
+        nextOccupied[tokenIndex] = true;
+      }
+      return placeComponent(index + 1, nextOccupied);
+    });
+  }
+  return placeComponent(0, Array(addressTokens.length).fill(false));
+}
+
+function validateServiceIdentity_(extracted, expected) {
+  const configured = expected || {};
+  if (!normalizeNameIdentity_(configured.account_holder) ||
+    !normalizeAddressIdentityText_(configured.service_address)) {
+    return invalidExtraction_(
+      'The target supply has no configured account holder or service address.',
+      'Set Intestatario and Indirizzo di fornitura in row 1 of the target supply sheet, then retry the invoice.'
+    );
+  }
+  const holder = normalizeNameIdentity_(extracted && extracted.account_holder);
+  const street = normalizeAddressTokenSequence_(extracted && extracted.service_street);
+  const civicNumber = normalizeAddressTokenSequence_(extracted && extracted.service_civic_number);
+  const city = normalizeAddressTokenSequence_(extracted && extracted.service_city);
+  const addressComponents = [street, civicNumber, city];
+  const configuredAddress = normalizeAddressTokenSequence_(
+    configured.service_address
+  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  const evidenceAddress = normalizeAddressTokenSequence_(
+    extracted && extracted.address_evidence
+  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  if (!holder || !street.length || !civicNumber.length || !city.length) {
+    return invalidExtraction_(
+      'The invoice account holder or service address is missing or ambiguous.',
+      'Verify the account holder and the service address in the PDF.'
+    );
+  }
+  const addressMatches = hasAddressComponentPlacement_(configuredAddress,
+    addressComponents, true);
+  const evidenceMatches = hasAddressComponentPlacement_(evidenceAddress,
+    addressComponents, false);
+  if (holder !== normalizeNameIdentity_(configured.account_holder) ||
+    !addressMatches || !evidenceMatches) {
+    return invalidExtraction_(
+      'The invoice account holder or service address does not match the configured supply identity.',
+      'Verify that the PDF belongs to the configured supply or update the expected identity in row 1.'
+    );
+  }
+  return { valid: true };
+}
+
+function getServiceIdentityControls_(sheet, layout) {
+  if (!sheet || !layout || layout.headerRow <= 1) {
+    return { account_holder: '', service_address: '' };
+  }
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  if (!holderColumn || !addressColumn) {
+    return { account_holder: '', service_address: '' };
+  }
+  const metadataRow = layout.headerRow - 1;
+  return {
+    account_holder: String(sheet.getRange(metadataRow, holderColumn).getDisplayValue() || '').trim(),
+    service_address: String(sheet.getRange(metadataRow, addressColumn).getDisplayValue() || '').trim()
+  };
+}
+
+function validateServiceIdentityForInvoice_(extracted) {
+  const automationConfig = getAutomationConfig_();
+  const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+  const sheetName = automationConfig.sheet_by_supply[extracted.supply_type];
+  const sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    return invalidExtraction_(
+      'The configured target spreadsheet tab does not exist.',
+      'Create or repair the configured spreadsheet tab.'
+    );
+  }
+  const layout = getSheetLayout_(sheet);
+  return validateServiceIdentity_(extracted,
+    getServiceIdentityControls_(sheet, layout));
 }
 
 function applySupplierFieldDefaults_(extracted, availableHeaders) {
@@ -1476,7 +1659,8 @@ function validateExtraction_(extracted) {
     return invalidExtraction_('One or more document dates are not valid calendar dates.',
       'Verify the issue date and billing period in the PDF.');
   }
-  if (['import', 'archive_only'].indexOf(extracted.address_type) === -1) {
+  if (extracted.document_type !== 'Invoice' &&
+    ['import', 'archive_only'].indexOf(extracted.address_type) === -1) {
     return invalidExtraction_('Service address is absent, ambiguous, or does not match a configured rule.',
       'Verify the service address in the PDF.');
   }
@@ -2243,7 +2427,10 @@ function getSheetLayout_(sheet, headerAliases) {
   const supplierAliases = headerAliases ?
     headerAliases.supplier || [] : getHeaderAliases_('supplier');
   const width = sheet.getLastColumn();
-  const rowsToInspect = Math.min(10, Math.max(1, sheet.getLastRow()));
+  // The installer can insert its control row immediately before an existing
+  // row-10 header. Keep discovery bounded while allowing that supported
+  // migration recovery state (header row 11).
+  const rowsToInspect = Math.min(11, Math.max(1, sheet.getLastRow()));
   const rows = sheet.getRange(1, 1, rowsToInspect, width).getDisplayValues();
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const headers = rows[rowIndex];
@@ -2354,6 +2541,8 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('supplier'), extracted.supplier);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'), extracted.identifier);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('contractNumber'), extracted.contract_number);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('accountHolder'), extracted.account_holder);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('serviceAddress'), extracted.address_evidence);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'), extracted.customer_code);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('year'), extracted.reference_year);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), extracted.reference_month);
@@ -2383,14 +2572,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   // `sheet_values` carries supplementary line items. It must never replace a
   // canonical field merely because the model also returned a matching header.
   // In particular, keep identifiers and the reference month as literal text.
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('identifier'),
-    extracted.identifier);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('contractNumber'),
-    extracted.contract_number);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'),
-    extracted.customer_code);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'),
-    extracted.reference_month);
+  setCanonicalInvoiceFieldValues_(values, layout.lookup, extracted);
 
   Object.keys(values).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
@@ -2413,6 +2595,12 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('contractNumber'),
     extracted.contract_number);
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('accountHolder'),
+    extracted.account_holder);
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('serviceAddress'),
+    extracted.address_evidence);
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('customerCode'),
     extracted.customer_code);
@@ -2485,22 +2673,48 @@ function setValueForHeaders_(values, lookup, aliases, value) {
   }
 }
 
+function getCanonicalInvoiceFieldKeys_() {
+  return [
+    'identifier',
+    'contractNumber',
+    'accountHolder',
+    'serviceAddress',
+    'customerCode',
+    'month'
+  ];
+}
+
+function setCanonicalInvoiceFieldValues_(values, lookup, extracted) {
+  const fieldValues = {
+    identifier: extracted.identifier,
+    contractNumber: extracted.contract_number,
+    accountHolder: extracted.account_holder,
+    serviceAddress: extracted.address_evidence,
+    customerCode: extracted.customer_code,
+    month: extracted.reference_month
+  };
+  getCanonicalInvoiceFieldKeys_().forEach(function (key) {
+    setValueForHeaders_(values, lookup, getHeaderAliases_(key), fieldValues[key]);
+  });
+}
+
+function isCanonicalInvoiceHeader_(normalizedHeader) {
+  return getCanonicalInvoiceFieldKeys_().some(function (key) {
+    return getHeaderAliases_(key).some(function (alias) {
+      return normalizeHeader_(alias) === normalizedHeader;
+    });
+  });
+}
+
 function verifyImportedRow_(sheet, row, layout, file, extracted) {
   const expected = Object.create(null);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('issueDate'),
     isoDateToDate_(extracted.issue_date));
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('supplier'),
     extracted.supplier);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('identifier'),
-    extracted.identifier);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('contractNumber'),
-    extracted.contract_number);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('customerCode'),
-    extracted.customer_code);
+  setCanonicalInvoiceFieldValues_(expected, layout.lookup, extracted);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('year'),
     extracted.reference_year);
-  setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('month'),
-    extracted.reference_month);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('frequency'),
     extracted.frequency || '');
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('consumptionCost'),
@@ -2511,7 +2725,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('total'), extracted.total);
   extracted.sheet_values.forEach(function (entry) {
     const normalized = normalizeHeader_(entry.header);
-    if (layout.lookup[normalized] &&
+    if (layout.lookup[normalized] && !isCanonicalInvoiceHeader_(normalized) &&
       (expected[normalized] === undefined ||
       isOverridableReconciliationCostHeader_(normalized))) {
       expected[normalized] = entry.value;
@@ -3859,6 +4073,10 @@ function formatResult_(result, includeExtractionSnapshot) {
       oneLineReportText_(result.supplySupplier || labels.notIdentified),
     labels.identifier + ': ' +
       oneLineReportText_(data.identifier || labels.notIdentified),
+    labels.accountHolder + ': ' +
+      oneLineReportText_(data.account_holder || labels.notIdentified),
+    labels.serviceAddress + ': ' +
+      oneLineReportText_(data.address_evidence || labels.notIdentified),
     labels.period + ': ' + (period || labels.notIdentified),
     labels.consumption + ': ' +
       oneLineReportText_(

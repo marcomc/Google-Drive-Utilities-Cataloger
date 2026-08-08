@@ -45,6 +45,46 @@ function getElectricityDashboardLabels_(locale) {
   return localization.electricityDashboard;
 }
 
+function isLegacyFormulaElectricityDashboard_(dashboard, electricity) {
+  if (!dashboard || !electricity ||
+    typeof dashboard.getDeveloperMetadata !== 'function' ||
+    typeof dashboard.getRange !== 'function' ||
+    typeof dashboard.getMaxRows !== 'function' ||
+    typeof dashboard.getMaxColumns !== 'function' ||
+    typeof dashboard.getCharts !== 'function') {
+    return false;
+  }
+  const ownership = assertSafeElectricityDashboardOwnershipMetadata_(dashboard);
+  if (ownership.dashboardMarkers.length > 0) {
+    return false;
+  }
+  const rows = Math.min(20, dashboard.getMaxRows());
+  const columns = Math.min(80, dashboard.getMaxColumns());
+  if (!rows || !columns || dashboard.getCharts().length < 3) {
+    return false;
+  }
+  let formulas;
+  try {
+    formulas = dashboard.getRange(1, 1, rows, columns).getFormulas();
+  } catch (error) {
+    return false;
+  }
+  const sourceName = String(electricity.getName() || '');
+  const sourceReferences = [sourceName + '!',
+    "'" + sourceName.replace(/'/g, "''") + "'!"];
+  let referenceCount = 0;
+  formulas.forEach(function (row) {
+    row.forEach(function (formula) {
+      if (sourceReferences.some(function (reference) {
+        return String(formula || '').indexOf(reference) >= 0;
+      })) {
+        referenceCount += 1;
+      }
+    });
+  });
+  return referenceCount >= 3;
+}
+
 function initializeElectricityDashboard_(spreadsheet, automationConfig, options) {
   const locale = automationConfig.locale || 'en';
   const localization = getLocalizationRegistry_()[locale];
@@ -60,6 +100,13 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   }
   const displayedDashboard = spreadsheet.getSheetByName(labels.sheet);
   let technical = spreadsheet.getSheetByName(labels.dataSheet);
+  if (displayedDashboard && !technical &&
+    isLegacyFormulaElectricityDashboard_(displayedDashboard, electricity)) {
+    // Existing installations may have a user-owned formula dashboard instead
+    // of the managed technical-sheet layout. Its formulas already expand over
+    // the source tab, so leave its charts and presentation untouched.
+    return { legacyFormulaDashboard: true };
+  }
   if (!validateElectricityDashboardSource_(electricity, labels, headerAliases)) {
     if (displayedDashboard || technical) {
       throw new Error('Electricity dashboard source headers are missing or invalid.');

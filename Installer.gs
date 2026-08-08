@@ -90,6 +90,42 @@ function bootstrapCatalogerInstallation(options) {
 }
 
 /**
+ * Add the supply-identity fields to every configured supply tab. This is an
+ * owner-controlled migration for existing installations; it is idempotent
+ * and refreshes the managed electricity dashboard after the source tab
+ * changes.
+ */
+function migrateCatalogerServiceIdentityFields() {
+  assertCatalogConfiguration_();
+  return withCatalogLifecycleLock_('service-identity-sheet-migration', function () {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const seenSheets = Object.create(null);
+    const migrated = [];
+    automationConfig.canonical_supplies.forEach(function (supply) {
+      const sheetName = automationConfig.sheet_by_supply[supply];
+      if (seenSheets[sheetName]) {
+        return;
+      }
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) {
+        throw new Error('Configured spreadsheet tab is missing: ' + sheetName);
+      }
+      ensureInstallerServiceIdentityFields_(sheet, supply,
+        automationConfig.locale || 'en');
+      migrated.push({
+        supply: supply,
+        sheet: sheetName,
+        identityConfigured: hasInstallerServiceIdentityControls_(sheet)
+      });
+      seenSheets[sheetName] = true;
+    });
+    initializeElectricityDashboard_(spreadsheet, automationConfig);
+    return { migrated: true, sheets: migrated };
+  });
+}
+
+/**
  * Reconfigure only the installed time zone without reading the deleted
  * installer handoff or changing triggers and event transport.
  */
@@ -1107,6 +1143,7 @@ function ensureInstallerSpreadsheet_(rootFolder, spreadsheetId, title,
 
 function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
   const sheetNames = [];
+  const supplyBySheetName = Object.create(null);
   const electricitySheetNames = Object.create(null);
   automationConfig.canonical_supplies.forEach(function (supply) {
     const sheetName = automationConfig.sheet_by_supply[supply];
@@ -1115,6 +1152,7 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     }
     if (sheetNames.indexOf(sheetName) === -1) {
       sheetNames.push(sheetName);
+      supplyBySheetName[sheetName] = supply;
     }
     if (/^(electricity|luce)$/i.test(String(supply))) {
       electricitySheetNames[sheetName] = true;
@@ -1136,22 +1174,538 @@ function initializeInstallerSheets_(spreadsheet, automationConfig, created) {
     const sheet = spreadsheet.getSheetByName(sheetName) ||
       spreadsheet.insertSheet(sheetName);
     if (sheet.getLastRow() === 0) {
-      const headerRange = sheet.getRange(1, 1, 1, headers.length);
+      const headerRange = sheet.getRange(2, 1, 1, headers.length);
       headerRange.setValues([headers]);
       headerRange.setFontWeight('bold');
       headerRange.setBackground('#d9ead3');
-      sheet.setFrozenRows(1);
-      sheet.getRange(2, 1, Math.max(1, sheet.getMaxRows() - 1), 1)
+      const lookup = Object.create(null);
+      headers.forEach(function (header, index) {
+        lookup[normalizeHeader_(header)] = index + 1;
+      });
+      writeInstallerServiceIdentityMetadata_(sheet, supplyBySheetName[sheetName], {
+        headerRow: 2,
+        lookup: lookup
+      }, automationConfig.locale || 'en');
+      sheet.setFrozenRows(2);
+      sheet.getRange(3, 1, Math.max(1, sheet.getMaxRows() - 2), 1)
         .setNumberFormat('yyyy-mm-dd');
-      sheet.getRange(2, 7, Math.max(1, sheet.getMaxRows() - 1), 4)
+      sheet.getRange(3, 11, Math.max(1, sheet.getMaxRows() - 2), 4)
         .setNumberFormat('#,##0.00');
       sheet.autoResizeColumns(1, headers.length);
     } else {
-      validateInstallerSheetHeaders_(sheet, automationConfig.locale || 'en');
+      ensureInstallerServiceIdentityFields_(sheet, supplyBySheetName[sheetName],
+        automationConfig.locale || 'en');
     }
   });
   initializeElectricityDashboard_(spreadsheet, automationConfig);
 
+}
+
+function ensureInstallerServiceIdentityFields_(sheet, supply, locale) {
+  const localization = getInstallerLocalization_(locale);
+  let layout = getSheetLayout_(sheet, localization.headerAliases);
+  validateInstallerSheetHeaders_(sheet, locale);
+  validateInstallerServiceIdentityControlPlacement_(layout, localization);
+  const migration = beginInstallerServiceIdentityMigration_(sheet, supply,
+    layout);
+  const beforeCharts = migration.chartState;
+  if (layout.headerRow === 1 ||
+    !hasInstallerServiceIdentityMetadataRow_(sheet, layout)) {
+    const rowAlreadyInserted = (migration.stages.controlRow === 'planned' ||
+      migration.stages.controlRow === 'completed') &&
+      isInstallerPristineControlRow_(sheet, layout, migration.headerRow);
+    if (rowAlreadyInserted) {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { controlRow: 'completed' }
+      });
+    } else if (migration.stages.controlRow) {
+      throw new Error('Service-identity migration checkpointed control row is no longer pristine.');
+    } else {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        headerRow: layout.headerRow,
+        stages: { controlRow: 'planned' }
+      });
+      sheet.insertRowsBefore(layout.headerRow, 1);
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { controlRow: 'completed' }
+      });
+    }
+    layout = getSheetLayout_(sheet, localization.headerAliases);
+  }
+
+  const holderHeader = localization.installerSheetHeaders[
+    localization.installerSheetHeaders.indexOf('Account holder') >= 0 ?
+      localization.installerSheetHeaders.indexOf('Account holder') :
+      localization.installerSheetHeaders.indexOf('Intestatario')
+  ];
+  const addressHeader = localization.installerSheetHeaders[
+    localization.installerSheetHeaders.indexOf('Service address') >= 0 ?
+      localization.installerSheetHeaders.indexOf('Service address') :
+      localization.installerSheetHeaders.indexOf('Indirizzo di fornitura')
+  ];
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  const missingHeaders = [];
+  if (!holderColumn) {
+    missingHeaders.push(holderHeader);
+  }
+  if (!addressColumn) {
+    missingHeaders.push(addressHeader);
+  }
+  if (missingHeaders.length > 0) {
+    const insertionColumn = getInstallerServiceIdentityInsertionColumn_(layout,
+      localization);
+    if (!insertionColumn) {
+      throw new Error('Cannot locate the contract or customer header in sheet ' +
+        sheet.getName() + '.');
+    }
+    if (insertionColumn <= 3) {
+      throw new Error('Service-identity columns cannot overlap the reserved ' +
+        'migration control columns in sheet ' + sheet.getName() + '.');
+    }
+    const columnsAlreadyInserted =
+      (migration.stages.identityColumns === 'planned' ||
+        migration.stages.identityColumns === 'completed') &&
+      isInstallerPristineIdentityColumns_(sheet, layout, migration);
+    if (columnsAlreadyInserted) {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { identityColumns: 'completed' }
+      });
+    } else if (migration.stages.identityColumns) {
+      throw new Error('Service-identity migration checkpointed columns are no longer pristine.');
+    } else {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        insertionColumn: insertionColumn,
+        missingHeaders: missingHeaders,
+        stages: { identityColumns: 'planned' }
+      });
+      sheet.insertColumnsBefore(insertionColumn, missingHeaders.length);
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { identityColumns: 'completed' }
+      });
+    }
+    const headersAlreadyWritten =
+      (migration.stages.identityHeaders === 'planned' ||
+        migration.stages.identityHeaders === 'completed') &&
+      hasInstallerIdentityHeaders_(sheet, layout, migration);
+    if (headersAlreadyWritten) {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { identityHeaders: 'completed' }
+      });
+    } else {
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { identityHeaders: 'planned' }
+      });
+      sheet.getRange(layout.headerRow,
+        migration.insertionColumn || insertionColumn, 1,
+        missingHeaders.length).setValues([missingHeaders]);
+      checkpointInstallerServiceIdentityMigration_(migration, {
+        stages: { identityHeaders: 'completed' }
+      });
+    }
+    layout = getSheetLayout_(sheet, localization.headerAliases);
+  }
+
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { metadata: 'planned' }
+  });
+  writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale);
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { metadata: 'completed' }
+  });
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { frozenRows: 'planned' }
+  });
+  sheet.setFrozenRows(Math.max(2, layout.headerRow));
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { frozenRows: 'completed' }
+  });
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { charts: 'planned' }
+  });
+  restoreInstallerSheetChartState_(beforeCharts, sheet);
+  assertInstallerSheetChartStatePreserved_(beforeCharts, sheet);
+  checkpointInstallerServiceIdentityMigration_(migration, {
+    stages: { charts: 'completed' }
+  });
+  clearInstallerServiceIdentityMigration_(migration);
+  return layout;
+}
+
+function validateInstallerServiceIdentityControlPlacement_(layout, localization) {
+  const normalizeHeader = typeof normalizeHeader_ === 'function' ?
+    normalizeHeader_ : function (value) { return String(value || '').trim().toLowerCase(); };
+  const reservedIdentityAliases = localization.headerAliases.accountHolder
+    .concat(localization.headerAliases.serviceAddress)
+    .map(normalizeHeader);
+  (layout.headers || []).forEach(function (header, index) {
+    if (reservedIdentityAliases.indexOf(normalizeHeader(header)) >= 0 &&
+      index + 1 <= 3) {
+      throw new Error('Service-identity columns cannot overlap the reserved ' +
+        'migration control columns.');
+    }
+  });
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  if ((holderColumn && holderColumn <= 3) || (addressColumn && addressColumn <= 3)) {
+    throw new Error('Service-identity columns cannot overlap the reserved ' +
+      'migration control columns.');
+  }
+  if (holderColumn && addressColumn) {
+    return;
+  }
+  const insertionColumn = getInstallerServiceIdentityInsertionColumn_(layout,
+    localization);
+  if (!insertionColumn || insertionColumn <= 3) {
+    throw new Error('Service-identity columns cannot overlap the reserved ' +
+      'migration control columns.');
+  }
+}
+
+function getInstallerServiceIdentityInsertionColumn_(layout, localization) {
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  const customerColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.customerCode);
+  const contractColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.contractNumber);
+  if (!holderColumn && addressColumn) {
+    return addressColumn;
+  }
+  if (!addressColumn && holderColumn) {
+    return holderColumn + 1;
+  }
+  return customerColumn || contractColumn + 1;
+}
+
+function isInstallerPristineControlRow_(sheet, layout, expectedHeaderRow) {
+  if (!expectedHeaderRow || layout.headerRow !== expectedHeaderRow + 1) {
+    return false;
+  }
+  const values = sheet.getRange(layout.headerRow - 1, 1, 1,
+    Math.max(1, layout.headers.length)).getDisplayValues();
+  return values[0].every(function (value) {
+    return String(value || '').trim() === '';
+  });
+}
+
+function isInstallerPristineIdentityColumns_(sheet, layout, migration) {
+  if (!migration.insertionColumn || !Array.isArray(migration.missingHeaders) ||
+    migration.missingHeaders.length === 0) {
+    return false;
+  }
+  const values = sheet.getRange(layout.headerRow, migration.insertionColumn, 1,
+    migration.missingHeaders.length).getDisplayValues();
+  return values[0].every(function (value) {
+    return String(value || '').trim() === '';
+  });
+}
+
+function hasInstallerIdentityHeaders_(sheet, layout, migration) {
+  if (!migration.insertionColumn || !Array.isArray(migration.missingHeaders) ||
+    migration.missingHeaders.length === 0) {
+    return false;
+  }
+  const values = sheet.getRange(layout.headerRow, migration.insertionColumn, 1,
+    migration.missingHeaders.length).getDisplayValues()[0];
+  return migration.missingHeaders.every(function (header, index) {
+    return String(values[index] || '').trim() === String(header).trim();
+  });
+}
+
+function beginInstallerServiceIdentityMigration_(sheet, supply, layout) {
+  if (typeof PropertiesService === 'undefined' || typeof CONFIG === 'undefined' ||
+    !CONFIG.PROPERTY_KEYS.SERVICE_IDENTITY_MIGRATION_PREFIX ||
+    typeof sheet.getSheetId !== 'function') {
+    return { disabled: true, chartState: captureInstallerSheetChartState_(sheet),
+      stages: {} };
+  }
+  const properties = PropertiesService.getScriptProperties();
+  const key = CONFIG.PROPERTY_KEYS.SERVICE_IDENTITY_MIGRATION_PREFIX +
+    sheet.getSheetId();
+  const raw = properties.getProperty(key);
+  let journal = raw ? JSON.parse(raw) : null;
+  if (journal && (journal.sheetId !== sheet.getSheetId() ||
+    journal.sheetName !== sheet.getName() || journal.supply !== supply)) {
+    throw new Error('Service-identity migration checkpoint does not match sheet ' +
+      sheet.getName() + '.');
+  }
+  if (!journal) {
+    journal = {
+      sheetId: sheet.getSheetId(),
+      sheetName: sheet.getName(),
+      supply: supply,
+      chartState: captureInstallerSheetChartState_(sheet),
+      stages: {}
+    };
+    properties.setProperty(key, JSON.stringify(journal));
+  }
+  journal.properties = properties;
+  journal.key = key;
+  journal.stages = journal.stages || {};
+  return journal;
+}
+
+function checkpointInstallerServiceIdentityMigration_(migration, changes) {
+  if (!migration || migration.disabled) {
+    return;
+  }
+  if (changes.stages) {
+    Object.keys(changes.stages).forEach(function (stage) {
+      migration.stages[stage] = changes.stages[stage];
+    });
+  }
+  Object.keys(changes).forEach(function (key) {
+    if (key !== 'stages') {
+      migration[key] = changes[key];
+    }
+  });
+  migration.properties.setProperty(migration.key, JSON.stringify({
+    sheetId: migration.sheetId,
+    sheetName: migration.sheetName,
+    supply: migration.supply,
+    headerRow: migration.headerRow,
+    insertionColumn: migration.insertionColumn,
+    missingHeaders: migration.missingHeaders,
+    chartState: migration.chartState,
+    stages: migration.stages
+  }));
+}
+
+function clearInstallerServiceIdentityMigration_(migration) {
+  if (migration && !migration.disabled) {
+    migration.properties.deleteProperty(migration.key);
+  }
+}
+
+function hasInstallerServiceIdentityMetadataRow_(sheet, layout) {
+  if (!sheet || !layout || layout.headerRow <= 1) {
+    return false;
+  }
+  return String(
+    sheet.getRange(layout.headerRow - 1, 1).getDisplayValue() || ''
+  ).trim() === 'Controllo fornitura';
+}
+
+function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
+  const headerRow = layout.headerRow;
+  const metadataRow = headerRow > 1 ? headerRow - 1 : 1;
+  const localization = getInstallerLocalization_(locale || 'en');
+  validateInstallerServiceIdentityControlPlacement_(layout, localization);
+  const isItalian = localization.spreadsheetLocale === 'it_IT';
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.accountHolder);
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    localization.headerAliases.serviceAddress);
+  if (!holderColumn || !addressColumn) {
+    throw new Error('Cannot locate service-identity headers in sheet ' +
+      sheet.getName() + '.');
+  }
+  const currentSupply = String(sheet.getRange(metadataRow, 2).getDisplayValue() || '').trim();
+  const holderControl = sheet.getRange(metadataRow, holderColumn);
+  const addressControl = sheet.getRange(metadataRow, addressColumn);
+  const currentHolder = headerRow > 1 ?
+    String(holderControl.getDisplayValue() || '').trim() : '';
+  const currentAddress = headerRow > 1 ?
+    String(addressControl.getDisplayValue() || '').trim() : '';
+  sheet.getRange(metadataRow, 1).setValue('Controllo fornitura');
+  sheet.getRange(metadataRow, 2).setValue(currentSupply || supply);
+  sheet.getRange(metadataRow, 3).setValue(
+    isItalian ? 'Intestatario / indirizzo: modifica i campi di controllo' :
+      'Account holder / address: edit the control fields'
+  );
+  writeInstallerServiceIdentityControlValue_(holderControl, currentHolder);
+  writeInstallerServiceIdentityControlValue_(addressControl, currentAddress);
+  sheet.getRange(metadataRow, 1, 1, 3).setFontWeight('bold');
+}
+
+function writeInstallerServiceIdentityControlValue_(control, value) {
+  if (typeof control.getFormula === 'function' && control.getFormula()) {
+    return;
+  }
+  control.setValue(value);
+}
+
+function hasInstallerServiceIdentityControls_(sheet) {
+  const layout = getSheetLayout_(sheet);
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  if (layout.headerRow <= 1 || !holderColumn || !addressColumn) {
+    return false;
+  }
+  return Boolean(
+    String(sheet.getRange(layout.headerRow - 1, holderColumn).getDisplayValue() || '').trim() &&
+    String(sheet.getRange(layout.headerRow - 1, addressColumn).getDisplayValue() || '').trim()
+  );
+}
+
+function captureInstallerSheetChartState_(sheet) {
+  if (!sheet || typeof sheet.getCharts !== 'function') {
+    return [];
+  }
+  return sheet.getCharts().map(function (chart) {
+    const options = typeof chart.getOptions === 'function' ? chart.getOptions() : null;
+    const container = typeof chart.getContainerInfo === 'function' ?
+      chart.getContainerInfo() : null;
+    const builder = typeof chart.modify === 'function' ? chart.modify() : null;
+    const builderState = {};
+    ['ChartType', 'HiddenDimensionStrategy', 'MergeStrategy', 'NumHeaders',
+      'TransposeRowsAndColumns'].forEach(function (property) {
+      const getter = 'get' + property;
+      if (builder && typeof builder[getter] === 'function') {
+        builderState[property.charAt(0).toLowerCase() + property.slice(1)] =
+          builder[getter]();
+      } else if (typeof chart[getter] === 'function') {
+        builderState[property.charAt(0).toLowerCase() + property.slice(1)] =
+          chart[getter]();
+      }
+    });
+    return {
+      title: options ? String(options.get('title') || '') : '',
+      width: options ? Number(options.get('width')) || 0 : 0,
+      height: options ? Number(options.get('height')) || 0 : 0,
+      row: container ? container.getAnchorRow() : 0,
+      column: container ? container.getAnchorColumn() : 0,
+      offsetX: container ? container.getOffsetX() : 0,
+      offsetY: container ? container.getOffsetY() : 0,
+      // Ranges are deliberately descriptive only. Inserting the control row
+      // or identity columns makes Sheets adjust local chart ranges itself; a
+      // later rebuild from this pre-mutation A1 notation would undo that
+      // adjustment and can also move an external-sheet range onto this sheet.
+      sourceRanges: typeof chart.getRanges === 'function' ? chart.getRanges().map(
+        captureInstallerChartRangeDescriptor_) : [],
+      options: captureInstallerChartOptions_(options),
+      builderState: builderState
+    };
+  });
+}
+
+function captureInstallerChartRangeDescriptor_(range) {
+  const rangeSheet = range && typeof range.getSheet === 'function' ?
+    range.getSheet() : null;
+  return {
+    a1Notation: range && typeof range.getA1Notation === 'function' ?
+      range.getA1Notation() : '',
+    sheetId: rangeSheet && typeof rangeSheet.getSheetId === 'function' ?
+      rangeSheet.getSheetId() : null,
+    sheetName: rangeSheet && typeof rangeSheet.getName === 'function' ?
+      rangeSheet.getName() : ''
+  };
+}
+
+function captureInstallerChartOptions_(options) {
+  // This is intentionally scoped to source-sheet migration. The dashboard
+  // snapshot has a different managed-range lifecycle and its tests load that
+  // source independently from Installer.gs.
+  const preserved = {};
+  if (!options) {
+    return preserved;
+  }
+  ['annotations', 'areaOpacity', 'backgroundColor', 'bar', 'chartArea',
+    'colors', 'curveType', 'dataOpacity', 'enableInteractivity', 'explorer',
+    'fontName', 'fontSize', 'hAxis', 'height', 'is3D', 'isStacked', 'legend',
+    'lineWidth', 'orientation', 'pieHole', 'pieSliceText', 'pointShape',
+    'pointSize', 'reverseCategories', 'series', 'theme', 'tooltip',
+    'trendlines', 'vAxes', 'vAxis', 'width', 'subtitle', 'subtitleTextStyle',
+    'titleTextStyle', 'animation', 'axisTitlesPosition', 'crosshair',
+    'focusTarget', 'histogram', 'interpolateNulls', 'intervals',
+    'selectionMode', 'slices', 'targetAxisIndex', 'viewWindowMode'].forEach(
+    function (key) {
+      const value = options.get(key);
+      if (value !== null && value !== undefined) {
+        preserved[key] = value;
+      }
+    });
+  return preserved;
+}
+
+function restoreInstallerSheetChartState_(before, sheet) {
+  if (!before || typeof sheet.getCharts !== 'function' ||
+    typeof sheet.updateChart !== 'function') {
+    return;
+  }
+  const after = sheet.getCharts();
+  before.forEach(function (state, index) {
+    const chart = after[index];
+    if (!chart || typeof chart.modify !== 'function') {
+      return;
+    }
+    const builder = chart.modify();
+    // Do not clear or re-add chart ranges. Apps Script has already preserved
+    // their source-sheet binding and adjusted local coordinates for the row
+    // and column insertions performed by this migration.
+    if (typeof builder.setPosition === 'function') {
+      builder.setPosition(state.row, state.column, state.offsetX, state.offsetY);
+    }
+    Object.keys(state.options).forEach(function (key) {
+      builder.setOption(key, state.options[key]);
+    });
+    builder.setOption('title', state.title);
+    builder.setOption('width', state.width);
+    builder.setOption('height', state.height);
+    const setters = {
+      chartType: 'setChartType',
+      hiddenDimensionStrategy: 'setHiddenDimensionStrategy',
+      mergeStrategy: 'setMergeStrategy',
+      numHeaders: 'setNumHeaders',
+      transposeRowsAndColumns: 'setTransposeRowsAndColumns'
+    };
+    Object.keys(setters).forEach(function (property) {
+      if (state.builderState[property] !== undefined &&
+        typeof builder[setters[property]] === 'function') {
+        builder[setters[property]](state.builderState[property]);
+      }
+    });
+    sheet.updateChart(builder.build());
+  });
+}
+
+function assertInstallerSheetChartStatePreserved_(before, sheet) {
+  if (!before || typeof sheet.getCharts !== 'function') {
+    return;
+  }
+  const after = captureInstallerSheetChartState_(sheet);
+  if (before.length !== after.length || before.some(function (chart, index) {
+    const afterChart = after[index];
+    if (!afterChart || !installerChartRangeBindingsMatch_(chart.sourceRanges,
+      afterChart.sourceRanges)) {
+      return true;
+    }
+    const expectedPresentation = Object.assign({}, chart);
+    const actualPresentation = Object.assign({}, afterChart);
+    delete expectedPresentation.sourceRanges;
+    delete actualPresentation.sourceRanges;
+    return JSON.stringify(expectedPresentation) !== JSON.stringify(actualPresentation);
+  })) {
+    throw new Error('Supply-sheet chart presentation changed during service-identity migration.');
+  }
+}
+
+function installerChartRangeBindingsMatch_(beforeRanges, afterRanges) {
+  if (beforeRanges.length !== afterRanges.length) {
+    return false;
+  }
+  return beforeRanges.every(function (beforeRange, index) {
+    const afterRange = afterRanges[index];
+    if (!afterRange) {
+      return false;
+    }
+    // Older interrupted journals stored bare A1 strings. They do not carry
+    // enough information to validate identity, but must remain resumable.
+    if (typeof beforeRange === 'string') {
+      return true;
+    }
+    return beforeRange.sheetId === afterRange.sheetId &&
+      beforeRange.sheetName === afterRange.sheetName;
+  });
 }
 
 function getInstallerSheetHeaders_(locale, isElectricity) {

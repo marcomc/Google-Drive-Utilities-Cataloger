@@ -336,6 +336,32 @@ function testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists() {
     JSON.stringify(localization.headerAliases));
 }
 
+function testLegacyFormulaDashboardIsDetectedWithoutMutation() {
+  const context = loadDashboard();
+  const source = { getName: () => 'Luce' };
+  const dashboard = {
+    getDeveloperMetadata: () => [],
+    getMaxRows: () => 110,
+    getMaxColumns: () => 63,
+    getCharts: () => [{}, {}, {}],
+    getRange: () => ({
+      getFormulas: () => [
+        ['=SUMIFS(Luce!$M$3:$M$1002;Luce!$H$3:$H$1002;2026)'],
+        ['=COUNTIFS(Luce!$H$3:$H$1002;2026)'],
+        ['=SUMIF(Luce!$H$3:$H$1002;2026;Luce!$P$3:$P$1002)']
+      ]
+    })
+  };
+  assert.equal(context.isLegacyFormulaElectricityDashboard_(dashboard, source), true);
+  assert.equal(context.isLegacyFormulaElectricityDashboard_({
+    getDeveloperMetadata: () => [],
+    getMaxRows: () => 110,
+    getMaxColumns: () => 63,
+    getCharts: () => [{}, {}, {}],
+    getRange: () => ({ getFormulas: () => [['=SUM(A1:A2)']] })
+  }, source), false);
+}
+
 function testDashboardValidationPreventsPartialArtifacts() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
@@ -2142,6 +2168,7 @@ testLocalizedDashboardContracts();
 testElectricityInstallerHeadersStaySupplySpecific();
 testDashboardSkipsSheetsWithoutAllRequiredHeaders();
 testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists();
+testLegacyFormulaDashboardIsDetectedWithoutMutation();
 testDashboardValidationPreventsPartialArtifacts();
 testDashboardCreationAttemptsBothCleanupsAfterFailure();
 testTechnicalSheetCannotAliasAnyConfiguredSource();

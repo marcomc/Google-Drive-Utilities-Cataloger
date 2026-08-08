@@ -9,10 +9,10 @@ MARKDOWN_FILES := $(sort $(wildcard *.md docs/*.md))
 SHELL_FILES := $(sort $(wildcard scripts/*.sh scripts/*/*.sh tests/*.sh))
 
 .DEFAULT_GOAL := help
-.NOTPARALLEL: install install-resume install-debug install-resume-debug
+.NOTPARALLEL: install install-resume renew-clasp-auth install-debug install-resume-debug
 .NOTPARALLEL: install-reconfigure-time-zone install-reset
 
-.PHONY: help install install-resume install-check install-debug
+.PHONY: help install install-resume renew-clasp-auth install-check install-debug
 .PHONY: install-resume-debug install-reconfigure-time-zone install-reset
 .PHONY: test lint lint-shell lint-md
 .PHONY: lint-json check
@@ -27,6 +27,9 @@ install: ## Start or continue the interactive installer
 
 install-resume: ## Resume after the one-time browser handoff
 	@$(INSTALLER) --resume
+
+renew-clasp-auth: ## Renew isolated clasp authorization using the saved OAuth client
+	@$(INSTALLER) --reauthorize
 
 install-check: ## Check local tools and Google account access
 	@$(INSTALLER) --check

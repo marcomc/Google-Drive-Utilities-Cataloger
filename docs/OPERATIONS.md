@@ -7,6 +7,7 @@ This guide covers one deployed cataloger instance. Use the separate
 
 - [Architecture](#architecture)
 - [Installation and first validation](#installation-and-first-validation)
+- [Supply identity controls](#supply-identity-controls)
 - [Reconfigure time zone](#reconfigure-time-zone)
 - [Event transport identity](#event-transport-identity)
 - [Release validation evidence](#release-validation-evidence)
@@ -49,6 +50,36 @@ flowchart LR
   gemini --> result["Archive, Sheet, and email"]
 ```
 
+## Supply identity controls
+
+Invoice ownership is checked after extraction and before any Drive or Sheet
+mutation:
+
+```mermaid
+flowchart LR
+  invoice["Invoice"] --> extract["Extract holder and service address"]
+  extract --> compare["Compare with target supply controls"]
+  compare -- "match" --> import["Import and archive"]
+  compare -- "missing or mismatch" --> review["NEEDS REVIEW; leave unchanged"]
+```
+
+The comparison is independent of supplier, contract number, and customer code,
+so changing provider does not require carrying identifiers between suppliers.
+It normalizes case, punctuation, whitespace, line breaks, and common Italian
+street abbreviations, then requires the account-holder name plus street, civic
+number, and city. CAP and field order are not required. The raw printed holder
+and address are stored on each imported row for auditability.
+
+For existing installations, run `migrateCatalogerServiceIdentityFields` once
+from the Apps Script editor after deployment. Fill the control values in each
+supply tab's metadata row. A blank control is intentionally fail-closed and
+causes `NEEDS REVIEW` until it is completed.
+
+The migration preserves charts already attached to source supply tabs. For
+electricity, the existing managed dashboard refresh runs after all source tabs
+are migrated; its header-alias lookup continues to find date, consumption, and
+cost fields after the two identity columns are inserted.
+
 ## Installation and first validation
 
 For a new instance:
@@ -81,9 +112,12 @@ but the cataloger still processes only direct-root PDFs.
 Set `time_zone` in `config.local.json`, then run:
 
 ```bash
-GDUC_OAUTH_CLIENT_JSON="/secure/path/oauth-client.json" \
-  make install-reconfigure-time-zone
+make install-reconfigure-time-zone
 ```
+
+The command discovers the saved Desktop OAuth client under
+`$HOME/.config/gduc/` automatically. Set `GDUC_OAUTH_CLIENT_JSON` only when
+using a different client path.
 
 This narrow operation updates the Apps Script and spreadsheet time zone plus
 the persisted installer and runtime configuration. It preserves Gemini

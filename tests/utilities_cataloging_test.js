@@ -74,7 +74,13 @@ function validInvoice() {
     supplier: 'SUPPLIER',
     supply_type: 'Water',
     address_type: 'import',
+    account_holder: 'Avery North',
     issue_date: '2026-07-16',
+    address_evidence: 'Avery North, Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
+    service_civic_number: '125',
+    service_city: 'Rivermouth',
+    service_postal_code: '99991',
     identifier: 'INV-1',
     contract_number: 'CONTRACT-1',
     customer_code: 'CUSTOMER-1',
@@ -90,6 +96,216 @@ function validInvoice() {
     problems: [],
     sheet_values: []
   };
+}
+
+function testServiceIdentityMatchesNormalizedHolderAndAddress() {
+  const context = loadCataloger();
+  const extracted = {
+    account_holder: 'NORTH, Avery',
+    address_evidence: 'Corso Cedar Meridian Boulevard, 125 - 99991 RIVERMOUTH',
+    service_street: 'C.so Cedar Meridian Boulevard',
+    service_civic_number: '125',
+    service_city: 'RIVERMOUTH',
+    service_postal_code: '99991'
+  };
+  const expected = {
+    account_holder: 'Avery North',
+    service_address: 'Corso Cedar Meridian Boulevard 125, 99991 Rivermouth'
+  };
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.validateServiceIdentity_(extracted, expected))),
+    { valid: true }
+  );
+}
+
+function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
+  const context = loadCataloger();
+  const expectedAddresses = [
+    'Rivermouth 125 Corso Cedar Meridian Boulevard 99991',
+    '99991 125 Rivermouth Corso Cedar Meridian Boulevard',
+    'Corso Cedar Meridian Boulevard Rivermouth 125'
+  ];
+  const evidenceAddresses = [
+    'Account details: Rivermouth, 99991; 125 Corso Cedar Meridian Boulevard.',
+    '125 - Corso Cedar Meridian Boulevard - notes - Rivermouth 99991',
+    'Other text 99991 Rivermouth Corso Cedar Meridian Boulevard 125'
+  ];
+
+  expectedAddresses.forEach((serviceAddress, index) => {
+    const result = context.validateServiceIdentity_({
+      account_holder: 'Avery North',
+      address_evidence: evidenceAddresses[index],
+      service_street: 'C.so Cedar Meridian Boulevard',
+      service_civic_number: '125',
+      service_city: 'Rivermouth',
+      service_postal_code: '99991'
+    }, {
+      account_holder: 'Avery North',
+      service_address: serviceAddress
+    });
+
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+  });
+}
+
+function testServiceIdentityRejectsExtractedStreetPrefix() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian',
+    service_civic_number: '125',
+    service_city: 'Rivermouth',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Avery North',
+    service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsExtractedComponentSuffix() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10, Rivermouth Center',
+    service_street: 'Birch Loop',
+    service_civic_number: '10',
+    service_city: 'Rivermouth Center',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10, Rivermouth'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsWrongAddressAndMissingBaseline() {
+  const context = loadCataloger();
+  const extracted = {
+    account_holder: 'Avery North',
+    address_evidence: 'Alder Workshop Way 126, Rivermouth',
+    service_street: 'Alder Workshop Way',
+    service_civic_number: '126',
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
+  };
+
+  assert.equal(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+    }).valid,
+    false
+  );
+  assert.match(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+    }).problem,
+    /does not match/
+  );
+  assert.match(
+    context.validateServiceIdentity_(extracted, {
+      account_holder: '',
+      service_address: ''
+    }).problem,
+    /no configured account holder/
+  );
+}
+
+function testServiceIdentityRejectsCityMatchedByStreetTokens() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10, Birch Loop',
+    service_street: 'Birch Loop',
+    service_civic_number: '10',
+    service_city: 'Birch Loop',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10, Stonehaven'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Birch Loop 10',
+    service_street: 'Birch Loop',
+    service_civic_number: '10',
+    service_city: 'Birch Loop',
+    service_postal_code: ''
+  }, {
+    account_holder: 'Avery North',
+    service_address: 'Birch Loop 10 Birch Loop'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsUncorroboratedAddressEvidence() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Alder Workshop Way 126, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
+    service_civic_number: '125',
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
+  }, {
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /does not match/);
+}
+
+function testServiceIdentityRejectsCivicNumberAmbiguity() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125/A, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
+    service_civic_number: '125/A',
+    service_city: 'Rivermouth',
+    service_postal_code: ''
+  }, {
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+  });
+
+  assert.equal(result.valid, false);
+}
+
+function testServiceIdentityRejectsMissingAddressComponents() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Avery North',
+    address_evidence: 'Cedar Meridian Boulevard 125, Rivermouth',
+    service_street: 'Cedar Meridian Boulevard',
+    service_civic_number: '',
+    service_city: 'Rivermouth',
+    service_postal_code: ''
+  }, {
+      account_holder: 'Avery North',
+      service_address: 'Cedar Meridian Boulevard 125, Rivermouth'
+  });
+
+  assert.equal(result.valid, false);
+  assert.match(result.problem, /missing or ambiguous/);
 }
 
 function installScriptPropertyStore(context, initialValues = {}) {
@@ -945,6 +1161,11 @@ function testDeveloperApiKeyUsesHeader() {
       'supply_type',
       'address_type',
       'address_evidence',
+      'account_holder',
+      'service_street',
+      'service_civic_number',
+      'service_city',
+      'service_postal_code',
       'issue_date',
       'identifier',
       'contract_number',
@@ -1262,6 +1483,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1307,7 +1529,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
     message: 'catalog-file-processing-error',
     component: 'drive-utilities-cataloger',
-    applicationVersion: '0.3.2',
+    applicationVersion: '0.4.0',
     event: 'catalog-file-processing-error',
     fileId: 'file-id',
     errorType: 'Error',
@@ -1443,6 +1665,7 @@ function testDestinationFolderCreationCheckpointsEachCreatedPath() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => validInvoice();
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1742,6 +1965,63 @@ function testSheetLayoutAcceptsPendingLocaleAliases() {
   assert.equal(layout.lookup.fornitore, 2);
 }
 
+function testSheetLayoutAcceptsInstallerControlRowShiftAtBoundary() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier']
+  })[key] || [];
+  const rows = Array.from({ length: 11 }, () => ['', '']);
+  rows[9] = ['Controllo fornitura', 'Water'];
+  rows[10] = ['Issue date', 'Supplier'];
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 11,
+    getName: () => 'Water',
+    getRange: (row, column, numberOfRows, numberOfColumns) => {
+      assert.equal(row, 1);
+      assert.equal(column, 1);
+      assert.equal(numberOfRows, 11);
+      assert.equal(numberOfColumns, 2);
+      return { getDisplayValues: () => rows };
+    }
+  };
+
+  const layout = context.getSheetLayout_(sheet);
+
+  assert.equal(layout.headerRow, 11);
+  assert.equal(layout.lookup['issue date'], 1);
+  assert.equal(layout.lookup.supplier, 2);
+}
+
+function testSheetLayoutAcceptsHeaderAtRowTen() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'],
+    supplier: ['Supplier']
+  })[key] || [];
+  const rows = Array.from({ length: 10 }, () => ['', '']);
+  rows[9] = ['Issue date', 'Supplier'];
+  const sheet = {
+    getLastColumn: () => 2,
+    getLastRow: () => 10,
+    getName: () => 'Water',
+    getRange: (row, column, numberOfRows, numberOfColumns) => {
+      assert.equal(row, 1);
+      assert.equal(column, 1);
+      assert.equal(numberOfRows, 10);
+      assert.equal(numberOfColumns, 2);
+      return { getDisplayValues: () => rows };
+    }
+  };
+
+  const layout = context.getSheetLayout_(sheet);
+
+  assert.equal(layout.headerRow, 10);
+  assert.equal(layout.lookup['issue date'], 1);
+  assert.equal(layout.lookup.supplier, 2);
+}
+
 function testMutationRecoveryStages() {
   function scenario(journal, markedRows) {
     const deletedRows = [];
@@ -1915,6 +2195,7 @@ function testMutationJournalCapturesValidatedReportingContextBeforeMutations() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -1977,6 +2258,7 @@ function testMutationJournalPersistsFailureStageAtProcessingCheckpoints() {
   context.sha256ForFile_ = () => 'hash';
   context.extractUtilityData_ = () => extraction;
   context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.validateTargetSheetValues_ = () => ({ valid: true });
   context.findDuplicate_ = () => ({ status: 'none' });
   context.buildAssignedName_ = () => 'assigned.pdf';
@@ -2641,6 +2923,65 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
   ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
   assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 4),
     false);
+}
+
+function testVerifyImportedRowKeepsExtractedIdentityAgainstSheetValues() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = (key) => ({
+    identifier: ['Identifier'],
+    contractNumber: ['Contract number'],
+    accountHolder: ['Account holder'],
+    serviceAddress: ['Service address'],
+    customerCode: ['Customer code'],
+    month: ['Reference month'],
+    sourceFile: ['Source file']
+  })[key] || [];
+  const layout = {
+    headerRow: 1,
+    headers: ['Identifier', 'Contract number', 'Account holder',
+      'Service address', 'Customer code', 'Reference month', 'Source file'],
+    lookup: {
+      identifier: 1,
+      'contract number': 2,
+      'account holder': 3,
+      'service address': 4,
+      'customer code': 5,
+      'reference month': 6,
+      'source file': 7
+    }
+  };
+  const extracted = {
+    ...validInvoice(),
+    sheet_values: [
+      { header: 'Identifier', value: 'Wrong identifier' },
+      { header: 'Contract number', value: 'Wrong contract number' },
+      { header: 'Account holder', value: 'Wrong account holder' },
+      { header: 'Service address', value: 'Wrong service address' },
+      { header: 'Customer code', value: 'Wrong customer code' },
+      { header: 'Reference month', value: '01' }
+    ]
+  };
+  const actualValues = [extracted.identifier, extracted.contract_number,
+    extracted.account_holder, extracted.address_evidence, extracted.customer_code,
+    extracted.reference_month, 'invoice'];
+  const sheet = {
+    getLastRow: () => 2,
+    getRange: (_row, column, _rows, width) => {
+      if (width === 7) {
+        return { getFormulas: () => [['', '', '', '', '', '', '']] };
+      }
+      return {
+        getValue: () => actualValues[column - 1],
+        getRichTextValue: () => null,
+        getFormula: () => column === 7 ?
+          '=HYPERLINK("https://drive.test/file-id";"invoice")' : '',
+        getDisplayValue: () => column === 7 ? 'invoice' : actualValues[column - 1]
+      };
+    }
+  };
+
+  assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout,
+    { getUrl: () => 'https://drive.test/file-id' }, extracted));
 }
 
 function testMissingRowFormulaDoesNotUnprotectTemplateColumn() {
@@ -3942,6 +4283,16 @@ testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot();
 testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
+testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceIdentityAcceptsComponentAndEvidencePermutations();
+testServiceIdentityRejectsExtractedStreetPrefix();
+testServiceIdentityRejectsExtractedComponentSuffix();
+testServiceIdentityRejectsWrongAddressAndMissingBaseline();
+testServiceIdentityRejectsCityMatchedByStreetTokens();
+testServiceIdentityRejectsOverlappingRepeatedEvidenceComponents();
+testServiceIdentityRejectsUncorroboratedAddressEvidence();
+testServiceIdentityRejectsCivicNumberAmbiguity();
+testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testSupplierDefaultsNormalizeConfiguredIdentities();
@@ -3965,6 +4316,8 @@ testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
 testSheetLayoutAcceptsPendingLocaleAliases();
+testSheetLayoutAcceptsInstallerControlRowShiftAtBoundary();
+testSheetLayoutAcceptsHeaderAtRowTen();
 testMutationRecoveryStages();
 testMutationJournalCapturesValidatedReportingContextBeforeMutations();
 testMutationJournalPersistsFailureStageAtProcessingCheckpoints();
@@ -3979,6 +4332,7 @@ testFormulaAndStyleCopySources();
 testExistingFormulaCellsAreNotOverwrittenDuringReimport();
 testDetailedCostSheetValuesOverrideBroadReconciliationValues();
 testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields();
+testVerifyImportedRowKeepsExtractedIdentityAgainstSheetValues();
 testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
