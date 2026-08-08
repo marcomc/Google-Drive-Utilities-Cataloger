@@ -2984,7 +2984,7 @@ function isMissingFrequencyProblem_(problem) {
   if (!text || !isStandaloneInformationalProblem_(text)) {
     return false;
   }
-  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent|mismatch|does\s+not\s+match|non\s+corrisp|sbagliat|errat|wrong|period|periodo|billing\s+period)/i.test(text)) {
+  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrisp|sbagliat|errat|wrong|period|periodo|billing\s+period)/i.test(text)) {
     return false;
   }
   return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b[\s\S]*\b(?:non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata)|assente|mancante|not\s+(?:explicitly\s+)?(?:indicated|specified|present|printed|reported)|missing|absent)\b[\s\S]*[.!?]?$/i.test(text);
@@ -3013,7 +3013,7 @@ function isNonBlockingOptionalInvoiceProblem_(problem, extracted) {
   if (/default value|not established by printed evidence|spese\s+d['’]?incasso|collection\s+charges/i.test(text)) {
     return false;
   }
-  if (/(?:ambigu[oa]|ambiguous|unclear|illeggibil[ei]|unreadable|inconsistent|incoerent[ei]|conflict|invalid|sbagliat[oa]|wrong|mismatch)/i.test(text)) {
+  if (/(?:ambigu[oa]|ambiguous|unclear|incert[oaie]|illeggibil[ei]|unreadable|inconsistent|incoerent[ei]|conflict|invalid|sbagliat[oa]|wrong|mismatch)/i.test(text)) {
     return false;
   }
   if (!/(?:assente|mancante|non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata|applicabile)|non\s+applicabile|not\s+(?:[\w\s]+\s+)?(?:indicated|present|printed|reported|applicable)|not\s+applicable|omitted|unavailable)/i.test(text)) {

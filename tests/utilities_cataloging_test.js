@@ -892,6 +892,7 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), false);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -907,6 +908,7 @@ function testExtractionSchemaAndCalendarValidation() {
   });
   [
     'Unità di misura non leggibile.',
+    'Quantità consumi F1 incerta.',
     'Quantità consumi F1 assente o illeggibile.',
     'Charges are inconsistent.'
   ].forEach((problem) => {
