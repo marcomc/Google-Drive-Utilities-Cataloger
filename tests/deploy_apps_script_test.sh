@@ -176,6 +176,23 @@ if [[ "${authorization}" != "Authorization: Bearer ${TEST_ACCESS_TOKEN}" ]]; the
   exit 3
 fi
 expected_url="https://script.googleapis.com/v1/projects/test-script/deployments/${TEST_CONFIGURED_DEPLOYMENT_ID}"
+expected_content_url="https://script.googleapis.com/v1/projects/test-script/content?versionNumber=5"
+if [[ "${url}" == "${expected_content_url}" ]]; then
+  content_call_count=0
+  if [[ -f "${TEST_CONTENT_CALL_COUNT_FILE}" ]]; then
+    content_call_count="$(<"${TEST_CONTENT_CALL_COUNT_FILE}")"
+  fi
+  content_call_count=$((content_call_count + 1))
+  printf '%s\n' "${content_call_count}" >"${TEST_CONTENT_CALL_COUNT_FILE}"
+  content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nfunction processSingleIntakeFileByName() {}'
+  if [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-missing-entrypoint' ]]; then
+    content_source=$'function runDailyUtilitiesCataloging() {}'
+  fi
+  jq -n --arg source "${content_source}" \
+    '{files: [{name: "UtilitiesCataloging", source: $source}]}'
+  printf '\n200'
+  exit 0
+fi
 if [[ "${url}" != "${expected_url}" ]]; then
   exit 4
 fi
@@ -226,7 +243,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | content-missing-entrypoint | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
       "${call_count}" -le 2 ]]; then
       version_number=4
@@ -378,6 +395,7 @@ run_fixture() {
   printf '%s\n' '{"timeZone":"Etc/UTC"}' >"${fixture_dir}/appsscript.json"
   : >"${fixture_dir}/commands.log"
   : >"${fixture_dir}/api-call-count"
+  : >"${fixture_dir}/content-call-count"
   (
     cd "${fixture_dir}"
     PATH="${FAKE_BIN}:${PATH}" \
@@ -391,6 +409,7 @@ run_fixture() {
       TEST_DEPLOYMENT_SCENARIO="${scenario}" \
       TEST_ACCESS_TOKEN="test-access-token-do-not-log" \
       TEST_API_CALL_COUNT_FILE="${fixture_dir}/api-call-count" \
+      TEST_CONTENT_CALL_COUNT_FILE="${fixture_dir}/content-call-count" \
       TEST_COMMAND_LOG="${fixture_dir}/commands.log" \
       "${PROJECT_ROOT}/scripts/deploy-apps-script.sh"
   ) >"${fixture_dir}/output.log" 2>&1
@@ -454,6 +473,7 @@ run_fixture "${success_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
 success_time_zone="$(jq -r '.timeZone' "${success_dir}/appsscript.json")"
 success_commands="$(tr '\n' ' ' <"${success_dir}/commands.log")"
 test "${success_time_zone}" = "Europe/Rome"
+test "$(<"${success_dir}/content-call-count")" -eq 1
 test "${success_commands}" = \
   "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version clasp-deploy sleep-2 clasp-deployments api-get-2 "
 if grep -q 'token-do-not' "${success_dir}/output.log"; then
@@ -574,6 +594,18 @@ for scenario in missing wrong-script missing-entry-point wrong-access mixed-publ
     "deployment-1" "deployment-1" "${scenario}"
   assert_failure_before_push "${failure_dir}"
 done
+
+content_missing_dir="${TEST_ROOT}/content-missing-entrypoint"
+mkdir -p "${content_missing_dir}"
+require_fixture_failure \
+  'A version missing a required processing entrypoint was accepted.' \
+  "${content_missing_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "content-missing-entrypoint"
+content_missing_commands="$(tr '\n' ' ' <"${content_missing_dir}/commands.log")"
+test "${content_missing_commands}" = \
+  "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version "
+grep -q 'does not expose the required processing entrypoints' \
+  "${content_missing_dir}/output.log"
 
 for scenario_and_message in \
   "api-forbidden:authorization was denied" \

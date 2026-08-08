@@ -36,6 +36,10 @@
   version, authorization, transport, identity, and entry-point failures as
   terminal, and test exact post-update read and wait counts for retryable and
   terminal paths.
+- After uploading an Apps Script version, inspect that exact version's content
+  for every required top-level entrypoint before moving the owner-only API
+  deployment; a local source or syntax check cannot prove the deployed artifact
+  exposes the function.
 - Do not use Apps Script Execution API calls to create or remove installable
   triggers: that API cannot manage triggers, and existing installable triggers
   execute the project HEAD rather than the API executable's pinned version.

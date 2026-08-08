@@ -137,6 +137,102 @@ read_apps_script_deployment() {
   printf -v "${result_variable}" '%s' "${response_json}"
 }
 
+read_apps_script_version_content() {
+  local auth_file="$1"
+  local script_id="$2"
+  local version_number="$3"
+  local result_variable="$4"
+  local access_token
+  local response_json
+  local content_url
+  local http_response
+  local http_status
+  local curl_status
+
+  if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
+    ! "${version_number}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' 'Invalid Apps Script version identity.' >&2
+    return 1
+  fi
+
+  access_token="$(jq -er '
+    .tokens.default.access_token |
+    select(type == "string" and length > 0)
+  ' "${auth_file}" 2>/dev/null)" || {
+    printf '%s\n' \
+      'The clasp authorization does not contain a usable access token.' >&2
+    return 1
+  }
+
+  content_url="https://script.googleapis.com/v1/projects/${script_id}/content?versionNumber=${version_number}"
+  if http_response="$(
+    printf 'Authorization: Bearer %s\nAccept: application/json\n' \
+      "${access_token}" |
+      curl --silent --show-error --header @- \
+        --write-out $'\n%{http_code}' \
+        "${content_url}" 2>/dev/null
+  )"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+  unset access_token
+  if [[ "${curl_status}" -ne 0 ]]; then
+    case "${curl_status}" in
+      6) printf '%s\n' 'Could not resolve the Apps Script API host.' >&2 ;;
+      7) printf '%s\n' 'Could not connect to the Apps Script API.' >&2 ;;
+      28) printf '%s\n' 'The Apps Script API request timed out.' >&2 ;;
+      35|60) printf '%s\n' 'Apps Script API TLS validation failed.' >&2 ;;
+      *) printf 'Apps Script version content transport failed with curl status %s.\n' \
+        "${curl_status}" >&2 ;;
+    esac
+    return 1
+  fi
+  if [[ "${http_response}" != *$'\n'* ]]; then
+    printf '%s\n' 'The Apps Script API returned no HTTP status.' >&2
+    return 1
+  fi
+  http_status="${http_response##*$'\n'}"
+  response_json="${http_response%$'\n'*}"
+  case "${http_status}" in
+    200) ;;
+    403) printf '%s\n' 'Apps Script version inspection authorization was denied.' >&2; return 1 ;;
+    404) printf 'Apps Script version %s does not exist or is not accessible.\n' \
+      "${version_number}" >&2; return 1 ;;
+    429) printf '%s\n' 'Apps Script version inspection was rate limited.' >&2; return 1 ;;
+    5??) printf '%s\n' 'The Apps Script API is temporarily unavailable.' >&2; return 1 ;;
+    *) printf 'Apps Script version inspection failed with HTTP %s.\n' \
+      "${http_status}" >&2; return 1 ;;
+  esac
+
+  if ! jq -e 'type == "object" and (.files | type == "array")' \
+    <<<"${response_json}" >/dev/null; then
+    printf '%s\n' 'The Apps Script version content response was invalid.' >&2
+    return 1
+  fi
+  printf -v "${result_variable}" '%s' "${response_json}"
+}
+
+validate_apps_script_version_entrypoints() {
+  local content_json="$1"
+  shift
+  local entrypoint
+
+  for entrypoint in "$@"; do
+    if ! jq -e --arg entrypoint "${entrypoint}" '
+      [.files[]? |
+        select(.name == "UtilitiesCataloging") |
+        (.source // "")] |
+      any(.[]; test("(?m)^function[[:space:]]+" + $entrypoint +
+        "[[:space:]]*[(]"))
+    ' <<<"${content_json}" >/dev/null; then
+      printf 'Apps Script version is missing required entrypoint %s.\n' \
+        "${entrypoint}" >&2
+      return 1
+    fi
+  done
+}
+
 validate_owner_only_api_deployment() {
   local deployment_json="$1"
   local expected_script_id="$2"

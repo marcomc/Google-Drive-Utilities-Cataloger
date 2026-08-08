@@ -881,6 +881,31 @@ function testExtractionSchemaAndCalendarValidation() {
     ]
   };
   assert.equal(context.validateExtraction_(informationalVatInclusion).valid, true);
+  const missingFrequency = {
+    ...raw,
+    frequency: '',
+    problems: ['Frequenza di fatturazione non indicata esplicitamente nel documento.']
+  };
+  assert.equal(context.validateExtraction_(missingFrequency).valid, true);
+  assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
+  assert.equal(context.validateExtraction_({
+    ...missingFrequency,
+    problems: [
+      'Frequenza di fatturazione non indicata esplicitamente nel documento; periodo ambiguo.'
+    ]
+  }).valid, false);
+  [
+    'Unità di misura non leggibile.',
+    'Sconto non indicato.',
+    'Quantità consumi F1 assente o illeggibile.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
+  });
+  assert.equal(context.validateExtraction_({
+    ...raw,
+    total: 15,
+    problems: ['Quantità consumi F1 assente o illeggibile.']
+  }).valid, false);
   [
     'VAT was included twice.',
     'VAT was incorrectly included.',
@@ -963,6 +988,56 @@ function testExtractionSchemaAndCalendarValidation() {
     contract_object: ''
   };
   assert.equal(context.validateExtraction_(contract).valid, false);
+}
+
+function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getHeaderAliases_ = (key) => ({
+    supplier: ['Supplier'],
+    frequency: ['Frequency'],
+    issueDate: ['Issue date']
+  })[key] || [];
+  const sheet = {
+    getLastRow: () => 4,
+    getRange: () => ({
+      getValues: () => [
+        ['SUPPLIER', 'monthly', '2026-05-16'],
+        ['SUPPLIER', 'monthly', '2026-06-16'],
+        ['SUPPLIER', 'quarterly', '2026-08-16'],
+        ['OTHER', 'quarterly', '2026-06-20']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => sheet })
+  };
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Supplier', 'Frequency', 'Issue date'],
+    lookup: { supplier: 1, frequency: 2, 'issue date': 3 }
+  });
+  const extracted = {
+    ...validInvoice(),
+    issue_date: '2026-07-16',
+    period_start: '2026-06-01',
+    period_end: '2026-06-30',
+    frequency: ''
+  };
+  context.inferInvoiceFrequency_(extracted);
+  assert.equal(extracted.frequency, 'monthly');
+
+  const historyOnly = {
+    ...extracted,
+    period_start: '',
+    period_end: '',
+    frequency: ''
+  };
+  context.inferInvoiceFrequency_(historyOnly);
+  assert.equal(historyOnly.frequency, 'monthly');
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
@@ -1058,6 +1133,38 @@ function testSupplierDefaultsNormalizeConfiguredIdentities() {
   context.applySupplierFieldDefaults_(unreadableCharge, ["Spese d'incasso"]);
   assert.equal(unreadableCharge.sheet_values[0].value, null);
   assert.equal(context.validateExtraction_(unreadableCharge).valid, false);
+}
+
+function testExtractionInfersMissingFrequencyBeforeValidation() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'it',
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  context.getSheetHeadersBySupply_ = () => ({ Water: [] });
+  context.callGeminiForPdf_ = () => 'model-response';
+  context.parseGeminiJson_ = () => ({
+    ...validInvoice(),
+    frequency: '',
+    problems: ['Frequenza di fatturazione non indicata esplicitamente nel documento.']
+  });
+  context.validateRawExtractionShape_ = () => {};
+
+  const extracted = context.extractUtilityData_({
+    getBlob: () => ({}),
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf'
+  }, '');
+
+  assert.equal(extracted.frequency, 'monthly');
+  assert.deepEqual(extracted.problems, []);
+  assert.equal(context.validateExtraction_(extracted).valid, true);
 }
 
 function testAmbiguousAddressRulesFailClosed() {
@@ -1529,7 +1636,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
     message: 'catalog-file-processing-error',
     component: 'drive-utilities-cataloger',
-    applicationVersion: '0.4.0',
+    applicationVersion: '0.4.1',
     event: 'catalog-file-processing-error',
     fileId: 'file-id',
     errorType: 'Error',
@@ -1865,6 +1972,10 @@ function testPromptKeepsHeadersScopedBySupply() {
     /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
   assert.match(prompt,
     /If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why/);
+  assert.match(prompt,
+    /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
+  assert.match(prompt,
+    /never copy a transaction-specific value from another invoice into this one/);
   assert.match(prompt, /source_evidence "printed"/);
   assert.doesNotMatch(prompt,
     /If a field is genuinely not printed or not applicable, leave it absent and add a concise problem/);
@@ -4100,6 +4211,97 @@ function testSingleFilePreflightsTargetBeforeGlobalSideEffects() {
   assert.deepEqual(calls, ['get-file:file-id', 'release-lock']);
 }
 
+function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'synthetic-invoice.pdf',
+    getMimeType: () => 'application/pdf',
+    isTrashed: () => false,
+    getParents: () => ({
+      hasNext: () => true,
+      next: () => rootFolder
+    })
+  };
+  const ignoredFile = {
+    getId: () => 'ignored-file-id',
+    getName: () => 'synthetic-invoice.pdf',
+    getMimeType: () => 'text/plain',
+    isTrashed: () => false,
+    getParents: () => ({
+      hasNext: () => true,
+      next: () => rootFolder
+    })
+  };
+  const rootFolder = { getId: () => 'root-folder-id' };
+  const calls = [];
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.processSingleIntakeFile = (fileId) => {
+    calls.push(fileId);
+    return { status: 'IMPORTED' };
+  };
+  const files = [ignoredFile, file];
+  let index = 0;
+  rootFolder.getFilesByName = (name) => {
+    assert.equal(name, 'synthetic-invoice.pdf');
+    return {
+      hasNext: () => index < files.length,
+      next: () => files[index++]
+    };
+  };
+
+  assert.deepEqual(
+    context.processSingleIntakeFileByName(' synthetic-invoice.pdf '),
+    { status: 'IMPORTED' }
+  );
+  assert.deepEqual(calls, ['file-id']);
+}
+
+function testSingleFileByNameRejectsMissingOrAmbiguousMatches() {
+  const rootFolder = {};
+  const context = loadCataloger({
+    DriveApp: {
+      getFolderById: () => rootFolder
+    }
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.isDirectIntakePdf_ = () => true;
+
+  assert.throws(
+    () => context.processSingleIntakeFileByName('  '),
+    /exact intake PDF filename is required/
+  );
+
+  rootFolder.getFilesByName = () => ({
+    hasNext: () => false,
+    next: () => { throw new Error('unexpected next'); }
+  });
+  assert.throws(
+    () => context.processSingleIntakeFileByName('missing.pdf'),
+    /No matching PDF/
+  );
+
+  const files = [
+    { getId: () => 'file-one' },
+    { getId: () => 'file-two' }
+  ];
+  let index = 0;
+  rootFolder.getFilesByName = () => ({
+    hasNext: () => index < files.length,
+    next: () => files[index++]
+  });
+  assert.throws(
+    () => context.processSingleIntakeFileByName('duplicate.pdf'),
+    /Multiple matching PDFs/
+  );
+}
+
 function testSingleFileProcessesOnlyTheValidatedTarget() {
   const file = { getId: () => 'file-id' };
   const rootFolder = {};
@@ -4284,6 +4486,7 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testInvoiceFrequencyInferenceUsesPeriodAndHistory();
 testServiceIdentityAcceptsComponentAndEvidencePermutations();
 testServiceIdentityRejectsExtractedStreetPrefix();
 testServiceIdentityRejectsExtractedComponentSuffix();
@@ -4295,6 +4498,7 @@ testServiceIdentityRejectsCivicNumberAmbiguity();
 testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
+testExtractionInfersMissingFrequencyBeforeValidation();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
@@ -4363,6 +4567,8 @@ testLockAndLogContracts();
 testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
 testSingleFilePreflightsTargetBeforeGlobalSideEffects();
+testSingleFileByNameResolvesExactlyOneDirectIntakePdf();
+testSingleFileByNameRejectsMissingOrAmbiguousMatches();
 testSingleFileProcessesOnlyTheValidatedTarget();
 testSingleFilePersistsWhenOperatorLinksFail();
 testSingleFileRecoversOnlyTargetJournal();

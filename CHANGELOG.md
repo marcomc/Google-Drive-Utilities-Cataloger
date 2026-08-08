@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-08 - Reliable single-file recovery entrypoint
+
+### Added
+
+- Add an owner-controlled single-file entrypoint that resolves an exact PDF
+  filename in the configured intake folder before processing it.
+- Reject missing, non-unique, and non-intake filename matches before any
+  processing mutation.
+
+### Fixed
+
+- Validate both local entrypoint declarations and the exact uploaded Apps Script
+  version before updating the owner-only API deployment.
+- Treat an unprinted invoice billing frequency as recoverable: infer monthly,
+  bimonthly, or quarterly cadence from the billed period and prior matching
+  supplier invoices instead of blocking the import.
+
 ## [0.4.0] - 2026-08-07 - Supply identity verification
 
 ### Added

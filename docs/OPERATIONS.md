@@ -232,11 +232,18 @@ applied to invoice, contract, or customer identifiers.
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
+| `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
+
+For invoices whose billing frequency is not printed explicitly, extraction does
+not fail solely for that absence. The runtime derives `monthly`, `bimonthly`,
+or `quarterly` from the complete billed period and the prior frequency of the
+same supplier in the same supply tab. An explicit printed frequency or reviewed
+configuration override remains authoritative.
 
 When a report contains the localized supplier-profile link, open that folder to
 review a pending profile or the approved profile. The localized retry-import
