@@ -235,22 +235,45 @@ validate_apps_script_version_entrypoints() {
         const isTopLevel = (source) => {
           let depth = 0;
           let state = "code";
+          let previousSignificantCharacter = null;
+          let hasLineBreakSincePreviousSignificantCharacter = false;
+          const isFunctionDeclaration = () => {
+            if (previousSignificantCharacter === null ||
+                previousSignificantCharacter === ";" ||
+                previousSignificantCharacter === "}") return true;
+            return hasLineBreakSincePreviousSignificantCharacter &&
+              !"=([{,:?+-*/%!&|^~<>".includes(previousSignificantCharacter);
+          };
           for (let i = 0; i < source.length; i += 1) {
             const character = source[i];
             const next = source[i + 1];
             if (state === "line-comment") {
-              if (character === "\\n") state = "code";
+              if (character === "\n") {
+                state = "code";
+                hasLineBreakSincePreviousSignificantCharacter = true;
+              }
               continue;
             }
             if (state === "block-comment") {
               if (character === "*" && next === "/") { state = "code"; i += 1; }
+              if (character === "\n") hasLineBreakSincePreviousSignificantCharacter = true;
               continue;
             }
             if (state === "single" || state === "double" || state === "template") {
               if (character === "\\") { i += 1; continue; }
               if ((state === "single" && character === String.fromCharCode(39)) ||
                   (state === "double" && character === String.fromCharCode(34)) ||
-                  (state === "template" && character === String.fromCharCode(96))) state = "code";
+                  (state === "template" && character === String.fromCharCode(96))) {
+                state = "code";
+                previousSignificantCharacter = "v";
+                hasLineBreakSincePreviousSignificantCharacter = false;
+              }
+              continue;
+            }
+            if (/\s/.test(character)) {
+              if (character === "\n" || character === "\r") {
+                hasLineBreakSincePreviousSignificantCharacter = true;
+              }
               continue;
             }
             if (character === "/" && next === "/") { state = "line-comment"; i += 1; continue; }
@@ -258,11 +281,14 @@ validate_apps_script_version_entrypoints() {
             if (character === String.fromCharCode(39)) { state = "single"; continue; }
             if (character === String.fromCharCode(34)) { state = "double"; continue; }
             if (character === String.fromCharCode(96)) { state = "template"; continue; }
-            if (character === "{") { depth += 1; continue; }
-            if (character === "}") { depth = Math.max(0, depth - 1); continue; }
-            if (depth === 0 && source.slice(i).match(new RegExp("^function\\s+" + entrypoint + "\\s*\\("))) {
+            if (depth === 0 && isFunctionDeclaration() &&
+                source.slice(i).match(new RegExp("^(?:async\\s+)?function\\s+" + entrypoint + "\\s*\\("))) {
               return true;
             }
+            if (character === "{") { depth += 1; }
+            if (character === "}") { depth = Math.max(0, depth - 1); }
+            previousSignificantCharacter = character;
+            hasLineBreakSincePreviousSignificantCharacter = false;
           }
           return false;
         };

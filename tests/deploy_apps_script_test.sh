@@ -193,6 +193,8 @@ if [[ "${url}" == "${expected_content_url}" ]]; then
     content_other_source=$'function processSingleIntakeFileByName() {}'
   elif [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-nested-entrypoint' ]]; then
     content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nfunction wrapper() { function processSingleIntakeFileByName() {} }'
+  elif [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-entrypoint-initializer' ]]; then
+    content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nconst deferredProcessor = function processSingleIntakeFileByName() {}'
   fi
   jq -n --arg source "${content_source}" --arg other_source "${content_other_source}" \
     '{files: [{name: "UtilitiesCataloging", source: $source}, {name: "Other", source: $other_source}]}'
@@ -249,7 +251,7 @@ if [[ "${call_count}" -gt 1 ]]; then
   version_number=5
 fi
 case "${TEST_DEPLOYMENT_SCENARIO}" in
-  valid | content-missing-entrypoint | content-entrypoint-other-file | content-nested-entrypoint | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
+  valid | content-missing-entrypoint | content-entrypoint-other-file | content-nested-entrypoint | content-entrypoint-initializer | post-update-version-lag | post-update-version-stale | post-update-version-conflict | post-oauth-invalid-grant | post-transport-dns | post-transport-connect | post-transport-timeout | post-transport-tls | oauth-invalid-grant-on-version | oauth-invalid-grant-on-deploy)
     if [[ "${TEST_DEPLOYMENT_SCENARIO}" == "post-update-version-lag" &&
       "${call_count}" -le 2 ]]; then
       version_number=4
@@ -631,6 +633,22 @@ if [[ "${nested_status}" -eq 0 ]]; then
 fi
 if grep -Eq '^clasp-deploy$' "${content_nested_dir}/commands.log"; then
   printf '%s\n' 'Nested entrypoint validation allowed deployment mutation.' >&2
+  exit 1
+fi
+
+content_initializer_dir="${TEST_ROOT}/content-entrypoint-initializer"
+mkdir -p "${content_initializer_dir}"
+set +e
+run_fixture "${content_initializer_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" "content-entrypoint-initializer"
+initializer_status=$?
+set -e
+if [[ "${initializer_status}" -eq 0 ]]; then
+  printf '%s\n' 'A named function expression entrypoint was accepted.' >&2
+  exit 1
+fi
+if grep -Eq '^clasp-deploy$' "${content_initializer_dir}/commands.log"; then
+  printf '%s\n' 'Named function expression validation allowed deployment mutation.' >&2
   exit 1
 fi
 

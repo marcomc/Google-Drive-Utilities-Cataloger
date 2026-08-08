@@ -2984,10 +2984,18 @@ function isMissingFrequencyProblem_(problem) {
   if (!text || !isStandaloneInformationalProblem_(text)) {
     return false;
   }
-  if (/(?:ambigu|illeggibil|unreadable|ambiguous|unclear|inconsistent|incoerent|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrisp|sbagliat|errat|wrong|period|periodo|billing\s+period)/i.test(text)) {
+  if (isUncertainInvoiceEvidence_(text) || isRequiredInvoiceContextProblem_(text)) {
     return false;
   }
   return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b[\s\S]*\b(?:non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata)|assente|mancante|not\s+(?:explicitly\s+)?(?:indicated|specified|present|printed|reported)|missing|absent)\b[\s\S]*[.!?]?$/i.test(text);
+}
+
+function isUncertainInvoiceEvidence_(text) {
+  return /(?:ambigu|illeggibil|unreadable|ambiguous|unclear|incert|inconsistent|incoerent|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrisp|sbagliat|errat|wrong|invalid)/i.test(text);
+}
+
+function isRequiredInvoiceContextProblem_(text) {
+  return /(?:supplier|fornitore|supply|fornitura|account\s+holder|intestatario|service\s+address|indirizzo(?:\s+di\s+fornitura)?|contract|contratto|customer\s+code|codice\s+cliente|invoice\s+(?:identifier|number)|numero\s+fattura|issue\s+date|data\s+di\s+emissione|reference\s+(?:year|month)|(?:anno|mese)\s+di\s+riferimento|billing\s+period|periodo(?:\s+di\s+fatturazione)?|cost\s+consumption|costo\s+(?:del\s+)?consumo|non[ -]?consumption\s+cost|iva|vat|total|totale)/i.test(text);
 }
 
 function isInvoiceReconciliationComplete_(extracted) {
@@ -3013,7 +3021,7 @@ function isNonBlockingOptionalInvoiceProblem_(problem, extracted) {
   if (/default value|not established by printed evidence|spese\s+d['’]?incasso|collection\s+charges/i.test(text)) {
     return false;
   }
-  if (/(?:ambigu[oa]|ambiguous|unclear|incert[oaie]|illeggibil[ei]|unreadable|inconsistent|incoerent[ei]|conflict|invalid|sbagliat[oa]|wrong|mismatch)/i.test(text)) {
+  if (isUncertainInvoiceEvidence_(text) || isRequiredInvoiceContextProblem_(text)) {
     return false;
   }
   if (!/(?:assente|mancante|non\s+(?:[\wàèéìòù]+\s+)*(?:indicata|presente|stampata|riportata|applicabile)|non\s+applicabile|not\s+(?:[\w\s]+\s+)?(?:indicated|present|printed|reported|applicable)|not\s+applicable|omitted|unavailable)/i.test(text)) {
@@ -3028,15 +3036,15 @@ function normalizeInferredFrequency_(value) {
     return '';
   }
   if (/^(?:monthly|month|mensile|mensilmente|mensile)$/i.test(text) ||
-    /\b1\s*mesi?\b/.test(text)) {
+    /\b(?:every\s+)?1\s+(?:month|months|mese|mesi)\b/.test(text)) {
     return 'monthly';
   }
   if (/^(?:bimonthly|every\s+two\s+months|bimestrale|bimestralmente)$/i.test(text) ||
-    /\b2\s*mesi\b/.test(text)) {
+    /\b(?:every\s+)?2\s+(?:month|months|mese|mesi)\b/.test(text)) {
     return 'bimonthly';
   }
   if (/^(?:quarterly|every\s+three\s+months|trimestrale|trimestralmente)$/i.test(text) ||
-    /\b3\s*mesi\b/.test(text)) {
+    /\b(?:every\s+)?3\s+(?:month|months|mese|mesi)\b/.test(text)) {
     return 'quarterly';
   }
   return '';
@@ -3060,10 +3068,6 @@ function getCalendarMonthSpan_(periodStart, periodEnd) {
 function inferFrequencyFromPeriod_(extracted) {
   const months = getCalendarMonthSpan_(extracted.period_start, extracted.period_end);
   return { 1: 'monthly', 2: 'bimonthly', 3: 'quarterly' }[months] || '';
-}
-
-function getHistoricalInvoiceFrequency_(extracted) {
-  return getHistoricalInvoiceFrequencyEvidence_(extracted).frequency;
 }
 
 function getHistoricalInvoiceFrequencyEvidence_(extracted) {
@@ -3121,7 +3125,10 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     if (!ranked.length) {
       return { frequency: '', conflict: false };
     }
-    if (ranked.length > 1 && counts[ranked[0]] === counts[ranked[1]]) {
+    const countTotal = ranked.reduce(function (total, frequency) {
+      return total + counts[frequency];
+    }, 0);
+    if (counts[ranked[0]] * 2 <= countTotal) {
       return { frequency: '', conflict: true };
     }
     return { frequency: ranked[0], conflict: false };

@@ -909,6 +909,8 @@ function testExtractionSchemaAndCalendarValidation() {
   [
     'Unità di misura non leggibile.',
     'Quantità consumi F1 incerta.',
+    'Quantity absent because supplier is missing.',
+    'Quantity absent because the billing period is missing.',
     'Quantità consumi F1 assente o illeggibile.',
     'Charges are inconsistent.'
   ].forEach((problem) => {
@@ -1097,6 +1099,41 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(malformedDate);
   assert.equal(malformedDate.frequency, '');
+
+  const digitEnglishSheet = {
+    getLastRow: () => 3,
+    getRange: () => ({
+      getValues: () => [
+        ['SUPPLIER', 'every 2 months', '2026-05-16'],
+        ['SUPPLIER', '2 months', '2026-06-16']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => digitEnglishSheet })
+  };
+  const digitEnglishHistory = { ...historyOnly, frequency: '' };
+  context.inferInvoiceFrequency_(digitEnglishHistory);
+  assert.equal(digitEnglishHistory.frequency, 'bimonthly');
+
+  const pluralitySheet = {
+    getLastRow: () => 5,
+    getRange: () => ({
+      getValues: () => [
+        ['SUPPLIER', 'monthly', '2026-03-16'],
+        ['SUPPLIER', 'monthly', '2026-04-16'],
+        ['SUPPLIER', 'bimonthly', '2026-05-16'],
+        ['SUPPLIER', 'quarterly', '2026-06-16']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => pluralitySheet })
+  };
+  const pluralityHistory = { ...historyOnly, frequency: '' };
+  context.inferInvoiceFrequency_(pluralityHistory);
+  assert.equal(pluralityHistory.frequency, '');
+  assert.match(pluralityHistory.problems.join(' '), /conflicting/);
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
