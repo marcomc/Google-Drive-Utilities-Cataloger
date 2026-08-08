@@ -99,12 +99,14 @@ function getItalianLocalization_() {
     ]),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTATO',
+      IMPORTED_WITH_WARNINGS: 'IMPORTATO CON AVVISI',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVIATO SENZA IMPORTAZIONE',
       DUPLICATE: 'DUPLICATO',
       NEEDS_REVIEW: 'DA VERIFICARE',
       ERROR: 'ERRORE'
     }),
     reportLabels: Object.freeze({
+      warnings: 'Avvisi',
       softwareVersion: 'Versione software',
       status: 'ESITO',
       originalFile: 'File originale',

@@ -102,15 +102,17 @@ manual review.
   A difference beyond a few cents blocks the import.
 - A note that line items include VAT is not itself an uncertainty when the
   invoice shows VAT and total explicitly and that reconciliation succeeds.
-- Billing frequency is optional only when the document simply does not print
-  it. The runtime may infer monthly, bimonthly, or quarterly cadence from a
-  complete billed period and unambiguous earlier invoices for the same supplier
-  and supply. Never copy transaction-specific values from earlier invoices.
-  Conflicting, mismatched, unreadable, ambiguous, or missing-period evidence
-  remains an import-blocking problem.
-- An optional field that is genuinely absent or not applicable may be omitted.
-  If it is unreadable, ambiguous, uncertain, invalid, conflicting, or
-  mismatched, add a concise problem and leave the invoice for review.
+- Billing frequency is optional. When it is not printed or remains uncertain,
+  the runtime may infer monthly, bimonthly, or quarterly cadence from a
+  complete billed period and earlier invoices for the same supplier and
+  supply. Conflicting, unavailable, or insufficient frequency evidence leaves
+  that field blank and records an import warning. Never copy
+  transaction-specific values from earlier invoices.
+- A secondary field that is absent, unreadable, ambiguous, or not applicable
+  may be left blank with a concise import warning. Do not hold the document
+  for review solely for that warning. Required identity, reference-date,
+  reconciliation, and reported electricity F1/F2/F3 consumption evidence
+  remain blocking.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.

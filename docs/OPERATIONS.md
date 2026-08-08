@@ -177,6 +177,12 @@ reference-month wording was corrected to require literal `mm` text (`01`
 through `12`). This operational policy update did not deploy source code or
 alter processing triggers.
 
+On 2026-08-08, the existing Drive `AGENTS.md` was updated and read back to
+allow imports with warnings when secondary invoice fields or billing frequency
+remain unavailable. Identity, reconciliation, reference-date, and reported
+electricity-band consumption evidence remain hard gates. This operational
+policy update did not deploy source code or alter processing triggers.
+
 ## Cadence and cost
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
@@ -241,15 +247,18 @@ applied to invoice, contract, or customer identifiers.
 
 For invoices whose billing frequency is not printed explicitly, extraction does
 not fail solely for that absence. The runtime derives `monthly`, `bimonthly`,
-or `quarterly` from the complete billed period and the prior frequency of the
-same supplier in the same supply tab. A unique historical majority is required;
-conflicting history or insufficient period data leaves the frequency blank but
-does not copy a value from another invoice. An explicit printed frequency or
-reviewed configuration override remains authoritative.
+or `quarterly` from a complete calendar or anniversary-aligned billed period
+and corroborating earlier invoices for the same supplier and supply. A unique
+historical majority is required when history is used. Conflicting, unavailable,
+or insufficient evidence leaves frequency blank with an import warning; it
+never copies a transaction-specific value from another invoice. An explicit
+printed frequency or reviewed configuration override remains authoritative.
 
-Problems about optional line-item fields are non-blocking only when the invoice
-costs, VAT, and total are complete and reconcile. Identity, period, invoice
-number, reconciliation, and materially ambiguous values remain blocking.
+Problems about secondary fields are import warnings when costs, VAT, and total
+are complete and reconcile. The report marks those documents `IMPORTED WITH
+WARNINGS`, so missing fields can improve future extraction without delaying the
+archive/import cycle. Identity, invoice number, reference date, reconciliation,
+and reported electricity F1/F2/F3 consumption evidence remain blocking.
 Supplier-specific defaults and collection-charge evidence keep their stricter
 reviewed behavior.
 

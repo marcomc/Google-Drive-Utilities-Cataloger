@@ -889,32 +889,41 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_(missingFrequency).valid, true);
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the supplier invoice.'), true);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
       'Frequenza di fatturazione non indicata esplicitamente nel documento; periodo ambiguo.'
     ]
-  }).valid, false);
+  }).valid, true);
   [
     'Unità di misura non indicata.',
-    'Sconto non applicabile.',
-    'Quantità consumi F1 non riportata.'
+    'Sconto non applicabile.'
   ].forEach((problem) => {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
   });
   [
-    'Unità di misura non leggibile.',
     'Quantità consumi F1 incerta.',
     'Quantity absent because supplier is missing.',
-    'Quantity absent because the billing period is missing.',
-    'Quantità consumi F1 assente o illeggibile.',
-    'Charges are inconsistent.'
+    'Quantità consumi F1 non riportata.',
+    'F1 unreadable.',
+    'Fascia F2 illeggibile.',
+    'Quantità consumi F1 assente o illeggibile.'
   ].forEach((problem) => {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
+  });
+  [
+    'Unità di misura non leggibile.',
+    'Quantity absent because the billing period is missing.',
+    'Charges are inconsistent.',
+    'Tariff is unclear.',
+    'Payment method unreadable.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
   });
   assert.equal(context.validateExtraction_({
     ...raw,
@@ -1014,16 +1023,18 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.getHeaderAliases_ = (key) => ({
     supplier: ['Supplier'],
     frequency: ['Frequency'],
-    issueDate: ['Issue date']
+    issueDate: ['Issue date'],
+    accountHolder: ['Account holder'],
+    serviceAddress: ['Service address']
   })[key] || [];
   const sheet = {
     getLastRow: () => 4,
     getRange: () => ({
       getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-05-16'],
-        ['SUPPLIER', 'monthly', '2026-06-16'],
-        ['SUPPLIER', 'quarterly', '2026-08-16'],
-        ['OTHER', 'quarterly', '2026-06-20']
+        ['SUPPLIER', 'monthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'monthly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'quarterly', '2026-08-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['OTHER', 'quarterly', '2026-06-20', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
       ]
     })
   };
@@ -1032,8 +1043,9 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.getSheetLayout_ = () => ({
     headerRow: 1,
-    headers: ['Supplier', 'Frequency', 'Issue date'],
-    lookup: { supplier: 1, frequency: 2, 'issue date': 3 }
+    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder', 'Service address'],
+    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
+      'service address': 5 }
   });
   const extracted = {
     ...validInvoice(),
@@ -1044,6 +1056,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(extracted);
   assert.equal(extracted.frequency, 'monthly');
+  assert.equal(extracted.field_decisions[0].disposition, 'inferred');
 
   const historyOnly = {
     ...extracted,
@@ -1058,8 +1071,8 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     getLastRow: () => 3,
     getRange: () => ({
       getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-05-16'],
-        ['SUPPLIER', 'quarterly', '2026-06-16']
+        ['SUPPLIER', 'monthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'quarterly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
       ]
     })
   };
@@ -1082,7 +1095,8 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   const differentSheet = {
     getLastRow: () => 2,
     getRange: () => ({
-      getValues: () => [['SUPPLIER', 'quarterly', '2026-05-16']]
+      getValues: () => [['SUPPLIER', 'quarterly', '2026-05-16',
+        'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']]
     })
   };
   context.SpreadsheetApp = {
@@ -1104,8 +1118,8 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     getLastRow: () => 3,
     getRange: () => ({
       getValues: () => [
-        ['SUPPLIER', 'every 2 months', '2026-05-16'],
-        ['SUPPLIER', '2 months', '2026-06-16']
+        ['SUPPLIER', 'every 2 months', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', '2 months', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
       ]
     })
   };
@@ -1120,10 +1134,10 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     getLastRow: () => 5,
     getRange: () => ({
       getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-03-16'],
-        ['SUPPLIER', 'monthly', '2026-04-16'],
-        ['SUPPLIER', 'bimonthly', '2026-05-16'],
-        ['SUPPLIER', 'quarterly', '2026-06-16']
+        ['SUPPLIER', 'monthly', '2026-03-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'monthly', '2026-04-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'bimonthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
+        ['SUPPLIER', 'quarterly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
       ]
     })
   };
@@ -1134,6 +1148,38 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(pluralityHistory);
   assert.equal(pluralityHistory.frequency, '');
   assert.match(pluralityHistory.problems.join(' '), /conflicting/);
+
+  const otherSupplyHistory = {
+    getLastRow: () => 3,
+    getRange: () => ({
+      getValues: () => [
+        ['SUPPLIER', 'quarterly', '2026-05-16', 'Other Holder', 'Other Supply 1, Rivermouth'],
+        ['SUPPLIER', 'quarterly', '2026-06-16', 'Other Holder', 'Other Supply 1, Rivermouth']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => otherSupplyHistory })
+  };
+  const sameSupplierDifferentSupply = { ...historyOnly, frequency: '' };
+  context.inferInvoiceFrequency_(sameSupplierDifferentSupply);
+  assert.equal(sameSupplierDifferentSupply.frequency, '');
+
+  const unavailableHistory = { ...historyOnly, frequency: '' };
+  context.SpreadsheetApp = { openById: () => { throw new Error('unavailable'); } };
+  context.inferInvoiceFrequency_(unavailableHistory);
+  assert.equal(unavailableHistory.frequency, '');
+  assert.match(unavailableHistory.problems.join(' '), /could not be corroborated/);
+  assert.equal(context.validateExtraction_(unavailableHistory).valid, true);
+
+  [
+    ['2026-05-16', '2026-06-15', 'monthly'],
+    ['2026-05-16', '2026-07-15', 'bimonthly'],
+    ['2026-05-16', '2026-08-15', 'quarterly'],
+    ['2026-01-31', '2026-02-28', 'monthly']
+  ].forEach(([periodStart, periodEnd, frequency]) => {
+    assert.equal(context.inferFrequencyFromPeriod_({ period_start: periodStart, period_end: periodEnd }), frequency);
+  });
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
@@ -2035,6 +2081,32 @@ function testReportFieldsCannotInjectExtraLines() {
   );
 }
 
+function testImportedInvoiceWithSecondaryWarningsIsReported() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  const extracted = {
+    ...validInvoice(),
+    problems: ['Tariff is unclear.'],
+    field_decisions: [{
+      field: 'frequency',
+      disposition: 'inferred',
+      evidence: 'Derived from the complete billed period.'
+    }]
+  };
+  const result = context.buildSuccessResult_(
+    { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
+    'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
+    extracted, 'https://sheets.example/spreadsheet'
+  );
+  assert.equal(result.status, 'IMPORTED WITH WARNINGS');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), [
+    { field: 'secondary field', reason: 'Tariff is unclear.' },
+    { field: 'frequency', reason: 'Derived from the complete billed period.' }
+  ]);
+  assert.match(context.formatResult_(result),
+    /Warnings: secondary field: Tariff is unclear.; frequency: Derived from the complete billed period./);
+}
+
 function testPromptKeepsHeadersScopedBySupply() {
   const context = loadCataloger();
   context.getLocalization_ = () => ({ promptLanguage: 'English' });
@@ -2069,9 +2141,9 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
-    /If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem/);
+    /If a secondary field is genuinely not printed, not applicable, unreadable, or ambiguous/);
   assert.match(prompt,
-    /If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why/);
+    /runtime may import the invoice with that field blank/);
   assert.match(prompt,
     /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
   assert.match(prompt,
@@ -4632,6 +4704,7 @@ testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();
+testImportedInvoiceWithSecondaryWarningsIsReported();
 testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();

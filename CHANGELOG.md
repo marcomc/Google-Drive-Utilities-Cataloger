@@ -23,8 +23,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   supplier invoices instead of blocking the import; conflicting history leaves
   the field blank rather than choosing an arbitrary cadence.
 - Treat optional line-item problems as non-blocking only when invoice costs,
-  VAT, and total reconcile; identity, period, and material value problems still
-  require review.
+  VAT, and total reconcile; records now surface as `IMPORTED WITH WARNINGS`
+  when secondary fields are blank or uncertain, while identity, reference-date,
+  reconciliation, and electricity-band consumption evidence still require
+  review.
 
 ## [0.4.0] - 2026-08-07 - Supply identity verification
 
