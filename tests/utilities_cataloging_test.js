@@ -936,13 +936,19 @@ function testExtractionSchemaAndCalendarValidation() {
   });
   [
     'Unità di misura non leggibile.',
-    'Charges are inconsistent.',
     'Tariff is unclear.',
     'Payment method unreadable.',
     'Sconto non riportato in fattura.',
     'Frequenza non indicata in fattura.'
   ].forEach((problem) => {
     assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
+  });
+  [
+    'PDF appears incomplete.',
+    'Document authenticity is uncertain.',
+    'Charges are inconsistent.'
+  ].forEach((problem) => {
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
   });
   assert.equal(context.validateExtraction_({
     ...raw,
@@ -4447,7 +4453,7 @@ function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   const files = [ignoredFile, file];
   let index = 0;
   rootFolder.getFilesByName = (name) => {
-    assert.equal(name, 'synthetic-invoice.pdf');
+    assert.equal(name, ' synthetic-invoice.pdf ');
     return {
       hasNext: () => index < files.length,
       next: () => files[index++]

@@ -75,7 +75,7 @@ function processSingleIntakeFileByName(fileName) {
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
-    const iterator = rootFolder.getFilesByName(fileName.trim());
+    const iterator = rootFolder.getFilesByName(fileName);
     const matches = [];
     while (iterator.hasNext()) {
       const file = iterator.next();
@@ -3073,7 +3073,10 @@ function isNonBlockingOptionalInvoiceProblem_(problem, extracted) {
   if (isGraphCriticalInvoiceProblem_(text)) {
     return false;
   }
-  return true;
+  if (!/(?:assente|mancante|non\s+(?:[\wàèéìòù]+\s+)*(?:indicat[oa]|presente|stampat[oa]|riportat[oa]|applicabile)|non\s+applicabile|not\s+(?:[\w\s]+\s+)?(?:indicated|present|printed|reported|applicable)|not\s+applicable|omitted|unavailable|unreadable|ambiguous|unclear|leggibil|ambigu)/i.test(text)) {
+    return false;
+  }
+  return /(?:unit[àa]\s+di\s+misura|unit\s+of\s+measure|descrizione\s+del\s+consumo|consumption\s+description|quantit[àa]|quantity|scont[io]|discount|oneri?|charges?|addebiti?|recurring|ricorrent[ei]|costo\s+unitario|unit\s+cost|tariffa|tariff|payment\s+method|metodo\s+di\s+pagamento)/i.test(text);
 }
 
 function normalizeInferredFrequency_(value) {
