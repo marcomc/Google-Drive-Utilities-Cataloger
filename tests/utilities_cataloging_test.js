@@ -1070,7 +1070,8 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     frequency: ['Frequency'],
     issueDate: ['Issue date'],
     accountHolder: ['Account holder'],
-    serviceAddress: ['Service address']
+    serviceAddress: ['Service address'],
+    sourceFile: ['Source file']
   })[key] || [];
   const sheet = {
     getLastRow: () => 4,
@@ -1193,6 +1194,61 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(pluralityHistory);
   assert.equal(pluralityHistory.frequency, '');
   assert.match(pluralityHistory.problems.join(' '), /conflicting/);
+
+  const sourceFiles = {
+    same: { getId: () => 'current-file-id' },
+    independent: { getId: () => 'prior-file-id' }
+  };
+  const replacementSheet = {
+    getLastRow: () => 3,
+    getRange: (row, column) => ({
+      row,
+      column,
+      getValues: () => [
+        ['SUPPLIER', 'quarterly', '2026-05-16', 'Avery North',
+          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'same'],
+        ['SUPPLIER', 'monthly', '2026-06-16', 'Avery North',
+          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'independent']
+      ]
+    })
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => replacementSheet })
+  };
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder',
+      'Service address', 'Source file'],
+    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
+      'service address': 5, 'source file': 6 }
+  });
+  context.getFileFromSourceCell_ = (cell) =>
+    cell.row === 2 ? sourceFiles.same : sourceFiles.independent;
+  const replacementRetry = {
+    ...historyOnly,
+    original_file_id: 'current-file-id',
+    frequency: ''
+  };
+  context.inferInvoiceFrequency_(replacementRetry);
+  assert.equal(replacementRetry.frequency, 'monthly');
+
+  context.getFileFromSourceCell_ = () => null;
+  const unidentifiedHistory = { ...replacementRetry, frequency: '', problems: [] };
+  context.inferInvoiceFrequency_(unidentifiedHistory);
+  assert.equal(unidentifiedHistory.frequency, '');
+  assert.match(unidentifiedHistory.problems.join(' '), /conflicting/);
+
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder',
+      'Service address'],
+    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
+      'service address': 5 }
+  });
+  const missingSourceHeader = { ...replacementRetry, frequency: '', problems: [] };
+  context.inferInvoiceFrequency_(missingSourceHeader);
+  assert.equal(missingSourceHeader.frequency, '');
+  assert.match(missingSourceHeader.problems.join(' '), /conflicting/);
 
   const otherSupplyHistory = {
     getLastRow: () => 3,
@@ -1330,6 +1386,32 @@ function testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation() {
     'Optional custom field'
   ]);
   assert.equal(JSON.stringify(extracted).includes('configured_secondary_headers'), false);
+}
+
+function testConfiguredSecondaryHeadersUseExactRequiredAliases() {
+  const cases = [
+    { locale: 'en', header: 'Total discount', secondary: true },
+    { locale: 'en', header: 'Contract discount', secondary: true },
+    { locale: 'en', header: 'Total cost', secondary: false },
+    { locale: 'en', header: 'Frequency', secondary: false },
+    { locale: 'en', header: 'Consumption quantity F1', secondary: false },
+    { locale: 'en', header: 'Collection charges', secondary: false },
+    { locale: 'it', header: 'Sconto totale', secondary: true },
+    { locale: 'it', header: 'Sconto contratto', secondary: true },
+    { locale: 'it', header: 'Costo totale', secondary: false },
+    { locale: 'it', header: 'Frequenza', secondary: false },
+    { locale: 'it', header: 'Quantità consumi F1', secondary: false },
+    { locale: 'it', header: "Spese d'incasso", secondary: false }
+  ];
+  cases.forEach(({ locale, header, secondary }) => {
+    const context = loadCataloger();
+    context.getAutomationConfig_ = () => ({ locale });
+    assert.equal(
+      context.getConfiguredSecondaryInvoiceHeaders_([header]).length === 1,
+      secondary,
+      `${locale}: ${header}`
+    );
+  });
 }
 
 function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
@@ -4842,6 +4924,7 @@ testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation();
+testConfiguredSecondaryHeadersUseExactRequiredAliases();
 testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();

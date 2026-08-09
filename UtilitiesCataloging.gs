@@ -3115,9 +3115,27 @@ function isInvoiceReconciliationComplete_(extracted) {
 function getConfiguredSecondaryInvoiceHeaders_(headers) {
   return (headers || []).filter(function (header) {
     const text = String(header || '').trim();
-    return text && !hasCriticalInvoiceFieldMention_(text) &&
-      !isGraphCriticalInvoiceProblem_(text) &&
-      !/(?:spese\s+d['’]?incasso|collection\s+charges)/i.test(text);
+    return text && !isRequiredInvoiceHeader_(text);
+  });
+}
+
+function isRequiredInvoiceHeader_(header) {
+  const localization = getLocalization_();
+  const requiredAliasKeys = [
+    'issueDate', 'supplier', 'identifier', 'contractNumber', 'accountHolder',
+    'serviceAddress', 'customerCode', 'sourceFile', 'year', 'month',
+    'frequency', 'consumptionCost', 'nonConsumptionCosts', 'vat', 'total'
+  ];
+  const requiredHeaders = requiredAliasKeys.reduce(function (headers, key) {
+    return headers.concat(getHeaderAliases_(key));
+  }, []).concat(localization.electricityBandHeaders || []).concat(
+    (localization.supplierFieldDefaults || []).map(function (item) {
+      return item.header;
+    })
+  );
+  const normalized = normalizeHeader_(header);
+  return requiredHeaders.some(function (requiredHeader) {
+    return normalizeHeader_(requiredHeader) === normalized;
   });
 }
 
@@ -3238,6 +3256,7 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     const dateColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('issueDate'));
     const holderColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('accountHolder'));
     const addressColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('serviceAddress'));
+    const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
     const dataRows = Math.max(0, sheet.getLastRow() - layout.headerRow);
     if (!supplierColumn || !frequencyColumn || !holderColumn || !addressColumn ||
       !extracted.account_holder || !extracted.address_evidence || !dataRows) {
@@ -3252,8 +3271,12 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     if (!dateColumn) {
       return { state: 'empty', frequency: '' };
     }
+    if (extracted.original_file_id && !sourceColumn) {
+      return { state: 'conflict', frequency: '' };
+    }
     const counts = Object.create(null);
-    values.forEach(function (row) {
+    let independentIdentityUnavailable = false;
+    values.forEach(function (row, index) {
       if (normalizeCellText_(row[supplierColumn - 1]) !== normalizeCellText_(extracted.supplier)) {
         return;
       }
@@ -3269,11 +3292,26 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
           return;
         }
       }
+      if (extracted.original_file_id) {
+        const sourceFile = getFileFromSourceCell_(
+          sheet.getRange(layout.headerRow + 1 + index, sourceColumn)
+        );
+        if (!sourceFile) {
+          independentIdentityUnavailable = true;
+          return;
+        }
+        if (sourceFile.getId() === extracted.original_file_id) {
+          return;
+        }
+      }
       const frequency = normalizeInferredFrequency_(row[frequencyColumn - 1]);
       if (frequency) {
         counts[frequency] = (counts[frequency] || 0) + 1;
       }
     });
+    if (independentIdentityUnavailable) {
+      return { state: 'conflict', frequency: '' };
+    }
     const ranked = Object.keys(counts).sort(function (left, right) {
       return counts[right] - counts[left];
     });
