@@ -1778,39 +1778,43 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
   assert.equal(options[1].extendManagedRanges, true);
 }
 
-function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
+function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
   const importedSheet = { getName: () => 'Electricity' };
   const technical = { getRange: () => ({ getValues: () => [[2026]] }) };
   const spreadsheet = { getSheetByName: () => technical };
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+  let repaired = 0;
+  context.initializeElectricityDashboard_ = () => { repaired += 1; };
+  assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: (name) => name === labels.sheet ? {} : null
-  }, config, importedSheet, { reference_year: 2026 }),
-  /technical sheet is missing/);
+  }, config, importedSheet, { reference_year: 2026 }));
+  assert.equal(repaired, 1);
   assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: () => null
   }, config, importedSheet, { reference_year: 2026 }));
+  let logged = 0;
+  context.logCatalogEvent_ = () => { logged += 1; };
+  context.classifyCatalogErrorForLog_ = () => 'validation';
   context.isManagedElectricityDashboardTechnicalSheet_ = () => false;
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: () => ({})
-  }, config, importedSheet, { reference_year: 2026 }),
-  /technical sheet is unmanaged/);
+  }, config, importedSheet, { reference_year: 2026 }).warning,
+  /invoice data was retained/);
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => {
     throw new Error('source capacity exceeded');
   };
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2026 }
-  ), /source capacity exceeded/);
+  ).warning, /invoice data was retained/);
 
   context.validateElectricityDashboardSource_ = () => false;
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2026 }
-  ), /source headers are missing or invalid/);
+  ).warning, /invoice data was retained/);
 
-  let logged = 0;
   context.validateElectricityDashboardSource_ = () => true;
   context.hasElectricityDashboardYear_ = () => false;
   context.initializeElectricityDashboard_ = () => {
@@ -1818,10 +1822,10 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   };
   context.logCatalogEvent_ = () => { logged += 1; };
   context.classifyCatalogErrorForLog_ = () => 'validation';
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2027 }
-  ), /year capacity exceeded/);
-  assert.equal(logged, 1);
+  ).warning, /invoice data was retained/);
+  assert.equal(logged, 4);
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 
@@ -2204,7 +2208,7 @@ testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshRebuildsEveryElectricityImport();
-testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
+testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh();
 testCustomizedChartBuilderStateSurvivesRefresh();
 testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();

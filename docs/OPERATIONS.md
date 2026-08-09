@@ -254,13 +254,18 @@ or insufficient evidence leaves frequency blank with an import warning; it
 never copies a transaction-specific value from another invoice. An explicit
 printed frequency or reviewed configuration override remains authoritative.
 
-Problems about secondary fields are import warnings when costs, VAT, and total
-are complete and reconcile. The report marks those documents `IMPORTED WITH
-WARNINGS`, so missing fields can improve future extraction without delaying the
-archive/import cycle. Identity, invoice number, reference date, reconciliation,
-and reported electricity F1/F2/F3 consumption evidence remain blocking.
-Supplier-specific defaults and collection-charge evidence keep their stricter
-reviewed behavior.
+Explicit absence or non-applicability of configured writable secondary fields
+are import warnings when costs, VAT, and total are complete and reconcile. The
+report marks those documents `IMPORTED WITH WARNINGS`, so missing fields can
+improve future extraction without delaying the archive/import cycle. Identity,
+invoice number, reference date, reconciliation, and reported electricity
+F1/F2/F3 consumption evidence remain blocking. Supplier-specific defaults and
+collection-charge evidence keep their stricter reviewed behavior.
+
+The electricity dashboard and its technical sheet are derived presentation
+state. A refresh failure is logged and reported as an import warning after the
+invoice row has been verified; it never rolls back valid invoice data. The next
+electricity import attempts to rebuild the managed dashboard state.
 
 When a report contains the localized supplier-profile link, open that folder to
 review a pending profile or the approved profile. The localized retry-import

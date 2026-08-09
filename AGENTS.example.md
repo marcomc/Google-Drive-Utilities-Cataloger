@@ -108,11 +108,11 @@ manual review.
   supply. Conflicting, unavailable, or insufficient frequency evidence leaves
   that field blank and records an import warning. Never copy
   transaction-specific values from earlier invoices.
-- A secondary field that is absent, unreadable, ambiguous, or not applicable
-  may be left blank with a concise import warning. Do not hold the document
-  for review solely for that warning. Required identity, reference-date,
-  reconciliation, and reported electricity F1/F2/F3 consumption evidence
-  remain blocking.
+- A configured secondary field that is explicitly absent or not applicable may
+  be left blank with a concise import warning. Before reporting unreadable or
+  ambiguous evidence, inspect other current-document tables. Required identity,
+  reference-date, reconciliation, and reported electricity F1/F2/F3 consumption
+  evidence remain blocking.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
@@ -131,6 +131,11 @@ manual review.
   when the document does not provide that band value. If a reported band is
   unreadable or ambiguous, leave that value null and add a problem rather than
   silently distributing the total.
+- Do not depend on a supplier's table titles. Infer table roles from their
+  headings and units: bill summaries or energy receipts provide totals/costs,
+  readings and consumption tables provide current kWh bands, historical tables
+  corroborate only, and tax/VAT tables provide taxes. Offer, energy-mix,
+  marketing, and explanatory tables are not required for an invoice import.
 - If the sheet contains separate F1/F2/F3 headers for both consumption and
   cost, populate all matching headers. If only one of the two dimensions is
   present in the document, import only that dimension. Use exact existing

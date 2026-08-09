@@ -1639,43 +1639,49 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
   automationConfig, importedSheet, extracted) {
   if (!importedSheet || importedSheet.getName() !==
     getElectricitySupplySheetName_(automationConfig)) {
-    return;
+    return { warning: '' };
   }
-  const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
-  const dashboard = spreadsheet.getSheetByName(labels.sheet);
-  const technical = spreadsheet.getSheetByName(labels.dataSheet);
-  if (!technical) {
-    if (dashboard) {
-      throw new Error('Electricity dashboard technical sheet is missing.');
-    }
-    return;
-  }
-  if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
-    if (dashboard) {
-      throw new Error('Electricity dashboard technical sheet is unmanaged.');
-    }
-    return;
-  }
-  // Keep the technical formula reservation authoritative for every electricity
-  // import, including an import whose year is already represented in a chart.
-  if (!validateElectricityDashboardSource_(importedSheet, labels)) {
-    throw new Error('Electricity dashboard source headers are missing or invalid.');
-  }
-  // A replacement can remove a previously represented year, even when its
-  // new year is already present. Rebuild on every electricity import so both
-  // additions and removals are reflected, and grow a range only when its
-  // captured boundary has new data beyond it.
-  const extendManagedRanges = true;
   try {
+    const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
+    const dashboard = spreadsheet.getSheetByName(labels.sheet);
+    const technical = spreadsheet.getSheetByName(labels.dataSheet);
+    if (!technical) {
+      if (dashboard) {
+        initializeElectricityDashboard_(spreadsheet, automationConfig, {
+          extendManagedRanges: true
+        });
+      }
+      return { warning: '' };
+    }
+    if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
+      if (dashboard) {
+        throw new Error('Electricity dashboard technical sheet is unmanaged.');
+      }
+      return { warning: '' };
+    }
+    // Keep the technical formula reservation authoritative for every electricity
+    // import, including an import whose year is already represented in a chart.
+    if (!validateElectricityDashboardSource_(importedSheet, labels)) {
+      throw new Error('Electricity dashboard source headers are missing or invalid.');
+    }
+    // A replacement can remove a previously represented year, even when its
+    // new year is already present. Rebuild on every electricity import so both
+    // additions and removals are reflected, and grow a range only when its
+    // captured boundary has new data beyond it.
     initializeElectricityDashboard_(spreadsheet, automationConfig, {
-      extendManagedRanges: extendManagedRanges
+      extendManagedRanges: true
     });
+    return { warning: '' };
   } catch (error) {
+    // Dashboard sheets and charts are derived presentation state. The source
+    // invoice row has already passed its own write and verification contract.
     logCatalogEvent_('electricity-dashboard-refresh-failed', {
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
-    throw error;
+    return {
+      warning: 'Electricity dashboard refresh failed; imported invoice data was retained.'
+    };
   }
 }
 

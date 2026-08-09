@@ -615,7 +615,12 @@ function testExtractionSchemaAndCalendarValidation() {
     address_missing_type: 'import',
     frequency_overrides: []
   });
-  const raw = validInvoice();
+  const raw = {
+    ...validInvoice(),
+    configured_secondary_headers: [
+      'Unità di misura', 'Tariff', 'Payment method', 'Sconto', 'Custom field'
+    ]
+  };
   context.validateRawExtractionShape_(raw);
   assert.equal(context.validateExtraction_(raw).valid, true);
   const normalized = context.normalizeExtraction_({
@@ -937,12 +942,27 @@ function testExtractionSchemaAndCalendarValidation() {
   [
     'Unità di misura non leggibile.',
     'Tariff is unclear.',
-    'Payment method unreadable.',
-    'Sconto non riportato in fattura.',
-    'Frequenza non indicata in fattura.'
+    'Payment method unreadable.'
   ].forEach((problem) => {
-    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
   });
+  assert.equal(context.validateExtraction_({
+    ...raw,
+    problems: ['Sconto non riportato in fattura.']
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...raw,
+    problems: ['Frequenza non indicata in fattura.']
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...raw,
+    configured_secondary_headers: [],
+    problems: ['Custom field non applicabile.']
+  }).valid, false);
+  assert.equal(context.validateExtraction_({
+    ...raw,
+    problems: ['Custom field non applicabile.']
+  }).valid, true);
   [
     'PDF appears incomplete.',
     'Document authenticity is uncertain.',
@@ -1190,12 +1210,29 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(sameSupplierDifferentSupply);
   assert.equal(sameSupplierDifferentSupply.frequency, '');
 
-  const unavailableHistory = { ...historyOnly, frequency: '' };
+  const unavailableHistory = { ...historyOnly, frequency: '', problems: [] };
   context.SpreadsheetApp = { openById: () => { throw new Error('unavailable'); } };
   context.inferInvoiceFrequency_(unavailableHistory);
   assert.equal(unavailableHistory.frequency, '');
   assert.match(unavailableHistory.problems.join(' '), /could not be corroborated/);
   assert.equal(context.validateExtraction_(unavailableHistory).valid, true);
+
+  const noFrequencyEvidence = {
+    ...historyOnly,
+    frequency: '',
+    problems: []
+  };
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => ({
+      getLastRow: () => 1,
+      getRange: () => ({ getValues: () => [] })
+    }) })
+  };
+  context.inferInvoiceFrequency_(noFrequencyEvidence);
+  assert.equal(noFrequencyEvidence.frequency, '');
+  assert.match(noFrequencyEvidence.problems.join(' '),
+    /could not be established from the billed period or prior invoices/);
+  assert.equal(context.validateExtraction_(noFrequencyEvidence).valid, true);
 
   [
     ['2026-05-16', '2026-06-15', 'monthly'],
@@ -1262,6 +1299,37 @@ function testSupplierDefaultsUseRuntimeTargetHeaders() {
     { header: "Spese d'incasso", value: 0 }
   ]));
   assert.equal(JSON.stringify(extracted.problems), JSON.stringify([]));
+}
+
+function testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    frequency_overrides: []
+  });
+  context.getSheetHeadersBySupply_ = () => ({
+    Water: ['Issue date', 'Supplier', 'Optional custom field', 'Consumption quantity F1']
+  });
+  context.callGeminiForPdf_ = () => 'model-response';
+  context.parseGeminiJson_ = () => ({ ...validInvoice() });
+  context.validateRawExtractionShape_ = () => {};
+
+  const extracted = context.extractUtilityData_({
+    getBlob: () => ({}),
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf'
+  }, '');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(extracted.configured_secondary_headers)), [
+    'Optional custom field'
+  ]);
+  assert.equal(JSON.stringify(extracted).includes('configured_secondary_headers'), false);
 }
 
 function testSupplierDefaultsNormalizeConfiguredIdentities() {
@@ -2111,7 +2179,8 @@ function testImportedInvoiceWithSecondaryWarningsIsReported() {
   context.getAutomationConfig_ = () => ({ locale: 'en' });
   const extracted = {
     ...validInvoice(),
-    problems: ['Tariff is unclear.'],
+    configured_secondary_headers: ['Tariff'],
+    problems: ['Tariff is not applicable.'],
     field_decisions: [{
       field: 'frequency',
       disposition: 'inferred',
@@ -2125,11 +2194,22 @@ function testImportedInvoiceWithSecondaryWarningsIsReported() {
   );
   assert.equal(result.status, 'IMPORTED WITH WARNINGS');
   assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), [
-    { field: 'secondary field', reason: 'Tariff is unclear.' },
+    { field: 'secondary field', reason: 'Tariff is not applicable.' },
     { field: 'frequency', reason: 'Derived from the complete billed period.' }
   ]);
   assert.match(context.formatResult_(result),
-    /Warnings: secondary field: Tariff is unclear.; frequency: Derived from the complete billed period./);
+    /Warnings: secondary field: Tariff is not applicable.; frequency: Derived from the complete billed period./);
+  const dashboardResult = context.buildSuccessResult_(
+    { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
+    'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
+    { ...validInvoice() }, 'https://sheets.example/spreadsheet',
+    'Electricity dashboard refresh failed; imported invoice data was retained.'
+  );
+  assert.equal(dashboardResult.status, 'IMPORTED WITH WARNINGS');
+  assert.deepEqual(JSON.parse(JSON.stringify(dashboardResult.warnings)), [{
+    field: 'electricity dashboard',
+    reason: 'Electricity dashboard refresh failed; imported invoice data was retained.'
+  }]);
 }
 
 function testPromptKeepsHeadersScopedBySupply() {
@@ -2166,7 +2246,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
-    /If a secondary field is genuinely not printed, not applicable, unreadable, or ambiguous/);
+    /If a secondary field is genuinely not printed or not applicable/);
+  assert.match(prompt, /For unreadable or ambiguous evidence, inspect other current-document tables/);
   assert.match(prompt,
     /runtime may import the invoice with that field blank/);
   assert.match(prompt,
@@ -2179,6 +2260,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /recurring Iliad Internet charges/);
   assert.match(prompt, /localized supplier field defaults/);
   assert.match(prompt, /numeric value 0/);
+  assert.match(prompt, /Infer each table role from its headings and units, not its title/);
+  assert.match(prompt, /Energy-mix, offer, marketing, and explanatory tables are not required/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
   assert.match(prompt, /"Water":\["Issue date","Cubic metres"\]/);
   assert.match(prompt, /"Gas":\["Issue date","Standard cubic metres"\]/);
@@ -3621,7 +3704,7 @@ function testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState() {
   assert.equal(journal.sheetRowDeleted, undefined);
 }
 
-function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
+function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
   const context = loadCataloger();
   const deletedRows = [];
   const sheet = {
@@ -3639,9 +3722,12 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
     getUrl: () => 'https://sheets.test/spreadsheet-id'
   });
   context.getSheetLayout_ = () => layout;
-  context.captureElectricityDashboardLayoutsForRollback_ = () => ({
-    monthlyF1: { sourceRanges: ['F1:Z13'] }
-  });
+  let dashboardLogs = 0;
+  context.captureElectricityDashboardLayoutsForRollback_ = () => {
+    throw new Error('dashboard layout capture failed');
+  };
+  context.logCatalogEvent_ = () => { dashboardLogs += 1; };
+  context.classifyCatalogErrorForLog_ = () => 'spreadsheet';
   context.findSpreadsheetRowBySourceFile_ = () => 0;
   context.getInsertionRow_ = () => 2;
   context.updateMutationJournal_ = () => {};
@@ -3651,46 +3737,22 @@ function testInsertedInvoiceRollsBackWhenDashboardRefreshFails() {
   context.writeInvoiceRow_ = () => {};
   context.verifyImportedRow_ = () => {};
   context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
-    throw new Error('dashboard refresh failed');
+    return { warning: 'Electricity dashboard refresh failed; imported invoice data was retained.' };
   };
   let rollbackRefreshes = 0;
   context.refreshElectricityDashboardAfterRollback_ = (state) => {
     assert.equal(state.sheet, sheet);
-    assert.equal(JSON.stringify(state.electricityDashboardLayouts), JSON.stringify({
-      monthlyF1: { sourceRanges: ['F1:Z13'] }
-    }));
+    assert.equal(state.electricityDashboardLayouts, null);
     rollbackRefreshes += 1;
   };
-  assert.throws(() => context.importUtilityInvoiceToSheet_(
+  const result = context.importUtilityInvoiceToSheet_(
     { getId: () => 'file-id' }, validInvoice()
-  ), /dashboard refresh failed/);
-  assert.deepEqual(deletedRows, [2]);
-  assert.equal(rollbackRefreshes, 1);
-}
-
-function testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails() {
-  const deletedRows = [];
-  const fixture = createInsertedInvoiceRollbackFixture((row) => {
-    deletedRows.push(row);
-  });
-  fixture.context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
-    throw new Error('dashboard refresh failed');
-  };
-  fixture.context.refreshElectricityDashboardAfterRollback_ = () => {
-    throw new Error('dashboard rollback refresh failed');
-  };
-
-  assert.throws(
-    () => fixture.context.importUtilityInvoiceToSheet_(
-      fixture.file, validInvoice()
-    ),
-    /dashboard refresh failed.*dashboard rollback refresh failed/
   );
-  assert.deepEqual(deletedRows, [2]);
-  const journal = JSON.parse(fixture.store[fixture.journalKey]);
-  assert.equal(journal.stage, 'sheet-row-rolled-back');
-  assert.equal(journal.sheetRowCreated, false);
-  assert.equal(journal.sheetRowDeleted, true);
+  assert.equal(result.dashboardWarning,
+    'Electricity dashboard refresh failed; imported invoice data was retained.');
+  assert.deepEqual(deletedRows, []);
+  assert.equal(rollbackRefreshes, 0);
+  assert.equal(dashboardLogs, 1);
 }
 
 function testDashboardRollbackForcesRegeneration() {
@@ -4711,6 +4773,7 @@ testServiceIdentityRejectsCivicNumberAmbiguity();
 testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
+testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation();
 testExtractionInfersMissingFrequencyBeforeValidation();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
@@ -4759,8 +4822,7 @@ testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
 testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
-testInsertedInvoiceRollsBackWhenDashboardRefreshFails();
-testInsertedInvoiceRetainsDeletionCheckpointWhenDashboardRollbackFails();
+testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();
 testOuterRollbackUsesFullJournalFallbackCheckpoint();
