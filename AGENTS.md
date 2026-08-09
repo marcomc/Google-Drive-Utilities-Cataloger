@@ -177,3 +177,16 @@
   cleanup registrations do not reach the parent process. Stream secrets over
   stdin when possible; otherwise create and track temporary files in the
   parent shell.
+- Before a structural spreadsheet migration journals or mutates state, reject
+  identity headers in reserved marker columns and exercise the full supported
+  header-recovery boundary. Keep canonical invoice-field precedence shared by
+  writes and verification so supplementary `sheet_values` cannot replace
+  imported identity fields.
+- In invoice-extraction prompts, aggregate repeated detailed cost labels only
+  within their printed parent section; exclude subordinate `di cui` rows and
+  same-named rows from other sections. Cover separate sections that reuse a
+  label.
+- When a verified import downgrades a derived dashboard or formula refresh
+  failure, persist a redacted retry marker and ensure every scheduled recovery
+  path consumes it without reprocessing PDFs. Retain the marker on failure and
+  clear it only after a successful normal or scheduled refresh.

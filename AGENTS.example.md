@@ -117,6 +117,12 @@ manual review.
 - A configured secondary-field absence is non-blocking only when its exact
   normalized `sheet_values` entry is omitted or has value `null`. Empty text,
   zero, false, or duplicate normalized entries remain blocking.
+- When deterministic validation rejects repairable extracted document data,
+  the runtime may request at most two targeted re-extractions after the initial
+  model call. Re-examine the complete PDF, focus on the structured issue codes
+  and fields, preserve unrelated supported values unless the PDF contradicts
+  them, and return the complete extraction object. The model may correct data
+  and evidence but never decides import policy.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.

@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Retry a model extraction at most twice after the initial call when
+  deterministic validation reports a repairable document-data problem.
+- Send structured validator feedback, the previous complete extraction, and
+  prior attempt history to each targeted repair pass while keeping the final
+  import decision deterministic.
+
+### Changed
+
+- Stop repair immediately for configuration and spreadsheet-state failures
+  that cannot be resolved by rereading the PDF.
+- Require every repair pass to return the complete extraction schema; invalid
+  structured output may be retried but never bypasses validation.
+
 ## [0.4.1] - 2026-08-08 - Reliable single-file recovery entrypoint
 
 ### Added

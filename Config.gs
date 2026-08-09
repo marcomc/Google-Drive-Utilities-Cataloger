@@ -28,6 +28,8 @@ const CONFIG = Object.freeze({
   // Gemini 3.6 Flash defaults to medium thinking. Make it explicit so
   // the Developer API and Vertex AI fallback use the same runtime behavior.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
+  // One initial extraction plus at most two validator-guided repair passes.
+  EXTRACTION_MAX_AI_CALLS: 3,
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,

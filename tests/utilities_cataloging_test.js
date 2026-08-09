@@ -1879,6 +1879,283 @@ function testExtractionInfersMissingFrequencyBeforeValidation() {
   assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), []);
 }
 
+function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
+  const context = loadCataloger();
+  const candidates = [
+    { ...validInvoice(), identifier: '', original_file_id: 'must-not-leak' },
+    { ...validInvoice(), identifier: 'INV-REPAIRED' }
+  ];
+  const repairContexts = [];
+  const events = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return candidates[repairContexts.length - 1];
+  };
+  context.validateExtractedUtilityDataForImport_ = (candidate) =>
+    candidate.identifier ? { valid: true, stage: 'target-spreadsheet' } :
+      context.invalidExtraction_(
+        'Invoice identifier is missing.',
+        'Verify the invoice number in the PDF.',
+        {
+          code: 'invoice_identifier_missing',
+          fields: ['identifier'],
+          repairable: true
+        }
+      );
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.extracted.identifier, 'INV-REPAIRED');
+  assert.equal(result.aiCallCount, 2);
+  assert.equal(result.repairAttemptCount, 1);
+  assert.equal(repairContexts[0], null);
+  assert.equal(repairContexts[1].attempt, 2);
+  assert.equal(repairContexts[1].feedback.version, 1);
+  assert.equal(repairContexts[1].feedback.issues[0].stage, 'extraction');
+  assert.equal(repairContexts[1].feedback.issues[0].code,
+    'invoice_identifier_missing');
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].feedback.issues[0].fields
+  )), ['identifier']);
+  assert.equal(repairContexts[1].previousExtraction.original_file_id, undefined);
+  assert.equal(repairContexts[1].history.length, 1);
+  assert.deepEqual(events.map((entry) => entry.event), [
+    'extraction-validation-completed',
+    'extraction-repair-requested',
+    'extraction-validation-completed',
+    'extraction-repair-succeeded'
+  ]);
+  const eventText = JSON.stringify(events);
+  assert.equal(eventText.includes('SUPPLIER'), false);
+  assert.equal(eventText.includes('INV-REPAIRED'), false);
+  assert.equal(eventText.includes('Invoice identifier is missing'), false);
+}
+
+function testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  const events = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return { ...validInvoice(), total: 99 };
+  };
+  context.validateExtractedUtilityDataForImport_ = () =>
+    context.invalidExtraction_(
+      'Invalid reconciliation.',
+      'Verify costs.',
+      {
+        code: 'monetary_reconciliation_mismatch',
+        repairable: true,
+        fields: ['cost_consumption', 'cost_non_consumption', 'vat', 'total']
+      }
+    );
+  context.logCatalogEvent_ = (event) => events.push(event);
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, false);
+  assert.equal(result.aiCallCount, 3);
+  assert.equal(result.repairAttemptCount, 2);
+  assert.equal(repairContexts.length, 3);
+  assert.equal(repairContexts[1].history.length, 1);
+  assert.equal(repairContexts[2].history.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[2].history.map((entry) => entry.attempt)
+  )), [1, 2]);
+  assert.equal(events.filter((event) =>
+    event === 'extraction-repair-requested').length, 2);
+  assert.equal(events.at(-1), 'extraction-repair-exhausted');
+}
+
+function testExtractionRepairLoopDoesNotRetryNonRepairableState() {
+  const context = loadCataloger();
+  assert.equal(context.invalidExtraction_('Unknown failure.', 'Inspect it.')
+    .repairable, false);
+  let calls = 0;
+  context.extractUtilityData_ = () => {
+    calls += 1;
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () =>
+    context.invalidExtraction_(
+      'The configured target spreadsheet tab does not exist.',
+      'Create or repair the configured spreadsheet tab.',
+      { code: 'target_sheet_missing', repairable: false }
+    );
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(calls, 1);
+  assert.equal(result.aiCallCount, 1);
+  assert.equal(result.validation.repairable, false);
+}
+
+function testExtractionRepairLoopRetriesInvalidStructuredOutput() {
+  const context = loadCataloger();
+  const marked = context.markInvalidExtractionOutput_(new Error(
+    'Gemini extraction field has an invalid type: identifier'
+  ));
+  assert.equal(marked.invalidExtractionOutput, true);
+  assert.equal(marked.extractionIssueCode, 'invalid_extraction_schema');
+  assert.deepEqual(JSON.parse(JSON.stringify(marked.extractionFields)),
+    ['identifier']);
+  const repairContexts = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    if (repairContexts.length === 1) {
+      const error = new Error('Gemini extraction field has an invalid type: identifier');
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_schema';
+      error.extractionFields = ['identifier'];
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () => ({
+    valid: true, stage: 'target-spreadsheet'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.aiCallCount, 2);
+  assert.equal(repairContexts[1].feedback.issues[0].code,
+    'invalid_extraction_schema');
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].feedback.issues[0].fields
+  )), ['identifier']);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].previousExtraction
+  )), {});
+}
+
+function testExtractionValidationPipelineStopsAtTheFailingBoundary() {
+  const context = loadCataloger();
+  const calls = [];
+  context.validateExtraction_ = () => {
+    calls.push('extraction');
+    return { valid: true };
+  };
+  context.validateServiceIdentityForInvoice_ = () => {
+    calls.push('identity');
+    return context.invalidExtraction_(
+      'Identity mismatch.', 'Recheck identity.',
+      {
+        code: 'service_identity_mismatch',
+        fields: ['account_holder'],
+        repairable: true
+      }
+    );
+  };
+  context.validateTargetSheetValues_ = () => {
+    calls.push('target');
+    return { valid: true };
+  };
+
+  const invoice = { ...validInvoice(), address_type: 'unknown' };
+  const result = context.validateExtractedUtilityDataForImport_(invoice);
+
+  assert.equal(result.valid, false);
+  assert.equal(result.stage, 'service-identity');
+  assert.deepEqual(calls, ['extraction', 'identity']);
+  assert.equal(invoice.address_type, 'unknown');
+}
+
+function testExhaustedExtractionRepairDoesNotStartMutations() {
+  const context = loadCataloger();
+  const mutationCalls = [];
+  const extracted = { ...validInvoice(), identifier: '' };
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityDataWithRepair_ = () => ({
+    extracted,
+    validation: {
+      valid: false,
+      stage: 'extraction',
+      code: 'invoice_identifier_missing',
+      problem: 'Invoice identifier is missing.',
+      action: 'Verify the invoice number.',
+      repairable: true
+    },
+    aiCallCount: 3,
+    repairAttemptCount: 2
+  });
+  context.findDuplicate_ = () => {
+    mutationCalls.push('duplicate');
+    return { status: 'none' };
+  };
+  context.saveMutationJournal_ = () => mutationCalls.push('journal');
+  context.getDestinationFolder_ = () => {
+    mutationCalls.push('destination');
+    return {};
+  };
+
+  const result = context.processIntakeFile_({
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 100,
+    getUrl: () => 'https://drive.test/file-id'
+  }, {}, 'policy');
+
+  assert.equal(result.status, 'NEEDS REVIEW');
+  assert.equal(result.problem, 'Invoice identifier is missing.');
+  assert.deepEqual(mutationCalls, []);
+}
+
+function testExtractionRepairPromptRequiresCompleteReplacementWithMemory() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => ({ promptLanguage: 'English' });
+  context.getAutomationConfig_ = () => ({
+    address_rules: [],
+    frequency_overrides: [],
+    canonical_suppliers: ['SUPPLIER'],
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    supplier_aliases: {}
+  });
+  const prompt = context.buildExtractionPrompt_({ Water: [] }, 'policy', {
+    attempt: 3,
+    previousExtraction: { identifier: null, supplier: 'SUPPLIER' },
+    feedback: {
+      version: 1,
+      failed_attempt: 2,
+      max_ai_calls: 3,
+      issues: [{
+        stage: 'extraction',
+        code: 'invoice_identifier_missing',
+        fields: ['identifier'],
+        problem: 'Invoice identifier is missing.',
+        requested_action: 'Verify the invoice number.'
+      }]
+    },
+    history: [
+      { attempt: 1, stage: 'extraction', code: 'invoice_identifier_missing' },
+      { attempt: 2, stage: 'extraction', code: 'invoice_identifier_missing' }
+    ]
+  });
+
+  assert.match(prompt, /attempt 3 of 3/);
+  assert.match(prompt, /Structured deterministic validator feedback/);
+  assert.match(prompt, /Prior repair history/);
+  assert.match(prompt, /Keep previously extracted fields unchanged/);
+  assert.match(prompt, /Return the complete JSON object/);
+  assert.match(prompt, /Do not return a partial patch/);
+  assert.match(prompt, /may not decide whether the document is importable/);
+  assert.match(prompt, /invoice_identifier_missing/);
+  assert.match(prompt, /Inspect alternative labels, tables, summaries/);
+}
+
 function testAmbiguousAddressRulesFailClosed() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
@@ -2346,16 +2623,29 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
   assert.match(report,
     /Detected discrepancy: field Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
-  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
-    message: 'catalog-file-processing-error',
-    component: 'drive-utilities-cataloger',
-    applicationVersion: '0.4.1',
-    event: 'catalog-file-processing-error',
-    fileId: 'file-id',
-    errorType: 'Error',
-    errorCategory: 'spreadsheet',
-    failureStage: 'spreadsheet-write-and-verify'
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [
+    {
+      message: 'extraction-validation-completed',
+      component: 'drive-utilities-cataloger',
+      applicationVersion: '0.4.1',
+      event: 'extraction-validation-completed',
+      fileId: 'file-id',
+      extractionAttempt: 1,
+      valid: true,
+      stage: 'target-spreadsheet',
+      issueCode: ''
+    },
+    {
+      message: 'catalog-file-processing-error',
+      component: 'drive-utilities-cataloger',
+      applicationVersion: '0.4.1',
+      event: 'catalog-file-processing-error',
+      fileId: 'file-id',
+      errorType: 'Error',
+      errorCategory: 'spreadsheet',
+      failureStage: 'spreadsheet-write-and-verify'
+    }
+  ]);
   assert.deepEqual(consoleErrors, [
     'Catalog file processing failed for file ID file-id (spreadsheet).'
   ]);
@@ -5247,6 +5537,13 @@ testSupplierDefaultsUseRuntimeTargetHeaders();
 testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
+testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid();
+testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory();
+testExtractionRepairLoopDoesNotRetryNonRepairableState();
+testExtractionRepairLoopRetriesInvalidStructuredOutput();
+testExtractionValidationPipelineStopsAtTheFailingBoundary();
+testExhaustedExtractionRepairDoesNotStartMutations();
+testExtractionRepairPromptRequiresCompleteReplacementWithMemory();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
