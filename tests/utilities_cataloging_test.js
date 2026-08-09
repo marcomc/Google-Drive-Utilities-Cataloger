@@ -1374,6 +1374,193 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
   assert.deepEqual(printed.problems, preservedProblems);
 }
 
+function testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation() {
+  ['en', 'it'].forEach((locale) => {
+    const context = loadCataloger();
+    context.getAutomationConfig_ = () => ({ locale });
+    const configuredHeader = locale === 'it' ? 'Sconto contratto' : 'Contract discount';
+    const requiredHeader = locale === 'it' ? 'Costo totale' : 'Total cost';
+    assert.deepEqual(JSON.parse(JSON.stringify(
+      context.getConfiguredSecondaryInvoiceHeaders_([configuredHeader, requiredHeader])
+    )), [configuredHeader]);
+    const allowedProblems = locale === 'it' ? [
+      'Sconto contratto non applicabile.',
+      'Sconto contratto non riportato in fattura.'
+    ] : [
+      'Contract discount is not applicable.',
+      'Contract discount is not printed on the invoice.'
+    ];
+    const extracted = { ...validInvoice() };
+    Object.defineProperty(extracted, 'configured_secondary_headers', {
+      value: [configuredHeader]
+    });
+    allowedProblems.forEach((problem) => {
+      assert.equal(context.validateExtraction_({
+        ...extracted,
+        configured_secondary_headers: [configuredHeader],
+        problems: [problem]
+      }).valid, true, `${locale}: ${problem}`);
+    });
+    [
+      `${configuredHeader} is unreadable.`,
+      `${configuredHeader} is not applicable but ambiguous.`,
+      `${configuredHeader} does not match the invoice.`,
+      `Unconfigured discount is not applicable.`
+    ].forEach((problem) => {
+      assert.equal(context.validateExtraction_({
+        ...extracted,
+        configured_secondary_headers: [configuredHeader],
+        problems: [problem]
+      }).valid, false, `${locale}: ${problem}`);
+    });
+    assert.equal(context.validateExtraction_({
+      ...extracted,
+      configured_secondary_headers: [configuredHeader],
+      total: extracted.total + 1,
+      problems: [allowedProblems[0]]
+    }).valid, false, `${locale}: reconciliation`);
+  });
+
+  const overlapContext = loadCataloger();
+  overlapContext.getAutomationConfig_ = () => ({ locale: 'en' });
+  const overlapExtraction = { ...validInvoice() };
+  Object.defineProperty(overlapExtraction, 'configured_secondary_headers', {
+    value: ['Discount', 'Discount rate']
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    overlapContext.classifyConfiguredSecondaryInvoiceProblem_(
+      'Discount rate is not applicable.', overlapExtraction
+    )
+  )), { disposition: 'explicit-absence', field: 'Discount rate' });
+}
+
+function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
+  const cases = [
+    ['en', 'not printed'],
+    ['en', 'not indicated'],
+    ['en', 'not applicable'],
+    ['en', 'not available'],
+    ['en', 'N/A'],
+    ['it', 'non indicata'],
+    ['it', 'non è indicata'],
+    ['it', 'non stampata'],
+    ['it', 'non applicabile'],
+    ['it', 'non disponibile']
+  ];
+  cases.forEach(([locale, sentinel]) => {
+    const context = loadCataloger();
+    context.getAutomationConfig_ = () => ({
+      locale,
+      canonical_suppliers: ['SUPPLIER'],
+      supplier_aliases: {},
+      canonical_supplies: ['Water'],
+      supply_aliases: {},
+      address_rules: [],
+      address_missing_type: 'import',
+      frequency_overrides: [],
+      sheet_by_supply: {}
+    });
+    const unresolved = context.normalizeExtraction_({
+      ...validInvoice(),
+      frequency: sentinel,
+      period_start: '',
+      period_end: '',
+      problems: []
+    });
+    context.inferInvoiceFrequency_(unresolved);
+    assert.equal(unresolved.frequency, '', `${locale}: ${sentinel}`);
+    assert.equal(context.validateExtraction_(unresolved).valid, false,
+      `${locale}: ${sentinel}`);
+
+    const inferred = context.normalizeExtraction_({
+      ...validInvoice(),
+      frequency: sentinel,
+      problems: []
+    });
+    context.inferInvoiceFrequency_(inferred);
+    assert.equal(inferred.frequency, 'monthly', `${locale}: ${sentinel}`);
+    assert.equal(context.validateExtraction_(inferred).valid, true,
+      `${locale}: ${sentinel}`);
+  });
+
+  [
+    ['en', 'unknown'],
+    ['en', 'supplier did not provide cadence'],
+    ['en', 'approximately every 2 months according to estimate'],
+    ['it', 'sconosciuta'],
+    ['it', 'il fornitore non specifica la frequenza']
+  ].forEach(([locale, unsupported]) => {
+    const context = loadCataloger();
+    context.getAutomationConfig_ = () => ({
+      locale,
+      canonical_suppliers: ['SUPPLIER'],
+      supplier_aliases: {},
+      canonical_supplies: ['Water'],
+      supply_aliases: {},
+      address_rules: [],
+      address_missing_type: 'import',
+      frequency_overrides: [],
+      sheet_by_supply: {}
+    });
+    const extracted = context.normalizeExtraction_({
+      ...validInvoice(), frequency: unsupported, problems: []
+    });
+    context.inferInvoiceFrequency_(extracted);
+    assert.equal(extracted.frequency, 'monthly', `${locale}: ${unsupported}`);
+    assert.match(extracted.problems.join(' '), /value is unsupported/);
+    assert.equal(context.validateExtraction_(extracted).valid, false,
+      `${locale}: ${unsupported}`);
+  });
+
+  const supportedContext = loadCataloger();
+  [
+    ['monthly', 'monthly'],
+    ['every 1 month', 'monthly'],
+    ['mensile', 'monthly'],
+    ['bimonthly', 'bimonthly'],
+    ['bimestrale', 'bimonthly'],
+    ['quarterly', 'quarterly'],
+    ['trimestrale', 'quarterly']
+  ].forEach(([printed, canonical]) => {
+    const extracted = { frequency: printed, problems: [] };
+    supportedContext.normalizeExtractedInvoiceFrequency_(extracted);
+    assert.equal(extracted.frequency, canonical, printed);
+    assert.deepEqual(extracted.problems, [], printed);
+  });
+
+  const overrideContext = loadCataloger();
+  overrideContext.getAutomationConfig_ = () => ({
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'not printed'
+    }]
+  });
+  const sentinelOverride = {
+    ...validInvoice(),
+    frequency: '',
+    period_start: '',
+    period_end: '',
+    problems: []
+  };
+  overrideContext.applyFrequencyOverride_(sentinelOverride);
+  assert.equal(sentinelOverride.frequency, '');
+  assert.equal(overrideContext.validateExtraction_(sentinelOverride).valid, false);
+
+  overrideContext.getAutomationConfig_ = () => ({
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'monthly'
+    }]
+  });
+  const unsupportedWithOverride = {
+    ...validInvoice(),
+    frequency: '',
+    problems: ['Billing frequency value is unsupported.']
+  };
+  overrideContext.applyFrequencyOverride_(unsupportedWithOverride);
+  assert.equal(unsupportedWithOverride.frequency, 'monthly');
+  assert.match(unsupportedWithOverride.problems.join(' '), /unsupported/);
+  assert.equal(overrideContext.validateExtraction_(unsupportedWithOverride).valid, false);
+}
+
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
@@ -2388,8 +2575,9 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
-    /If a field is not printed, not applicable, unreadable, or ambiguous/);
-  assert.match(prompt, /concise blocking diagnostic/);
+    /If a configured secondary field is explicitly absent or not applicable/);
+  assert.match(prompt, /only after core monetary reconciliation succeeds/);
+  assert.match(prompt, /Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking/);
   assert.match(prompt, /If cadence cannot be established or conflicts, the diagnostic blocks import/);
   assert.doesNotMatch(prompt, /runtime may import the invoice with that field blank/);
   assert.match(prompt,
@@ -4916,6 +5104,8 @@ testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
 testInvoiceFrequencyInferenceUsesPeriodAndHistory();
 testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics();
+testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation();
+testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable();
 testServiceIdentityAcceptsComponentAndEvidencePermutations();
 testServiceIdentityRejectsExtractedStreetPrefix();
 testServiceIdentityRejectsExtractedComponentSuffix();

@@ -813,6 +813,12 @@ function extractUtilityData_(file, driveAgentsPolicy) {
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
   const normalized = normalizeExtraction_(extracted);
+  Object.defineProperty(normalized, 'configured_secondary_headers', {
+    value: getConfiguredSecondaryInvoiceHeaders_(
+      headersBySupply[normalized.supply_type] || []
+    ),
+    enumerable: false
+  });
   inferInvoiceFrequency_(normalized);
   applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
   return normalized;
@@ -1236,7 +1242,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each mutually exclusive top-level printed cost row in sheet_values using its exact header. If one target header represents a combined category, sum only the mutually exclusive top-level rows in the same printed parent section that belong to that category; never combine similarly named rows from separate sections such as consumption versus fixed/power charges. Do not map subordinate lines introduced by "di cui" (or equivalent wording) into a top-level cost header when their amount is already included in an aggregate or parent row; those subordinate amounts are explanatory evidence, not additional costs. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
-    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a field is not printed, not applicable, unreadable, or ambiguous, inspect other current-document tables before adding a concise blocking diagnostic. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem.',
+    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem.',
     'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
       JSON.stringify(localization.supplierFieldDefaults || []) + '.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
@@ -1383,6 +1389,7 @@ function normalizeExtraction_(extracted) {
   normalized.total = normalizeMoney_(normalized.total);
   normalized.problems = Array.isArray(normalized.problems) ?
     normalized.problems.slice() : [];
+  normalizeExtractedInvoiceFrequency_(normalized);
   applyFrequencyOverride_(normalized);
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
@@ -1739,7 +1746,9 @@ function validateExtraction_(extracted) {
     }
     const blockingProblems = extracted.problems.filter(function (problem) {
       return !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
-        !isInformationalTaxInclusionProblem_(problem, extracted);
+        !isInformationalTaxInclusionProblem_(problem, extracted) &&
+        classifyConfiguredSecondaryInvoiceProblem_(problem, extracted).disposition !==
+          'explicit-absence';
     });
     if (blockingProblems.length > 0) {
       return invalidExtraction_('Gemini reported: ' + blockingProblems.join('; '),
@@ -3017,7 +3026,32 @@ function applyFrequencyOverride_(extracted) {
   })[0];
   if (override && override.frequency) {
     extracted.frequency = override.frequency;
-    reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    normalizeExtractedInvoiceFrequency_(extracted);
+    if (extracted.frequency) {
+      reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    }
+  }
+}
+
+function normalizeExtractedInvoiceFrequency_(extracted) {
+  const frequency = String(extracted.frequency || '').trim();
+  extracted.frequency = normalizeInferredFrequency_(frequency);
+  if (!frequency || extracted.frequency) {
+    return;
+  }
+  const recognizedAbsence = /^(?:not\s+(?:explicitly\s+)?(?:printed|indicated|present|reported|applicable|available)|n\s+a|missing|absent|unavailable|non\s+(?:e\s+)?(?:indicata|stampata|presente|riportata|applicabile|disponibile)|assente|mancante)$/i.test(
+    normalizeCellText_(frequency)
+  );
+  const problem = recognizedAbsence ? 'Billing frequency is not printed.' :
+    'Billing frequency value is unsupported.';
+  const alreadyReported = recognizedAbsence ?
+    (extracted.problems || []).some(isMissingFrequencyProblem_) :
+    (extracted.problems || []).some(function (item) {
+      return /^billing frequency value is unsupported\.?$/i.test(String(item || '').trim());
+    });
+  if (!alreadyReported) {
+    extracted.problems = extracted.problems || [];
+    extracted.problems.push(problem);
   }
 }
 
@@ -3039,6 +3073,67 @@ function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
   extracted.problems = (extracted.problems || []).filter(function (problem) {
     return !isMissingFrequencyProblem_(problem);
   });
+}
+
+function isInvoiceCoreMonetaryReconciled_(extracted) {
+  const values = [extracted.cost_consumption, extracted.cost_non_consumption,
+    extracted.vat, extracted.total];
+  return values.every(function (value) {
+    return typeof value === 'number' && isFinite(value);
+  }) && Math.abs(
+    extracted.cost_consumption + extracted.cost_non_consumption + extracted.vat -
+    extracted.total
+  ) <= CONFIG.MONEY_TOLERANCE;
+}
+
+function getConfiguredSecondaryInvoiceHeaders_(headers) {
+  const localization = getLocalization_();
+  const canonicalKeys = [
+    'issueDate', 'supplier', 'identifier', 'contractNumber', 'accountHolder',
+    'serviceAddress', 'customerCode', 'sourceFile', 'year', 'month',
+    'frequency', 'consumptionCost', 'nonConsumptionCosts', 'vat', 'total'
+  ];
+  const excluded = canonicalKeys.reduce(function (all, key) {
+    return all.concat(getHeaderAliases_(key));
+  }, []).concat(localization.electricityBandHeaders || []).concat(
+    (localization.supplierFieldDefaults || []).map(function (item) {
+      return item.header;
+    })
+  ).map(normalizeHeader_);
+  return (headers || []).filter(function (header) {
+    const normalized = normalizeHeader_(header);
+    return normalized && excluded.indexOf(normalized) === -1;
+  });
+}
+
+function classifyConfiguredSecondaryInvoiceProblem_(problem, extracted) {
+  const blocking = { disposition: 'blocking', field: '' };
+  if (!extracted || !isInvoiceCoreMonetaryReconciled_(extracted)) {
+    return blocking;
+  }
+  const text = String(problem || '').trim();
+  if (!text || /[,;]|(?:[.!?])\s+\S/.test(text) ||
+    /(?:ambigu|incert|unreadable|illeggibil|inconsistent|incoerent|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond)/i.test(text)) {
+    return blocking;
+  }
+  const field = (extracted.configured_secondary_headers || []).slice().sort(
+    function (left, right) {
+      return normalizeCellText_(right).length - normalizeCellText_(left).length;
+    }
+  ).filter(function (header) {
+    const normalizedHeader = normalizeCellText_(header);
+    const normalizedProblem = normalizeCellText_(text);
+    return normalizedHeader && (normalizedProblem === normalizedHeader ||
+      normalizedProblem.indexOf(normalizedHeader + ' ') === 0);
+  })[0];
+  if (!field) {
+    return blocking;
+  }
+  const remainder = normalizeCellText_(text).slice(normalizeCellText_(field).length).trim();
+  if (!/^(?:(?:is\s+)?(?:not\s+(?:printed|present|reported|indicated|applicable)|missing|absent|unavailable)|(?:non\s+(?:e\s+)?(?:stampata|stampato|presente|riportata|riportato|indicata|indicato|applicabile)|assente|mancante))(?:\s+(?:on|in|nel|nella)\s+(?:the\s+)?(?:invoice|document|fattura|documento))?$/.test(remainder)) {
+    return blocking;
+  }
+  return { disposition: 'explicit-absence', field: field };
 }
 
 function getCriticalInvoiceProblemFieldPattern_() {
@@ -3070,16 +3165,16 @@ function normalizeInferredFrequency_(value) {
   if (!text) {
     return '';
   }
-  if (/^(?:monthly|month|mensile|mensilmente|mensile)$/i.test(text) ||
-    /\b(?:every\s+)?1\s+(?:month|months|mese|mesi)\b/.test(text)) {
+  if (/^(?:monthly|month|mensile|mensilmente)$/i.test(text) ||
+    /^(?:every\s+)?1\s+(?:month|months|mese|mesi)$/.test(text)) {
     return 'monthly';
   }
   if (/^(?:bimonthly|every\s+two\s+months|bimestrale|bimestralmente)$/i.test(text) ||
-    /\b(?:every\s+)?2\s+(?:month|months|mese|mesi)\b/.test(text)) {
+    /^(?:every\s+)?2\s+(?:month|months|mese|mesi)$/.test(text)) {
     return 'bimonthly';
   }
   if (/^(?:quarterly|every\s+three\s+months|trimestrale|trimestralmente)$/i.test(text) ||
-    /\b(?:every\s+)?3\s+(?:month|months|mese|mesi)\b/.test(text)) {
+    /^(?:every\s+)?3\s+(?:month|months|mese|mesi)$/.test(text)) {
     return 'quarterly';
   }
   return '';
@@ -3228,6 +3323,7 @@ function inferInvoiceFrequency_(extracted) {
   if (!extracted || extracted.document_type !== 'Invoice') {
     return;
   }
+  normalizeExtractedInvoiceFrequency_(extracted);
   if (extracted.frequency) {
     reconcileResolvedInvoiceFrequencyProblems_(extracted);
     return;
