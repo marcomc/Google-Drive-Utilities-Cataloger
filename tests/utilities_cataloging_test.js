@@ -893,8 +893,8 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), true);
-  assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
+  assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the supplier invoice.'), true);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
@@ -1124,6 +1124,17 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(tiedHistory);
   assert.equal(tiedHistory.frequency, '');
 
+  const periodWithConflictingHistory = {
+    ...tiedHistory,
+    period_start: '2026-06-01',
+    period_end: '2026-06-30',
+    frequency: '',
+    problems: []
+  };
+  context.inferInvoiceFrequency_(periodWithConflictingHistory);
+  assert.equal(periodWithConflictingHistory.frequency, '');
+  assert.match(periodWithConflictingHistory.problems.join(' '), /conflicting/);
+
   const conflictingPeriod = {
     ...extracted,
     period_start: '2026-06-01',
@@ -1273,6 +1284,17 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   assert.match(unavailableHistory.problems.join(' '), /could not be corroborated/);
   assert.equal(context.validateExtraction_(unavailableHistory).valid, false);
 
+  const periodWithUnavailableHistory = {
+    ...unavailableHistory,
+    period_start: '2026-06-01',
+    period_end: '2026-06-30',
+    frequency: '',
+    problems: ['Billing frequency is not printed.']
+  };
+  context.inferInvoiceFrequency_(periodWithUnavailableHistory);
+  assert.equal(periodWithUnavailableHistory.frequency, 'monthly');
+  assert.deepEqual(periodWithUnavailableHistory.problems, []);
+
   const noFrequencyEvidence = {
     ...historyOnly,
     frequency: '',
@@ -1290,6 +1312,17 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     /could not be established from the billed period or prior invoices/);
   assert.equal(context.validateExtraction_(noFrequencyEvidence).valid, false);
 
+  const periodWithEmptyHistory = {
+    ...noFrequencyEvidence,
+    period_start: '2026-06-01',
+    period_end: '2026-06-30',
+    frequency: '',
+    problems: ['Frequenza non indicata.']
+  };
+  context.inferInvoiceFrequency_(periodWithEmptyHistory);
+  assert.equal(periodWithEmptyHistory.frequency, 'monthly');
+  assert.deepEqual(periodWithEmptyHistory.problems, []);
+
   [
     ['2026-05-16', '2026-06-15', 'monthly'],
     ['2026-05-16', '2026-07-15', 'bimonthly'],
@@ -1298,6 +1331,47 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   ].forEach(([periodStart, periodEnd, frequency]) => {
     assert.equal(context.inferFrequencyFromPeriod_({ period_start: periodStart, period_end: periodEnd }), frequency);
   });
+}
+
+function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
+  const context = loadCataloger();
+  context.getAutomationConfig_ = () => ({
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'bimonthly'
+    }]
+  });
+  const preservedProblems = [
+    'Frequency evidence is ambiguous.',
+    'Frequency does not match the billing history.',
+    'Billing frequency evidence is conflicting and was left blank.',
+    'Tariff is not applicable.'
+  ];
+  const overridden = {
+    ...validInvoice(),
+    frequency: '',
+    problems: [
+      'Billing frequency is not printed.',
+      'Frequenza di fatturazione non indicata esplicitamente nel documento.',
+      'Billing frequency could not be corroborated from prior invoices.',
+      ...preservedProblems
+    ]
+  };
+  context.applyFrequencyOverride_(overridden);
+  assert.equal(overridden.frequency, 'bimonthly');
+  assert.deepEqual(overridden.problems, preservedProblems);
+
+  const printed = {
+    ...validInvoice(),
+    frequency: 'quarterly',
+    problems: [
+      'Frequency absent.',
+      'Billing frequency could not be established from the billed period or prior invoices.',
+      ...preservedProblems
+    ]
+  };
+  context.inferInvoiceFrequency_(printed);
+  assert.equal(printed.frequency, 'quarterly');
+  assert.deepEqual(printed.problems, preservedProblems);
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
@@ -4841,6 +4915,7 @@ testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
 testInvoiceFrequencyInferenceUsesPeriodAndHistory();
+testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics();
 testServiceIdentityAcceptsComponentAndEvidencePermutations();
 testServiceIdentityRejectsExtractedStreetPrefix();
 testServiceIdentityRejectsExtractedComponentSuffix();

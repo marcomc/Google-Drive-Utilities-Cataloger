@@ -1381,9 +1381,9 @@ function normalizeExtraction_(extracted) {
   normalized.cost_non_consumption = normalizeMoney_(normalized.cost_non_consumption);
   normalized.vat = normalizeMoney_(normalized.vat);
   normalized.total = normalizeMoney_(normalized.total);
-  applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ?
     normalized.problems.slice() : [];
+  applyFrequencyOverride_(normalized);
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
 }
@@ -3017,6 +3017,7 @@ function applyFrequencyOverride_(extracted) {
   })[0];
   if (override && override.frequency) {
     extracted.frequency = override.frequency;
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
   }
 }
 
@@ -3028,8 +3029,16 @@ function isMissingFrequencyProblem_(problem) {
   if (/^billing frequency could not be (?:corroborated from prior invoices|established from the billed period or prior invoices)\.?$/i.test(text)) {
     return true;
   }
-  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)\b/i.test(text) &&
-    !hasCriticalInvoiceFieldMention_(text);
+  if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
+    return false;
+  }
+  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+}
+
+function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
+  extracted.problems = (extracted.problems || []).filter(function (problem) {
+    return !isMissingFrequencyProblem_(problem);
+  });
 }
 
 function getCriticalInvoiceProblemFieldPattern_() {
@@ -3216,23 +3225,27 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
 }
 
 function inferInvoiceFrequency_(extracted) {
-  if (!extracted || extracted.document_type !== 'Invoice' || extracted.frequency) {
+  if (!extracted || extracted.document_type !== 'Invoice') {
+    return;
+  }
+  if (extracted.frequency) {
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
     return;
   }
   const periodFrequency = inferFrequencyFromPeriod_(extracted);
   const historicalEvidence = getHistoricalInvoiceFrequencyEvidence_(extracted);
   const historyConflictsWithPeriod = periodFrequency && historicalEvidence.frequency &&
     periodFrequency !== historicalEvidence.frequency;
-  extracted.frequency = historyConflictsWithPeriod ? '' :
+  const historyVetoesPeriod = historicalEvidence.state === 'conflict' ||
+    historyConflictsWithPeriod;
+  extracted.frequency = historyVetoesPeriod ? '' :
     periodFrequency || historicalEvidence.frequency || '';
   if (extracted.frequency) {
-    extracted.problems = (extracted.problems || []).filter(function (problem) {
-      return !isMissingFrequencyProblem_(problem);
-    });
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
   } else if (historicalEvidence.state === 'unavailable') {
     extracted.problems = extracted.problems || [];
     extracted.problems.push('Billing frequency could not be corroborated from prior invoices.');
-  } else if (historicalEvidence.state === 'conflict' || historyConflictsWithPeriod) {
+  } else if (historyVetoesPeriod) {
     extracted.problems = extracted.problems || [];
     extracted.problems.push('Billing frequency evidence is conflicting and was left blank.');
   } else {
