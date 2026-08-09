@@ -898,6 +898,9 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency evidence is conflicting.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the supplier invoice.'), true);
+  assert.equal(context.isMissingFrequencyProblem_(
+    'La frequenza di fatturazione non è stampata esplicitamente sul documento.'
+  ), true);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -1879,6 +1882,495 @@ function testExtractionInfersMissingFrequencyBeforeValidation() {
   assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), []);
 }
 
+function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
+  const context = loadCataloger();
+  const candidates = [
+    { ...validInvoice(), identifier: '', original_file_id: 'must-not-leak' },
+    { ...validInvoice(), identifier: 'INV-REPAIRED' }
+  ];
+  const repairContexts = [];
+  const events = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return candidates[repairContexts.length - 1];
+  };
+  context.validateExtractedUtilityDataForImport_ = (candidate) =>
+    candidate.identifier ? { valid: true, stage: 'target-spreadsheet' } :
+      context.invalidExtraction_(
+        'Invoice identifier is missing.',
+        'Verify the invoice number in the PDF.',
+        {
+          code: 'invoice_identifier_missing',
+          fields: ['identifier'],
+          repairable: true
+        }
+      );
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.extracted.identifier, 'INV-REPAIRED');
+  assert.equal(result.aiCallCount, 2);
+  assert.equal(result.repairAttemptCount, 1);
+  assert.equal(repairContexts[0], null);
+  assert.equal(repairContexts[1].attempt, 2);
+  assert.equal(repairContexts[1].feedback.version, 1);
+  assert.equal(repairContexts[1].feedback.issues[0].stage, 'extraction');
+  assert.equal(repairContexts[1].feedback.issues[0].code,
+    'invoice_identifier_missing');
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].feedback.issues[0].fields
+  )), ['identifier']);
+  assert.equal(repairContexts[1].previousExtraction.original_file_id, undefined);
+  assert.equal(repairContexts[1].history.length, 1);
+  assert.deepEqual(events.map((entry) => entry.event), [
+    'extraction-validation-completed',
+    'extraction-repair-requested',
+    'extraction-validation-completed',
+    'extraction-repair-succeeded'
+  ]);
+  const eventText = JSON.stringify(events);
+  assert.equal(eventText.includes('SUPPLIER'), false);
+  assert.equal(eventText.includes('INV-REPAIRED'), false);
+  assert.equal(eventText.includes('Invoice identifier is missing'), false);
+}
+
+function testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  const events = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return { ...validInvoice(), total: 99 };
+  };
+  context.validateExtractedUtilityDataForImport_ = () =>
+    context.invalidExtraction_(
+      'Invalid reconciliation.',
+      'Verify costs.',
+      {
+        code: 'monetary_reconciliation_mismatch',
+        repairable: true,
+        fields: ['cost_consumption', 'cost_non_consumption', 'vat', 'total']
+      }
+    );
+  context.logCatalogEvent_ = (event) => events.push(event);
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, false);
+  assert.equal(result.aiCallCount, 3);
+  assert.equal(result.repairAttemptCount, 2);
+  assert.equal(repairContexts.length, 3);
+  assert.equal(repairContexts[1].history.length, 1);
+  assert.equal(repairContexts[2].history.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[2].history.map((entry) => entry.attempt)
+  )), [1, 2]);
+  assert.equal(events.filter((event) =>
+    event === 'extraction-repair-requested').length, 2);
+  assert.equal(events.at(-1), 'extraction-repair-exhausted');
+}
+
+function testExtractionRepairLoopDoesNotRetryNonRepairableState() {
+  const context = loadCataloger();
+  assert.equal(context.invalidExtraction_('Unknown failure.', 'Inspect it.')
+    .repairable, false);
+  let calls = 0;
+  context.extractUtilityData_ = () => {
+    calls += 1;
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () =>
+    context.invalidExtraction_(
+      'The configured target spreadsheet tab does not exist.',
+      'Create or repair the configured spreadsheet tab.',
+      { code: 'target_sheet_missing', repairable: false }
+    );
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(calls, 1);
+  assert.equal(result.aiCallCount, 1);
+  assert.equal(result.validation.repairable, false);
+}
+
+function testExtractionRepairLoopRetriesInvalidStructuredOutput() {
+  const context = loadCataloger();
+  const marked = context.markInvalidExtractionOutput_(new Error(
+    'Gemini extraction field has an invalid type: identifier'
+  ));
+  assert.equal(marked.invalidExtractionOutput, true);
+  assert.equal(marked.extractionIssueCode, 'invalid_extraction_schema');
+  assert.deepEqual(JSON.parse(JSON.stringify(marked.extractionFields)),
+    ['identifier']);
+  const repairContexts = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    if (repairContexts.length === 1) {
+      const error = new Error('Gemini extraction field has an invalid type: identifier');
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_schema';
+      error.extractionFields = ['identifier'];
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () => ({
+    valid: true, stage: 'target-spreadsheet'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_({
+    getId: () => 'file-id'
+  }, 'policy');
+
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.aiCallCount, 2);
+  assert.equal(repairContexts[1].feedback.issues[0].code,
+    'invalid_extraction_schema');
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].feedback.issues[0].fields
+  )), ['identifier']);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[1].previousExtraction
+  )), {});
+}
+
+function testExtractionRepairLoopDefersWhenSharedRuntimeBudgetIsLow() {
+  let now = 1000;
+  const context = loadCataloger({ Date: { now: () => now } });
+  const events = [];
+  let calls = 0;
+  context.extractUtilityData_ = () => {
+    calls += 1;
+    now = 56001;
+    return { ...validInvoice(), identifier: '' };
+  };
+  context.validateExtractedUtilityDataForImport_ = () =>
+    context.invalidExtraction_('Missing identifier.', 'Retry extraction.', {
+      code: 'invoice_identifier_missing',
+      fields: ['identifier'],
+      repairable: true
+    });
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.throws(
+    () => context.extractUtilityDataWithRepair_(
+      { getId: () => 'file-id' }, 'policy', 100001
+    ),
+    /execution time is nearly exhausted/
+  );
+  assert.equal(calls, 1);
+  const deferred = events.find((entry) =>
+    entry.event === 'extraction-repair-deferred');
+  assert.equal(deferred.details.aiCallCount, 1);
+  assert.equal(deferred.details.nextExtractionAttempt, 2);
+  assert.equal(deferred.details.reason, 'runtime-budget');
+  assert.equal(events.filter((entry) =>
+    entry.event === 'extraction-repair-requested').length, 0);
+  assert.equal(JSON.stringify(events).includes('Missing identifier'), false);
+}
+
+function testExtractionRepairLoopPreservesNormalizationSnapshot() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  let calls = 0;
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error(
+        'Gemini extraction has a nonnumeric electricity band consumption value.'
+      );
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_normalization';
+      error.extractionFields = ['sheet_values'];
+      error.extractionSnapshot = { ...validInvoice(), identifier: 'INV-KEEP' };
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () => ({
+    valid: true, stage: 'target-spreadsheet'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_(
+    { getId: () => 'file-id' }, 'policy'
+  );
+  assert.equal(result.validation.valid, true);
+  assert.equal(repairContexts[1].previousExtraction.identifier, 'INV-KEEP');
+}
+
+function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepair() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  let calls = 0;
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    calls += 1;
+    if (calls === 1) {
+      return { ...validInvoice(), identifier: 'INV-LAST-VALID' };
+    }
+    if (calls === 2) {
+      const error = new Error('Invalid Gemini JSON: malformed');
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_json';
+      error.extractionFields = [];
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = (extracted) => ({
+    valid: calls > 2,
+    stage: 'target-spreadsheet',
+    code: calls > 2 ? '' : 'missing_identifier',
+    fields: calls > 2 ? [] : ['identifier'],
+    repairable: true,
+    problem: calls > 2 ? '' : 'Missing identifier',
+    action: 'Re-examine the identifier.'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_(
+    { getId: () => 'file-id' }, 'policy'
+  );
+  assert.equal(result.validation.valid, true);
+  assert.equal(repairContexts[2].previousExtraction.identifier, 'INV-LAST-VALID');
+}
+
+function testGeminiEmptyStopResponseIsRepairableOutput() {
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          candidates: [{ finishReason: 'STOP', content: { parts: [] } }]
+        })
+      })
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-3.6-flash';
+  context.getScriptProperty_ = () => 'developer-secret';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logCatalogEvent_ = () => {};
+  context.logGeminiUsage_ = () => {};
+
+  assert.throws(
+    () => context.callGeminiForPdfWithBackend_(
+      { getBytes: () => [1, 2, 3] }, [], 'policy',
+      { getId: () => 'file-id' }, 'gemini_api', ''
+    ),
+    (error) => error.invalidExtractionOutput === true &&
+      error.extractionIssueCode === 'invalid_extraction_json'
+  );
+}
+
+function testExtractionRepairLoopExhaustsMalformedOutputs() {
+  const context = loadCataloger();
+  const events = [];
+  let calls = 0;
+  context.extractUtilityData_ = () => {
+    calls += 1;
+    const error = new Error('Invalid Gemini JSON: malformed');
+    error.invalidExtractionOutput = true;
+    error.extractionIssueCode = 'invalid_extraction_json';
+    error.extractionFields = [];
+    throw error;
+  };
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.throws(
+    () => context.extractUtilityDataWithRepair_(
+      { getId: () => 'file-id' }, 'policy'
+    ),
+    /Invalid Gemini JSON: malformed/
+  );
+  assert.equal(calls, 3);
+  assert.equal(events.filter((entry) =>
+    entry.event === 'extraction-repair-requested').length, 2);
+  const exhausted = events.at(-1);
+  assert.equal(exhausted.event, 'extraction-repair-exhausted');
+  assert.equal(exhausted.details.aiCallCount, 3);
+  assert.equal(exhausted.details.issueStage, 'raw-output');
+  assert.equal(exhausted.details.issueCode, 'invalid_extraction_json');
+  assert.equal(JSON.stringify(events).includes('malformed'), false);
+}
+
+function testExtractionRepairLoopTracksChangingFeedback() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  const candidates = [
+    { ...validInvoice(), identifier: '' },
+    { ...validInvoice(), identifier: 'INV-2', total: 99 },
+    { ...validInvoice(), identifier: 'INV-2' }
+  ];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return candidates[repairContexts.length - 1];
+  };
+  context.validateExtractedUtilityDataForImport_ = (candidate) => {
+    if (!candidate.identifier) {
+      return context.invalidExtraction_('Missing identifier.', 'Find it.', {
+        code: 'invoice_identifier_missing', fields: ['identifier'], repairable: true
+      });
+    }
+    if (candidate.total === 99) {
+      return context.invalidExtraction_('Mismatch.', 'Reconcile it.', {
+        code: 'monetary_reconciliation_mismatch', fields: ['total'], repairable: true
+      });
+    }
+    return { valid: true, stage: 'target-spreadsheet' };
+  };
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_(
+    { getId: () => 'file-id' }, 'policy'
+  );
+  assert.equal(result.validation.valid, true);
+  assert.equal(repairContexts[2].feedback.issues[0].code,
+    'monetary_reconciliation_mismatch');
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    repairContexts[2].history.map((entry) => entry.code)
+  )), ['invoice_identifier_missing', 'monetary_reconciliation_mismatch']);
+  assert.equal(repairContexts[2].previousExtraction.total, 99);
+  assert.equal(context.buildExtractionRepairPromptLines_(repairContexts[2])
+    .join('\n').includes('persisted across'), false);
+}
+
+function testModelNormalizationFailureIsRepairable() {
+  const context = loadCataloger();
+  assert.equal(context.isModelExtractionNormalizationError_(new Error(
+    'Gemini extraction has a nonnumeric electricity band consumption value.'
+  )), true);
+  assert.equal(context.isModelExtractionNormalizationError_(new Error(
+    'Configured sheet was not found: Electricity'
+  )), false);
+}
+
+function testExtractionValidationPipelineStopsAtTheFailingBoundary() {
+  const context = loadCataloger();
+  const calls = [];
+  context.validateExtraction_ = () => {
+    calls.push('extraction');
+    return { valid: true };
+  };
+  context.validateServiceIdentityForInvoice_ = () => {
+    calls.push('identity');
+    return context.invalidExtraction_(
+      'Identity mismatch.', 'Recheck identity.',
+      {
+        code: 'service_identity_mismatch',
+        fields: ['account_holder'],
+        repairable: true
+      }
+    );
+  };
+  context.validateTargetSheetValues_ = () => {
+    calls.push('target');
+    return { valid: true };
+  };
+
+  const invoice = { ...validInvoice(), address_type: 'unknown' };
+  const result = context.validateExtractedUtilityDataForImport_(invoice);
+
+  assert.equal(result.valid, false);
+  assert.equal(result.stage, 'service-identity');
+  assert.deepEqual(calls, ['extraction', 'identity']);
+  assert.equal(invoice.address_type, 'unknown');
+}
+
+function testExhaustedExtractionRepairDoesNotStartMutations() {
+  const context = loadCataloger();
+  const mutationCalls = [];
+  const extracted = { ...validInvoice(), identifier: '' };
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityDataWithRepair_ = () => ({
+    extracted,
+    validation: {
+      valid: false,
+      stage: 'extraction',
+      code: 'invoice_identifier_missing',
+      problem: 'Invoice identifier is missing.',
+      action: 'Verify the invoice number.',
+      repairable: true
+    },
+    aiCallCount: 3,
+    repairAttemptCount: 2
+  });
+  context.findDuplicate_ = () => {
+    mutationCalls.push('duplicate');
+    return { status: 'none' };
+  };
+  context.saveMutationJournal_ = () => mutationCalls.push('journal');
+  context.getDestinationFolder_ = () => {
+    mutationCalls.push('destination');
+    return {};
+  };
+
+  const result = context.processIntakeFile_({
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 100,
+    getUrl: () => 'https://drive.test/file-id'
+  }, {}, 'policy');
+
+  assert.equal(result.status, 'NEEDS REVIEW');
+  assert.equal(result.problem, 'Invoice identifier is missing.');
+  assert.deepEqual(mutationCalls, []);
+}
+
+function testExtractionRepairPromptRequiresCompleteReplacementWithMemory() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => ({ promptLanguage: 'English' });
+  context.getAutomationConfig_ = () => ({
+    address_rules: [],
+    frequency_overrides: [],
+    canonical_suppliers: ['SUPPLIER'],
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    supplier_aliases: {}
+  });
+  const prompt = context.buildExtractionPrompt_({ Water: [] }, 'policy', {
+    attempt: 3,
+    previousExtraction: { identifier: null, supplier: 'SUPPLIER' },
+    feedback: {
+      version: 1,
+      failed_attempt: 2,
+      max_ai_calls: 3,
+      issues: [{
+        stage: 'extraction',
+        code: 'invoice_identifier_missing',
+        fields: ['identifier'],
+        problem: 'Invoice identifier is missing.',
+        requested_action: 'Verify the invoice number.'
+      }]
+    },
+    history: [
+      { attempt: 1, stage: 'extraction', code: 'invoice_identifier_missing' },
+      { attempt: 2, stage: 'extraction', code: 'invoice_identifier_missing' }
+    ]
+  });
+
+  assert.match(prompt, /attempt 3 of 3/);
+  assert.match(prompt, /Structured deterministic validator feedback/);
+  assert.match(prompt, /Prior repair history/);
+  assert.match(prompt, /Keep previously extracted fields unchanged/);
+  assert.match(prompt, /Return the complete JSON object/);
+  assert.match(prompt, /Do not return a partial patch/);
+  assert.match(prompt, /may not decide whether the document is importable/);
+  assert.match(prompt, /invoice_identifier_missing/);
+  assert.match(prompt, /Inspect alternative labels, tables, summaries/);
+}
+
 function testAmbiguousAddressRulesFailClosed() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
@@ -2232,6 +2724,76 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   assert.match(requests[3].url, /generativelanguage\.googleapis\.com/);
 }
 
+function testRepairContextSurvivesAutomaticVertexFallback() {
+  const requests = [];
+  const events = [];
+  const usageAttempts = [];
+  const responses = [
+    {
+      getResponseCode: () => 429,
+      getContentText: () => JSON.stringify({
+        error: {
+          code: 429,
+          status: 'RESOURCE_EXHAUSTED',
+          message: 'Daily quota exhausted.'
+        }
+      })
+    },
+    {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({
+        candidates: [{
+          finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] }
+        }],
+        usageMetadata: { promptTokenCount: 1 }
+      })
+    }
+  ];
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: (url, options) => {
+        requests.push({ url, payload: JSON.parse(options.payload) });
+        return responses.shift();
+      }
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-2.5-flash';
+  context.getVertexAiLocation_ = () => 'global';
+  context.getScriptProperty_ = (key) => key === 'GEMINI_API_KEY' ?
+    'developer-secret' : 'cataloger-project';
+  context.isAutomaticVertexFallbackEnabled_ = () => true;
+  context.classifyGeminiApiAvailabilityLimit_ = () => 'daily-quota-exhausted';
+  context.activateTemporaryVertexFallback_ = () => {};
+  context.buildExtractionPrompt_ = (_headers, _policy, repairContext) =>
+    'repair-attempt:' + repairContext.attempt;
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+  context.logGeminiUsage_ = (_usage, _file, _backend, _reason,
+    extractionAttempt) => usageAttempts.push(extractionAttempt);
+  const repairContext = {
+    attempt: 2,
+    previousExtraction: { identifier: '' },
+    feedback: { issues: [{ code: 'invoice_identifier_missing' }] },
+    history: []
+  };
+
+  assert.equal(context.callGeminiForPdfWithBackend_(
+    { getBytes: () => [1, 2, 3] }, {}, 'policy',
+    { getId: () => 'file-id' }, 'gemini_api', '', repairContext
+  ), '{}');
+  assert.equal(requests.length, 2);
+  requests.forEach((request) => {
+    assert.equal(request.payload.contents[0].parts[0].text,
+      'repair-attempt:2');
+  });
+  assert.equal(events.filter((entry) =>
+    ['gemini-generation-request', 'gemini-generation-response']
+      .includes(entry.event)).every((entry) =>
+    entry.details.extractionAttempt === 2), true);
+  assert.deepEqual(usageAttempts, [2]);
+  assert.equal(JSON.stringify(events).includes('invoice_identifier_missing'), false);
+}
+
 function testEmailReportIncludesSoftwareVersion() {
   const context = loadCataloger();
   vm.runInContext(
@@ -2346,16 +2908,29 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
   assert.match(report,
     /Detected discrepancy: field Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
-  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [{
-    message: 'catalog-file-processing-error',
-    component: 'drive-utilities-cataloger',
-    applicationVersion: '0.4.1',
-    event: 'catalog-file-processing-error',
-    fileId: 'file-id',
-    errorType: 'Error',
-    errorCategory: 'spreadsheet',
-    failureStage: 'spreadsheet-write-and-verify'
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [
+    {
+      message: 'extraction-validation-completed',
+      component: 'drive-utilities-cataloger',
+      applicationVersion: '0.4.2',
+      event: 'extraction-validation-completed',
+      fileId: 'file-id',
+      extractionAttempt: 1,
+      valid: true,
+      stage: 'target-spreadsheet',
+      issueCode: ''
+    },
+    {
+      message: 'catalog-file-processing-error',
+      component: 'drive-utilities-cataloger',
+      applicationVersion: '0.4.2',
+      event: 'catalog-file-processing-error',
+      fileId: 'file-id',
+      errorType: 'Error',
+      errorCategory: 'spreadsheet',
+      failureStage: 'spreadsheet-write-and-verify'
+    }
+  ]);
   assert.deepEqual(consoleErrors, [
     'Catalog file processing failed for file ID file-id (spreadsheet).'
   ]);
@@ -4976,8 +5551,9 @@ function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   context.getRootFolderId_ = () => 'root-folder-id';
   context.isCatalogMaintenanceActive_ = () => false;
   context.logCatalogEvent_ = () => {};
-  context.processSingleIntakeFileWithinLock_ = (fileId) => {
+  context.processSingleIntakeFileWithinLock_ = (fileId, deadlineAt) => {
     calls.push(fileId);
+    assert.ok(deadlineAt > Date.now());
     return { status: 'IMPORTED' };
   };
   const files = [ignoredFile, file];
@@ -5247,6 +5823,20 @@ testSupplierDefaultsUseRuntimeTargetHeaders();
 testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
+testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid();
+testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory();
+testExtractionRepairLoopDoesNotRetryNonRepairableState();
+testExtractionRepairLoopRetriesInvalidStructuredOutput();
+testExtractionRepairLoopDefersWhenSharedRuntimeBudgetIsLow();
+testExtractionRepairLoopPreservesNormalizationSnapshot();
+testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepair();
+testGeminiEmptyStopResponseIsRepairableOutput();
+testExtractionRepairLoopExhaustsMalformedOutputs();
+testExtractionRepairLoopTracksChangingFeedback();
+testModelNormalizationFailureIsRepairable();
+testExtractionValidationPipelineStopsAtTheFailingBoundary();
+testExhaustedExtractionRepairDoesNotStartMutations();
+testExtractionRepairPromptRequiresCompleteReplacementWithMemory();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
@@ -5255,6 +5845,7 @@ testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
+testRepairContextSurvivesAutomaticVertexFallback();
 testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
 testPreExtractionErrorReportKeepsDataUnavailable();

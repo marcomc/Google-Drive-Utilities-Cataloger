@@ -16,6 +16,7 @@ const driveEventsSource = fs.readFileSync(
 function loadDriveEvents(cloudFetchImplementation) {
   const context = vm.createContext({
     CONFIG: {
+      MAX_RUNTIME_MS: 280000,
       PROPERTY_KEYS: {
         GOOGLE_CLOUD_PROJECT_ID: 'GOOGLE_CLOUD_PROJECT_ID',
         PUBSUB_TOPIC: 'PUBSUB_TOPIC',
@@ -38,6 +39,26 @@ function loadDriveEvents(cloudFetchImplementation) {
   context.cloudFetch_ = cloudFetchImplementation;
   context.recoverPendingElectricityDashboardRefresh_ = () => false;
   return context;
+}
+
+function testDriveEventQueueCapturesEntryDeadline() {
+  const context = loadDriveEvents(() => ({}));
+  let capturedSource = '';
+  let capturedDeadline = 0;
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogProcessingLock_ = (source, callback) => {
+    capturedSource = source;
+    return callback();
+  };
+  context.processDriveEventQueueUnlocked_ = (deadlineAt) => {
+    capturedDeadline = deadlineAt;
+    return { processed: false };
+  };
+
+  context.processDriveEventQueue();
+
+  assert.equal(capturedSource, 'drive-event');
+  assert.ok(capturedDeadline > Date.now());
 }
 
 function testTransportNamesAreInstallationSpecific() {
@@ -767,6 +788,7 @@ function testRecreateDeletesOnlyOwnedSubscription() {
 }
 
 testTransportNamesAreInstallationSpecific();
+testDriveEventQueueCapturesEntryDeadline();
 testEventPollerSkipsAbsentTransport();
 testEventPollerRejectsMismatchedTransportBeforeNetwork();
 testEventPollerPullsFromMatchingTransport();

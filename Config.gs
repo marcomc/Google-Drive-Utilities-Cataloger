@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.4.1',
+  APP_VERSION: '0.4.2',
   DEFAULT_MODEL: 'gemini-3.6-flash',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
@@ -28,6 +28,11 @@ const CONFIG = Object.freeze({
   // Gemini 3.6 Flash defaults to medium thinking. Make it explicit so
   // the Developer API and Vertex AI fallback use the same runtime behavior.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
+  // One initial extraction plus at most two validator-guided repair passes.
+  EXTRACTION_MAX_AI_CALLS: 3,
+  // Reserve time to persist the per-file outcome instead of starting a repair
+  // that is already too close to the Apps Script execution deadline.
+  EXTRACTION_REPAIR_MIN_REMAINING_MS: 45 * 1000,
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,

@@ -216,10 +216,27 @@ fallback enabled at every interval.
 | Change per-document instructions | Edit Drive `AGENTS.md`. | The next eligible PDF run reads it. |
 | Pause safely | Run `removeAutomationTriggers`. | No triggers run; existing files and Sheet rows remain unchanged. |
 
-Each normally processed PDF uses one Gemini generation request. Transient
-network, `408`, generic `429`, and selected `5xx` failures receive one bounded
-retry. A verified Gemini Developer API daily-quota or depleted-prepayment
-response instead retries once on Vertex when automatic fallback is enabled.
+Each normally processed PDF uses one Gemini generation cycle. When
+deterministic validation finds repairable document-data problems, it can request
+at most two additional targeted cycles, for a maximum of three. Each repair
+prompt contains structured issue codes and fields, the previous schema-valid
+extraction when available, and prior-attempt history; it asks for another
+complete schema object rather than a partial patch. Configuration or
+spreadsheet-state errors stop without spending another model call. A repair is
+also deferred when the shared Apps Script runtime budget is nearly exhausted,
+so the file can retain a retryable outcome. The model can revise extracted data
+and evidence but cannot change validation or import policy.
+Structured logs record each validation outcome, targeted repair request,
+successful repair, and exhausted three-call loop using only file ID, attempt
+counts, validation stage, and issue code; extracted document values are not
+logged. These events provide the evidence needed to decide later whether a
+separate AI prompt supervisor would add value.
+
+Transient network, `408`, generic `429`, and selected `5xx` failures receive
+one bounded transport retry. A verified Gemini Developer API daily-quota or
+depleted-prepayment response instead retries once on Vertex when automatic
+fallback is enabled. Those outbound provider attempts remain distinct from the
+three logical extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
@@ -278,6 +295,11 @@ On 2026-08-09, these runtime-policy changes were applied to the live Drive
 uploaded policy byte for byte and confirmed the cadence-provenance and
 secondary-field rules. No PDF, spreadsheet, trigger, or deployment was
 changed.
+
+Later on 2026-08-09, the same live policy was extended with the bounded
+validator-guided repair-loop contract. The Drive API upload and read-back both
+succeeded, the files matched byte for byte, and the two-repair limit was
+confirmed. No PDF, spreadsheet, trigger, or deployment was changed.
 
 The electricity dashboard and its technical sheet are derived presentation
 state. A refresh failure is logged and reported as an import warning after the

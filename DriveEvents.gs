@@ -162,13 +162,14 @@ function getAutomationTriggerStatus_() {
  * intake PDFs identified by the event payload.
  */
 function processDriveEventQueue() {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('drive-event', function () {
-    return processDriveEventQueueUnlocked_();
+    return processDriveEventQueueUnlocked_(deadlineAt);
   });
 }
 
-function processDriveEventQueueUnlocked_() {
+function processDriveEventQueueUnlocked_(deadlineAt) {
   const properties = PropertiesService.getScriptProperties();
   const topic = properties.getProperty(CONFIG.PROPERTY_KEYS.PUBSUB_TOPIC);
   const subscription = properties.getProperty(
@@ -223,7 +224,10 @@ function processDriveEventQueueUnlocked_() {
     messageCount: messages.length,
     eligibleIntakePdfCount: files.length
   });
-  const batch = processEligibleIntakeFiles_(files, rootFolder, 'drive-event');
+  const batch = processEligibleIntakeFiles_(
+    files, rootFolder, 'drive-event',
+    Number(deadlineAt) || Date.now() + CONFIG.MAX_RUNTIME_MS
+  );
   finalizeCatalogResults_(batch.state, batch.results);
   assertStoredPubSubTransportIdentity_(properties, projectId, false);
   cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':acknowledge', {
