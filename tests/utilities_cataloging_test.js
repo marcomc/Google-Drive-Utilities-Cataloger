@@ -2815,7 +2815,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.1',
+      applicationVersion: '0.4.2',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -2826,7 +2826,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.1',
+      applicationVersion: '0.4.2',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
