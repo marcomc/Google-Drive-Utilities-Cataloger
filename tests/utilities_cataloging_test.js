@@ -3793,13 +3793,24 @@ function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
   context.refreshImportedSourceLink_ = () => {};
   context.writeInvoiceRow_ = () => {};
   context.verifyImportedRow_ = () => {};
+  assert.throws(() => context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice()
+  ), /dashboard layout capture failed/);
+  assert.deepEqual(deletedRows, []);
+  assert.equal(dashboardLogs, 1);
+
+  context.captureElectricityDashboardLayoutsForRollback_ = () => ({
+    monthlyF1: { sourceRanges: ['F1:Z13'] }
+  });
   context.refreshElectricityDashboardAfterInvoiceImport_ = () => {
     return { warning: 'Electricity dashboard refresh failed; imported invoice data was retained.' };
   };
   let rollbackRefreshes = 0;
   context.refreshElectricityDashboardAfterRollback_ = (state) => {
     assert.equal(state.sheet, sheet);
-    assert.equal(state.electricityDashboardLayouts, null);
+    assert.equal(JSON.stringify(state.electricityDashboardLayouts), JSON.stringify({
+      monthlyF1: { sourceRanges: ['F1:Z13'] }
+    }));
     rollbackRefreshes += 1;
   };
   const result = context.importUtilityInvoiceToSheet_(

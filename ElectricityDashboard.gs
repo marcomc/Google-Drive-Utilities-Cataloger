@@ -1689,18 +1689,13 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
 }
 
 function markElectricityDashboardRefreshPending_() {
-  try {
-    PropertiesService.getScriptProperties().setProperty(
-      CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING,
-      JSON.stringify({
-        queuedAt: Date.now(),
-        errorCategory: 'dashboard'
-      })
-    );
-  } catch (error) {
-    // The original refresh failure remains reportable even if its retry marker
-    // cannot be persisted in this execution.
-  }
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING,
+    JSON.stringify({
+      queuedAt: Date.now(),
+      errorCategory: 'dashboard'
+    })
+  );
 }
 
 function clearElectricityDashboardRefreshPending_() {

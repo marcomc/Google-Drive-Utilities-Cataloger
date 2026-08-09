@@ -2180,19 +2180,17 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
   let electricityDashboardLayouts = null;
-  let dashboardCaptureWarning = '';
   try {
     electricityDashboardLayouts =
       captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
   } catch (error) {
-    // Dashboard layout capture is derived presentation state. Its failure must
-    // not prevent a verified source row from being imported.
+    // The layout is required to preserve customized managed charts if a later
+    // source-row mutation needs rollback. Stop before changing that row.
     logCatalogEvent_('electricity-dashboard-refresh-failed', {
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
-    dashboardCaptureWarning =
-      'Electricity dashboard refresh failed; imported invoice data was retained.';
+    throw error;
   }
   checkpointMutationJournal_(file.getId(), state, {
     electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
@@ -2253,8 +2251,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       originalRow: existingRow,
       previousRowPayload: previousRowPayload,
       electricityDashboardLayouts: electricityDashboardLayouts,
-      dashboardWarning: dashboardCaptureWarning ||
-        dashboardResult && dashboardResult.warning || ''
+      dashboardWarning: dashboardResult && dashboardResult.warning || ''
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
@@ -2311,8 +2308,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     row: targetRow,
     created: true,
     electricityDashboardLayouts: electricityDashboardLayouts,
-    dashboardWarning: dashboardCaptureWarning ||
-      dashboardResult && dashboardResult.warning || ''
+    dashboardWarning: dashboardResult && dashboardResult.warning || ''
   };
 }
 

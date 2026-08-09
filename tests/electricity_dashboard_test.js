@@ -1842,6 +1842,31 @@ function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 
+function testDashboardRefreshFailsClosedWhenRetryCheckpointCannotPersist() {
+  const context = loadDashboard({
+    api: {
+      getProperty: () => null,
+      setProperty: () => { throw new Error('dashboard retry checkpoint unavailable'); },
+      deleteProperty: () => {}
+    }
+  });
+  const labels = context.getElectricityDashboardLabels_('en');
+  const importedSheet = { getName: () => 'Electricity' };
+  const technical = {};
+  const spreadsheet = { getSheetByName: () => technical };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
+  context.validateElectricityDashboardSource_ = () => true;
+  context.initializeElectricityDashboard_ = () => { throw new Error('refresh failed'); };
+  context.logCatalogEvent_ = () => {};
+  context.classifyCatalogErrorForLog_ = () => 'validation';
+
+  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2027 }
+  ), /dashboard retry checkpoint unavailable/);
+  assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
+}
+
 function testCustomizedChartBuilderStateSurvivesRefresh() {
   const context = loadDashboard();
   const labels = context.getElectricityDashboardLabels_('en');
@@ -2222,6 +2247,7 @@ testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshRebuildsEveryElectricityImport();
 testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh();
+testDashboardRefreshFailsClosedWhenRetryCheckpointCannotPersist();
 testCustomizedChartBuilderStateSurvivesRefresh();
 testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();
