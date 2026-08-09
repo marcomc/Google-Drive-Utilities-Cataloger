@@ -87,6 +87,8 @@ function validInvoice() {
     contract_object: '',
     reference_year: 2026,
     reference_month: '06',
+    frequency: 'monthly',
+    frequency_source_evidence: 'printed',
     period_start: '2026-06-01',
     period_end: '2026-06-30',
     cost_consumption: 10,
@@ -1437,7 +1439,30 @@ function testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconcili
         configured_secondary_headers: [configuredHeader],
         problems: [problem]
       }).valid, true, `${locale}: ${problem}`);
+      assert.equal(context.validateExtraction_({
+        ...extracted,
+        configured_secondary_headers: [configuredHeader],
+        sheet_values: [{ header: configuredHeader, value: null }],
+        problems: [problem]
+      }).valid, true, `${locale}: null ${problem}`);
     });
+    ['', 0, false].forEach((value) => {
+      assert.equal(context.validateExtraction_({
+        ...extracted,
+        configured_secondary_headers: [configuredHeader],
+        sheet_values: [{ header: configuredHeader, value }],
+        problems: [allowedProblems[0]]
+      }).valid, false, `${locale}: non-null ${String(value)}`);
+    });
+    assert.equal(context.validateExtraction_({
+      ...extracted,
+      configured_secondary_headers: [configuredHeader],
+      sheet_values: [
+        { header: configuredHeader, value: null },
+        { header: configuredHeader.toUpperCase(), value: null }
+      ],
+      problems: [allowedProblems[0]]
+    }).valid, false, `${locale}: duplicate normalized values`);
     [
       `${configuredHeader} is unreadable.`,
       `${configuredHeader} is not applicable but ambiguous.`,
@@ -1540,7 +1565,8 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
       sheet_by_supply: {}
     });
     const extracted = context.normalizeExtraction_({
-      ...validInvoice(), frequency: unsupported, problems: []
+      ...validInvoice(), frequency: unsupported,
+      frequency_source_evidence: null, problems: []
     });
     context.inferInvoiceFrequency_(extracted);
     assert.equal(extracted.frequency, 'monthly', `${locale}: ${unsupported}`);
@@ -1559,13 +1585,31 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
     ['quarterly', 'quarterly'],
     ['trimestrale', 'quarterly'],
     ['annual', 'annual'],
-    ['annuale', 'annual']
+    ['annuale', 'annual'],
+    ['semiannual', 'semiannual'],
+    ['weekly', 'weekly'],
+    ['every 4 months', 'every 4 months']
   ].forEach(([printed, canonical]) => {
-    const extracted = { frequency: printed, problems: [] };
+    const extracted = {
+      frequency: printed, frequency_source_evidence: 'printed', problems: []
+    };
     supportedContext.normalizeExtractedInvoiceFrequency_(extracted);
     assert.equal(extracted.frequency, canonical, printed);
     assert.deepEqual(extracted.problems, [], printed);
   });
+  const unprovenAnnual = {
+    ...validInvoice(),
+    frequency: 'annual',
+    frequency_source_evidence: null,
+    problems: []
+  };
+  supportedContext.normalizeExtractedInvoiceFrequency_(unprovenAnnual);
+  assert.equal(unprovenAnnual.frequency, '');
+  assert.match(unprovenAnnual.problems.join(' '), /lacks printed provenance/);
+  assert.equal(supportedContext.validateExtraction_(unprovenAnnual).valid, false);
+  assert.throws(() => supportedContext.validateRawExtractionShape_({
+    ...validInvoice(), frequency_source_evidence: 'inferred'
+  }), /frequency provenance is invalid/);
 
   const overrideContext = loadCataloger();
   overrideContext.getAutomationConfig_ = () => ({
@@ -1599,6 +1643,32 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
   assert.equal(unsupportedWithOverride.frequency, 'monthly');
   assert.match(unsupportedWithOverride.problems.join(' '), /unsupported/);
   assert.equal(overrideContext.validateExtraction_(unsupportedWithOverride).valid, false);
+
+  const productionContext = loadCataloger();
+  productionContext.getAutomationConfig_ = () => ({
+    locale: 'en',
+    canonical_suppliers: ['SUPPLIER'],
+    supplier_aliases: {},
+    canonical_supplies: ['Water'],
+    supply_aliases: {},
+    address_rules: [],
+    address_missing_type: 'import',
+    sheet_by_supply: {},
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'installation-cycle'
+    }]
+  });
+  const productionOverride = productionContext.normalizeExtraction_({
+    ...validInvoice(),
+    frequency: null,
+    frequency_source_evidence: null,
+    problems: ['Billing frequency is not printed.']
+  });
+  productionContext.inferInvoiceFrequency_(productionOverride);
+  assert.equal(productionOverride.frequency, 'installation-cycle');
+  assert.deepEqual(productionOverride.problems, []);
+  assert.equal(JSON.stringify(productionOverride).includes(
+    'frequency_override_authoritative_'), false);
 }
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
@@ -1678,8 +1748,13 @@ function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
   context.SpreadsheetApp.openById = (id) => ({ id });
   const events = [];
   context.logCatalogEvent_ = (event) => events.push(event);
+  context.isElectricityDashboardRefreshTerminal_ = (result) =>
+    result && ['refreshed', 'not-applicable'].includes(result.state);
   let refreshes = 0;
-  context.initializeElectricityDashboard_ = () => { refreshes += 1; };
+  context.initializeElectricityDashboard_ = () => {
+    refreshes += 1;
+    return { state: 'refreshed', reason: 'test' };
+  };
 
   assert.equal(context.recoverPendingElectricityDashboardRefresh_(), true);
   assert.equal(refreshes, 1);
@@ -1687,11 +1762,22 @@ function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
   assert.deepEqual(events, ['electricity-dashboard-refresh-recovered']);
 
   properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING = JSON.stringify({ queuedAt: 0 });
+  context.initializeElectricityDashboard_ = () => ({
+    state: 'deferred', reason: 'missing-source'
+  });
+  assert.equal(context.recoverPendingElectricityDashboardRefresh_(), false);
+  assert.ok(properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING);
+  assert.deepEqual(events, [
+    'electricity-dashboard-refresh-recovered',
+    'electricity-dashboard-refresh-deferred'
+  ]);
+
   context.initializeElectricityDashboard_ = () => { throw new Error('still unavailable'); };
   assert.equal(context.recoverPendingElectricityDashboardRefresh_(), false);
   assert.ok(properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING);
   assert.deepEqual(events, [
     'electricity-dashboard-refresh-recovered',
+    'electricity-dashboard-refresh-deferred',
     'electricity-dashboard-refresh-retry-failed'
   ]);
 }
@@ -1907,6 +1993,7 @@ function testDeveloperApiKeyUsesHeader() {
       'reference_year',
       'reference_month',
       'frequency',
+      'frequency_source_evidence',
       'period_start',
       'period_end',
       'consumption_description',

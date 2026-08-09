@@ -254,11 +254,30 @@ blocking diagnostic; it never copies a transaction-specific value from another
 invoice. An explicit printed frequency or reviewed configuration override
 remains authoritative.
 
-Explicit absence, non-applicability, unreadability, or ambiguity of configured
-writable secondary fields blocks import. The narrow reviewed
+Explicit absence or non-applicability of a configured writable secondary field
+is non-blocking only after monetary reconciliation and only when the matching
+normalized `sheet_values` entry is omitted or exactly `null`. Unreadable,
+ambiguous, non-null, or duplicate evidence blocks import. The narrow reviewed
 subscriber-identifier, tax-inclusion, and supplier-default exceptions remain in
 force. `IMPORTED WITH WARNINGS` is reserved for a retained import whose
 electricity dashboard refresh failed.
+
+Cadence reported by extraction is trusted only with explicit printed
+provenance. Reviewed configuration overrides remain authoritative, while
+period/history inference stays limited to supported canonical cadence values.
+Invalid provenance or unsupported unproven model text blocks import.
+
+Dashboard refresh recovery clears its pending marker only after an explicit
+terminal refresh result or a reviewed non-applicable result. Missing mappings,
+missing sources, and invalid unmanaged no-op states remain deferred and retain
+the marker. A marker-write failure is logged best-effort and cannot roll back a
+verified invoice row.
+
+On 2026-08-09, these runtime-policy changes were applied to the live Drive
+`AGENTS.md` in the configured intake folder. A Drive API read-back matched the
+uploaded policy byte for byte and confirmed the cadence-provenance and
+secondary-field rules. No PDF, spreadsheet, trigger, or deployment was
+changed.
 
 The electricity dashboard and its technical sheet are derived presentation
 state. A refresh failure is logged and reported as an import warning after the

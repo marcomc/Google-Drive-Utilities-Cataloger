@@ -92,11 +92,11 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
   const headerAliases = localization.headerAliases;
   const electricitySheetName = getElectricitySupplySheetName_(automationConfig);
   if (!electricitySheetName) {
-    return;
+    return { state: 'deferred', reason: 'missing-mapping' };
   }
   const electricity = spreadsheet.getSheetByName(electricitySheetName);
   if (!electricity) {
-    return;
+    return { state: 'deferred', reason: 'missing-source' };
   }
   const displayedDashboard = spreadsheet.getSheetByName(labels.sheet);
   let technical = spreadsheet.getSheetByName(labels.dataSheet);
@@ -105,13 +105,13 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
     // Existing installations may have a user-owned formula dashboard instead
     // of the managed technical-sheet layout. Its formulas already expand over
     // the source tab, so leave its charts and presentation untouched.
-    return { legacyFormulaDashboard: true };
+    return { state: 'refreshed', reason: 'legacy-formula-dashboard' };
   }
   if (!validateElectricityDashboardSource_(electricity, labels, headerAliases)) {
     if (displayedDashboard || technical) {
       throw new Error('Electricity dashboard source headers are missing or invalid.');
     }
-    return;
+    return { state: 'deferred', reason: 'invalid-source' };
   }
   const dashboardCreation = reconcileElectricityDashboardCreation_(
     spreadsheet, labels);
@@ -241,6 +241,23 @@ function initializeElectricityDashboard_(spreadsheet, automationConfig, options)
       }
     }
     throw error;
+  }
+  return { state: 'refreshed', reason: 'managed-dashboard' };
+}
+
+function isElectricityDashboardRefreshTerminal_(result) {
+  return Boolean(result &&
+    (result.state === 'refreshed' || result.state === 'not-applicable'));
+}
+
+function markElectricityDashboardRefreshPendingBestEffort_() {
+  try {
+    markElectricityDashboardRefreshPending_();
+  } catch (markerError) {
+    logCatalogEvent_('electricity-dashboard-refresh-marker-failed', {
+      errorType: markerError.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(markerError)
+    });
   }
 }
 
@@ -1639,7 +1656,7 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
   automationConfig, importedSheet, extracted) {
   if (!importedSheet || importedSheet.getName() !==
     getElectricitySupplySheetName_(automationConfig)) {
-    return { warning: '' };
+    return { warning: '', refresh: { state: 'not-applicable', reason: 'other-supply' } };
   }
   try {
     const labels = getElectricityDashboardLabels_(automationConfig.locale || 'en');
@@ -1647,18 +1664,38 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     const technical = spreadsheet.getSheetByName(labels.dataSheet);
     if (!technical) {
       if (dashboard) {
-        initializeElectricityDashboard_(spreadsheet, automationConfig, {
+        const refreshResult = initializeElectricityDashboard_(spreadsheet, automationConfig, {
           extendManagedRanges: true
         });
-        clearElectricityDashboardRefreshPending_();
+        if (isElectricityDashboardRefreshTerminal_(refreshResult)) {
+          clearElectricityDashboardRefreshPending_();
+        } else {
+          markElectricityDashboardRefreshPendingBestEffort_();
+          logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+            reason: refreshResult && refreshResult.reason || 'unknown'
+          });
+        }
+        return { warning: refreshResult.state === 'deferred' ?
+          'Electricity dashboard refresh was deferred; imported invoice data was retained.' : '',
+          refresh: refreshResult };
       }
-      return { warning: '' };
+      markElectricityDashboardRefreshPendingBestEffort_();
+      logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+        reason: 'missing-dashboard-artifacts'
+      });
+      return { warning: 'Electricity dashboard refresh was deferred; imported invoice data was retained.',
+        refresh: { state: 'deferred', reason: 'missing-dashboard-artifacts' } };
     }
     if (!isManagedElectricityDashboardTechnicalSheet_(technical, labels)) {
       if (dashboard) {
         throw new Error('Electricity dashboard technical sheet is unmanaged.');
       }
-      return { warning: '' };
+      markElectricityDashboardRefreshPendingBestEffort_();
+      logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+        reason: 'unmanaged-technical-sheet'
+      });
+      return { warning: 'Electricity dashboard refresh was deferred; imported invoice data was retained.',
+        refresh: { state: 'deferred', reason: 'unmanaged-technical-sheet' } };
     }
     // Keep the technical formula reservation authoritative for every electricity
     // import, including an import whose year is already represented in a chart.
@@ -1669,11 +1706,19 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     // new year is already present. Rebuild on every electricity import so both
     // additions and removals are reflected, and grow a range only when its
     // captured boundary has new data beyond it.
-    initializeElectricityDashboard_(spreadsheet, automationConfig, {
+    const refreshResult = initializeElectricityDashboard_(spreadsheet, automationConfig, {
       extendManagedRanges: true
     });
+    if (!isElectricityDashboardRefreshTerminal_(refreshResult)) {
+      markElectricityDashboardRefreshPendingBestEffort_();
+      logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+        reason: refreshResult && refreshResult.reason || 'unknown'
+      });
+      return { warning: 'Electricity dashboard refresh was deferred; imported invoice data was retained.',
+        refresh: refreshResult };
+    }
     clearElectricityDashboardRefreshPending_();
-    return { warning: '' };
+    return { warning: '', refresh: refreshResult };
   } catch (error) {
     // Dashboard sheets and charts are derived presentation state. The source
     // invoice row has already passed its own write and verification contract.
@@ -1681,16 +1726,7 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
-    try {
-      markElectricityDashboardRefreshPending_();
-    } catch (markerError) {
-      // The verified invoice row is authoritative. Losing the derived-state
-      // retry marker must not escape into import rollback.
-      logCatalogEvent_('electricity-dashboard-refresh-marker-failed', {
-        errorType: markerError.name || 'Error',
-        errorCategory: classifyCatalogErrorForLog_(markerError)
-      });
-    }
+    markElectricityDashboardRefreshPendingBestEffort_();
     return {
       warning: 'Electricity dashboard refresh failed; imported invoice data was retained.'
     };

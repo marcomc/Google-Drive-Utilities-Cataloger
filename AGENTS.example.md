@@ -107,10 +107,16 @@ manual review.
   independent earlier invoices for the same supplier and supply. Conflicting,
   unavailable, or insufficient cadence evidence blocks import. Never copy
   transaction-specific values from earlier invoices.
-- An absent, inapplicable, unreadable, or ambiguous configured secondary field
-  blocks import. Inspect other current-document tables before reporting the
-  diagnostic. The reviewed subscriber-identifier, tax-inclusion, and
-  supplier-default exceptions remain narrow and unchanged.
+- Treat a non-inferred cadence as authoritative only when extraction marks it
+  as printed. Reviewed configuration overrides remain authoritative. Missing
+  provenance, invalid provenance, and unsupported model prose block import.
+- An unreadable or ambiguous configured secondary field blocks import. Inspect
+  other current-document tables before reporting the diagnostic. The reviewed
+  subscriber-identifier, tax-inclusion, and supplier-default exceptions remain
+  narrow and unchanged.
+- A configured secondary-field absence is non-blocking only when its exact
+  normalized `sheet_values` entry is omitted or has value `null`. Empty text,
+  zero, false, or duplicate normalized entries remain blocking.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.

@@ -327,12 +327,15 @@ function testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists() {
       initializationAliases = headerAliases;
       return false;
     };
-  context.initializeElectricityDashboard_({
+  const deferred = context.initializeElectricityDashboard_({
     getSheetByName: (name) => name === 'Luce' ? {} : null
   }, {
     locale: 'it',
     canonical_supplies: ['luce'],
     sheet_by_supply: { luce: 'Luce' }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(deferred)), {
+    state: 'deferred', reason: 'invalid-source'
   });
   assert.equal(JSON.stringify(initializationAliases),
     JSON.stringify(localization.headerAliases));
@@ -1770,6 +1773,7 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
   context.initializeElectricityDashboard_ = (_spreadsheet, _config, value) => {
     refreshes += 1;
     options.push(value);
+    return { state: 'refreshed', reason: 'test' };
   };
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2027 });
@@ -1789,7 +1793,11 @@ function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
   const spreadsheet = { getSheetByName: () => technical };
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
   let repaired = 0;
-  context.initializeElectricityDashboard_ = () => { repaired += 1; };
+  context.initializeElectricityDashboard_ = () => {
+    repaired += 1;
+    return { state: 'refreshed', reason: 'test' };
+  };
+  context.logCatalogEvent_ = () => {};
   assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: (name) => name === labels.sheet ? {} : null
   }, config, importedSheet, { reference_year: 2026 }));
@@ -1834,7 +1842,9 @@ function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
   ]);
   assert.equal(typeof pending.queuedAt, 'number');
   assert.equal(pending.errorCategory, 'dashboard');
-  context.initializeElectricityDashboard_ = () => {};
+  context.initializeElectricityDashboard_ = () => ({
+    state: 'refreshed', reason: 'test'
+  });
   assert.equal(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2027 }
   ).warning, '');

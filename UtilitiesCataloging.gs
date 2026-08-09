@@ -128,9 +128,15 @@ function recoverPendingElectricityDashboardRefresh_() {
   try {
     const automationConfig = getAutomationConfig_();
     const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
-    initializeElectricityDashboard_(spreadsheet, automationConfig, {
+    const refreshResult = initializeElectricityDashboard_(spreadsheet, automationConfig, {
       extendManagedRanges: true
     });
+    if (!isElectricityDashboardRefreshTerminal_(refreshResult)) {
+      logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+        reason: refreshResult && refreshResult.reason || 'unknown'
+      });
+      return false;
+    }
     properties.deleteProperty(propertyKey);
     logCatalogEvent_('electricity-dashboard-refresh-recovered', {});
     return true;
@@ -995,6 +1001,7 @@ function buildExtractionResponseSchema_() {
     'reference_year',
     'reference_month',
     'frequency',
+    'frequency_source_evidence',
     'period_start',
     'period_end',
     'consumption_description',
@@ -1033,6 +1040,10 @@ function buildExtractionResponseSchema_() {
       reference_year: { type: ['integer', 'null'] },
       reference_month: { type: ['string', 'null'], pattern: '^(0[1-9]|1[0-2])$' },
       frequency: nullableString,
+      frequency_source_evidence: {
+        type: ['string', 'null'],
+        enum: ['printed', null]
+      },
       period_start: nullableString,
       period_end: nullableString,
       consumption_description: nullableString,
@@ -1228,6 +1239,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
     '  "frequency": "text or null",',
+    '  "frequency_source_evidence": "printed or null",',
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
     '  "consumption_description": "concise text or null",',
@@ -1249,7 +1261,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
-    'For an Invoice, if the billing frequency is not printed explicitly or is uncertain, return frequency as null and add a concise diagnostic. The runtime may infer monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply. If cadence cannot be established or conflicts, the diagnostic blocks import. Do not invent a different cadence or copy a transaction-specific value from earlier invoices.',
+    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed; otherwise set it to null. If the billing frequency is not printed explicitly or is uncertain, return frequency as null and add a concise diagnostic. The runtime may infer monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply. If cadence cannot be established or conflicts, the diagnostic blocks import. Do not invent a different cadence or copy a transaction-specific value from earlier invoices.',
     'For non-invoice documents, classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. For invoices, address_type is finalized by the runtime comparison with the target supply identity. If no printed service address is present, return null address components and add a concise problem.',
     'Apply these frequency overrides when supplier and supply match: ' +
@@ -1299,6 +1311,7 @@ function validateRawExtractionShape_(extracted) {
     'contract_object',
     'reference_month',
     'frequency',
+    'frequency_source_evidence',
     'period_start',
     'period_end',
     'consumption_description'
@@ -1308,6 +1321,11 @@ function validateRawExtractionShape_(extracted) {
       throw new Error('Gemini extraction field has an invalid type: ' + field);
     }
   });
+  if (extracted.frequency_source_evidence !== null &&
+    extracted.frequency_source_evidence !== undefined &&
+    extracted.frequency_source_evidence !== 'printed') {
+    throw new Error('Gemini extraction frequency provenance is invalid.');
+  }
   ['cost_consumption', 'cost_non_consumption', 'vat', 'total'].forEach(
     function (field) {
       const value = extracted[field];
@@ -1389,6 +1407,8 @@ function normalizeExtraction_(extracted) {
   normalized.total = normalizeMoney_(normalized.total);
   normalized.problems = Array.isArray(normalized.problems) ?
     normalized.problems.slice() : [];
+  normalized.frequency_source_evidence =
+    normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
   normalizeExtractedInvoiceFrequency_(normalized);
   applyFrequencyOverride_(normalized);
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
@@ -3029,6 +3049,11 @@ function applyFrequencyOverride_(extracted) {
     extracted.frequency = isRecognizedMissingFrequencyValue_(configuredFrequency) ? '' :
       normalizeExplicitInvoiceFrequency_(configuredFrequency) || configuredFrequency;
     if (extracted.frequency) {
+      Object.defineProperty(extracted, 'frequency_override_authoritative_', {
+        value: true,
+        enumerable: false,
+        configurable: true
+      });
       reconcileResolvedInvoiceFrequencyProblems_(extracted);
     } else if (!(extracted.problems || []).some(isMissingFrequencyProblem_)) {
       extracted.problems = extracted.problems || [];
@@ -3039,17 +3064,19 @@ function applyFrequencyOverride_(extracted) {
 
 function normalizeExtractedInvoiceFrequency_(extracted) {
   const frequency = String(extracted.frequency || '').trim();
-  extracted.frequency = normalizeExplicitInvoiceFrequency_(frequency);
+  extracted.frequency = extracted.frequency_source_evidence === 'printed' ?
+    normalizeExplicitInvoiceFrequency_(frequency) : '';
   if (!frequency || extracted.frequency) {
     return;
   }
   const recognizedAbsence = isRecognizedMissingFrequencyValue_(frequency);
   const problem = recognizedAbsence ? 'Billing frequency is not printed.' :
-    'Billing frequency value is unsupported.';
+    'Billing frequency value is unsupported or lacks printed provenance.';
   const alreadyReported = recognizedAbsence ?
     (extracted.problems || []).some(isMissingFrequencyProblem_) :
     (extracted.problems || []).some(function (item) {
-      return /^billing frequency value is unsupported\.?$/i.test(String(item || '').trim());
+      return /^billing frequency value is unsupported or lacks printed provenance\.?$/i.test(
+        String(item || '').trim());
     });
   if (!alreadyReported) {
     extracted.problems = extracted.problems || [];
@@ -3064,6 +3091,10 @@ function isRecognizedMissingFrequencyValue_(value) {
 }
 
 function normalizeExplicitInvoiceFrequency_(value) {
+  const printed = String(value || '').trim();
+  if (!printed || isRecognizedMissingFrequencyValue_(printed)) {
+    return '';
+  }
   const inferred = normalizeInferredFrequency_(value);
   if (inferred) {
     return inferred;
@@ -3073,7 +3104,7 @@ function normalizeExplicitInvoiceFrequency_(value) {
     /^(?:every\s+1\s+year|ogni\s+1\s+anno)$/.test(text)) {
     return 'annual';
   }
-  return '';
+  return printed;
 }
 
 function isMissingFrequencyProblem_(problem) {
@@ -3148,6 +3179,14 @@ function classifyConfiguredSecondaryInvoiceProblem_(problem, extracted) {
       normalizedProblem.indexOf(normalizedHeader + ' ') === 0);
   })[0];
   if (!field) {
+    return blocking;
+  }
+  const normalizedField = normalizeHeader_(field);
+  const matchingValues = (extracted.sheet_values || []).filter(function (entry) {
+    return entry && normalizeHeader_(entry.header) === normalizedField;
+  });
+  if (matchingValues.length > 1 ||
+    matchingValues.length === 1 && matchingValues[0].value !== null) {
     return blocking;
   }
   const remainder = normalizeCellText_(text).slice(normalizeCellText_(field).length).trim();
@@ -3342,6 +3381,10 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
 
 function inferInvoiceFrequency_(extracted) {
   if (!extracted || extracted.document_type !== 'Invoice') {
+    return;
+  }
+  if (extracted.frequency_override_authoritative_ === true) {
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
     return;
   }
   normalizeExtractedInvoiceFrequency_(extracted);
