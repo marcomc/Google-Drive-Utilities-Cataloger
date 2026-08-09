@@ -2110,6 +2110,43 @@ function testExtractionRepairLoopPreservesNormalizationSnapshot() {
   assert.equal(repairContexts[1].previousExtraction.identifier, 'INV-KEEP');
 }
 
+function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepair() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  let calls = 0;
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    calls += 1;
+    if (calls === 1) {
+      return { ...validInvoice(), identifier: 'INV-LAST-VALID' };
+    }
+    if (calls === 2) {
+      const error = new Error('Invalid Gemini JSON: malformed');
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_json';
+      error.extractionFields = [];
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = (extracted) => ({
+    valid: calls > 2,
+    stage: 'target-spreadsheet',
+    code: calls > 2 ? '' : 'missing_identifier',
+    fields: calls > 2 ? [] : ['identifier'],
+    repairable: true,
+    problem: calls > 2 ? '' : 'Missing identifier',
+    action: 'Re-examine the identifier.'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_(
+    { getId: () => 'file-id' }, 'policy'
+  );
+  assert.equal(result.validation.valid, true);
+  assert.equal(repairContexts[2].previousExtraction.identifier, 'INV-LAST-VALID');
+}
+
 function testGeminiEmptyStopResponseIsRepairableOutput() {
   const context = loadCataloger({
     UrlFetchApp: {
@@ -5792,6 +5829,7 @@ testExtractionRepairLoopDoesNotRetryNonRepairableState();
 testExtractionRepairLoopRetriesInvalidStructuredOutput();
 testExtractionRepairLoopDefersWhenSharedRuntimeBudgetIsLow();
 testExtractionRepairLoopPreservesNormalizationSnapshot();
+testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepair();
 testGeminiEmptyStopResponseIsRepairableOutput();
 testExtractionRepairLoopExhaustsMalformedOutputs();
 testExtractionRepairLoopTracksChangingFeedback();

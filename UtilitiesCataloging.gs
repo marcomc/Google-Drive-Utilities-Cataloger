@@ -821,6 +821,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
   const history = [];
   let repairContext = null;
   let extracted = null;
+  let lastValidExtraction = null;
   let validation = null;
 
   for (let attempt = 1; attempt <= CONFIG.EXTRACTION_MAX_AI_CALLS;
@@ -830,12 +831,13 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
     }
     try {
       extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext);
+      lastValidExtraction = buildExtractionRepairSnapshot_(extracted);
       validation = validateExtractedUtilityDataForImport_(extracted);
     } catch (error) {
       if (!error.invalidExtractionOutput) {
         throw error;
       }
-      extracted = error.extractionSnapshot || {};
+      extracted = error.extractionSnapshot || lastValidExtraction || {};
       validation = withExtractionValidationStage_(invalidExtraction_(
         'Gemini returned extraction JSON that failed deterministic validation.',
         'Re-examine the PDF and return a complete object matching the required schema.',
