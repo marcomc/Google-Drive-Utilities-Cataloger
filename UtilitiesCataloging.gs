@@ -237,7 +237,8 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
     logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
-    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
+      startedAt + CONFIG.MAX_RUNTIME_MS);
     results.push(result);
     try {
       addOperatorLinksToResult_(result, rootFolder);
@@ -253,7 +254,9 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
   return { results: results, state: state };
 }
 
-function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
+function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
+  const processingDeadlineAt = Number(deadlineAt) ||
+    Date.now() + CONFIG.MAX_RUNTIME_MS;
   const originalName = file.getName();
   const state = {
     renamed: false,
@@ -282,7 +285,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     const binaryHash = sha256ForFile_(file);
     const extractionResult = extractUtilityDataWithRepair_(
-      file, driveAgentsPolicy
+      file, driveAgentsPolicy, processingDeadlineAt
     );
     const extracted = extractionResult.extracted;
     state.extracted = extracted;
@@ -804,7 +807,9 @@ function addOperatorLinksToResult_(result, rootFolder) {
   return result;
 }
 
-function extractUtilityDataWithRepair_(file, driveAgentsPolicy) {
+function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
+  const repairDeadlineAt = Number(deadlineAt) ||
+    Date.now() + CONFIG.MAX_RUNTIME_MS;
   const history = [];
   let repairContext = null;
   let extracted = null;
@@ -812,6 +817,23 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy) {
 
   for (let attempt = 1; attempt <= CONFIG.EXTRACTION_MAX_AI_CALLS;
     attempt += 1) {
+    if (attempt > 1 && Date.now() +
+      CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS >= repairDeadlineAt) {
+      logCatalogEvent_('extraction-repair-deferred', Object.assign(
+        describeFileForLog_(file), {
+          aiCallCount: attempt - 1,
+          nextExtractionAttempt: attempt,
+          issueCode: validation && validation.code || '',
+          issueStage: validation && validation.stage || 'extraction',
+          reason: 'runtime-budget'
+        }
+      ));
+      const deadlineError = new Error(
+        'Extraction repair was deferred because execution time is nearly exhausted.'
+      );
+      deadlineError.extractionRepairDeferred = true;
+      throw deadlineError;
+    }
     try {
       extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext);
       validation = validateExtractedUtilityDataForImport_(extracted);
@@ -992,7 +1014,18 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
   }
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
-  const normalized = normalizeExtraction_(extracted);
+  let normalized;
+  try {
+    normalized = normalizeExtraction_(extracted);
+  } catch (error) {
+    if (!isModelExtractionNormalizationError_(error)) {
+      throw error;
+    }
+    const marked = markInvalidExtractionOutput_(error);
+    marked.extractionIssueCode = 'invalid_extraction_normalization';
+    marked.extractionFields = ['sheet_values'];
+    throw marked;
+  }
   Object.defineProperty(normalized, 'configured_secondary_headers', {
     value: getConfiguredSecondaryInvoiceHeaders_(
       headersBySupply[normalized.supply_type] || []
@@ -1014,6 +1047,11 @@ function markInvalidExtractionOutput_(error) {
   );
   marked.extractionFields = fieldMatch ? [fieldMatch[1]] : [];
   return marked;
+}
+
+function isModelExtractionNormalizationError_(error) {
+  return /^Gemini extraction has a nonnumeric electricity band consumption value\.$/
+    .test(String(error && error.message || error));
 }
 
 function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
@@ -3472,7 +3510,7 @@ function isMissingFrequencyProblem_(problem) {
   if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
     return false;
   }
-  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+  return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
 }
 
 function reconcileResolvedInvoiceFrequencyProblems_(extracted) {

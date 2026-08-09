@@ -30,6 +30,9 @@ const CONFIG = Object.freeze({
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
+  // Reserve time to persist the per-file outcome instead of starting a repair
+  // that is already too close to the Apps Script execution deadline.
+  EXTRACTION_REPAIR_MIN_REMAINING_MS: 45 * 1000,
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,

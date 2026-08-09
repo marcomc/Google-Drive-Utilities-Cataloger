@@ -219,10 +219,12 @@ fallback enabled at every interval.
 Each normally processed PDF uses one Gemini generation cycle. When
 deterministic validation finds repairable document-data problems, it can request
 at most two additional targeted cycles, for a maximum of three. Each repair
-prompt contains structured issue codes and fields, the previous complete
-extraction, and prior-attempt history; it asks for another complete schema
-object rather than a partial patch. Configuration or spreadsheet-state errors
-stop without spending another model call. The model can revise extracted data
+prompt contains structured issue codes and fields, the previous schema-valid
+extraction when available, and prior-attempt history; it asks for another
+complete schema object rather than a partial patch. Configuration or
+spreadsheet-state errors stop without spending another model call. A repair is
+also deferred when the shared Apps Script runtime budget is nearly exhausted,
+so the file can retain a retryable outcome. The model can revise extracted data
 and evidence but cannot change validation or import policy.
 Structured logs record each validation outcome, targeted repair request,
 successful repair, and exhausted three-call loop using only file ID, attempt

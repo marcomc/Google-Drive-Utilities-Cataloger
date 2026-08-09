@@ -11,9 +11,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Retry a model extraction at most twice after the initial call when
   deterministic validation reports a repairable document-data problem.
-- Send structured validator feedback, the previous complete extraction, and
-  prior attempt history to each targeted repair pass while keeping the final
-  import decision deterministic.
+- Send structured validator feedback, the previous schema-valid extraction
+  when available, and prior attempt history to each targeted repair pass while
+  keeping the final import decision deterministic.
 
 ### Changed
 
@@ -21,6 +21,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   that cannot be resolved by rereading the PDF.
 - Require every repair pass to return the complete extraction schema; invalid
   structured output may be retried but never bypasses validation.
+- Defer another repair when the shared Apps Script runtime budget is nearly
+  exhausted, preserving enough time to record a retryable file outcome.
 
 ## [0.4.1] - 2026-08-08 - Reliable single-file recovery entrypoint
 
