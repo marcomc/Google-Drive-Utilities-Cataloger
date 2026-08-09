@@ -177,6 +177,12 @@ reference-month wording was corrected to require literal `mm` text (`01`
 through `12`). This operational policy update did not deploy source code or
 alter processing triggers.
 
+On 2026-08-09, the 2026-08-08 authorization for warning-only missing cadence
+and secondary fields was withdrawn from both the source policy and the live
+Drive `AGENTS.md` in the configured intake folder. The Drive API read-back
+matched the uploaded policy exactly. No PDF, spreadsheet, trigger, or source
+deployment was changed by this policy update.
+
 ## Cadence and cost
 
 `Config.gs` sets `EVENT_POLL_MINUTES` to `15`. Change it only in source and
@@ -232,11 +238,53 @@ applied to invoice, contract, or customer identifiers.
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
+| `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
+
+For invoices whose billing frequency is not printed explicitly, the runtime may
+derive `monthly`, `bimonthly`, or `quarterly` from a complete calendar or
+anniversary-aligned billed period, or from verified independent earlier invoices
+for the same supplier and supply. A unique historical majority is required when
+history is used. Conflicting, unavailable, or insufficient evidence leaves a
+blocking diagnostic; it never copies a transaction-specific value from another
+invoice. An explicit printed frequency or reviewed configuration override
+remains authoritative.
+
+Explicit absence or non-applicability of a configured writable secondary field
+is non-blocking only after monetary reconciliation and only when the matching
+normalized `sheet_values` entry is omitted or exactly `null`. Unreadable,
+ambiguous, non-null, or duplicate evidence blocks import. The narrow reviewed
+subscriber-identifier, tax-inclusion, and supplier-default exceptions remain in
+force. `IMPORTED WITH WARNINGS` is reserved for a retained import whose
+electricity dashboard refresh failed.
+
+Cadence reported by extraction is trusted only with explicit printed
+provenance. Reviewed configuration overrides remain authoritative, while
+period/history inference stays limited to supported canonical cadence values.
+Invalid provenance or unsupported unproven model text blocks import.
+
+Dashboard refresh recovery clears its pending marker only after an explicit
+terminal refresh result or a reviewed non-applicable result. Missing mappings,
+missing sources, and invalid unmanaged no-op states remain deferred and retain
+the marker. A marker-write failure is logged best-effort and cannot roll back a
+verified invoice row.
+
+On 2026-08-09, these runtime-policy changes were applied to the live Drive
+`AGENTS.md` in the configured intake folder. A Drive API read-back matched the
+uploaded policy byte for byte and confirmed the cadence-provenance and
+secondary-field rules. No PDF, spreadsheet, trigger, or deployment was
+changed.
+
+The electricity dashboard and its technical sheet are derived presentation
+state. A refresh failure is logged and reported as an import warning after the
+invoice row has been verified; it never rolls back valid invoice data. The next
+scheduled daily or Drive-event run retries the managed refresh even when no
+new PDF is eligible, and clears the pending dashboard-recovery state only after
+that refresh succeeds.
 
 When a report contains the localized supplier-profile link, open that folder to
 review a pending profile or the approved profile. The localized retry-import

@@ -192,6 +192,7 @@ function processDriveEventQueueUnlocked_() {
   const rootFolder = DriveApp.getFolderById(getRootFolderId_());
   const recoveredResults = recoverPendingMutations_(rootFolder);
   flushPendingReports_();
+  recoverPendingElectricityDashboardRefresh_();
 
   const response = cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':pull', {
     method: 'post',

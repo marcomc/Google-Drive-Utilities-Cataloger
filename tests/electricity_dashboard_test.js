@@ -14,6 +14,8 @@ const technicalCreationProperty =
   'ELECTRICITY_DASHBOARD_TECHNICAL_CREATION';
 const technicalBackupCreationProperty =
   'ELECTRICITY_DASHBOARD_TECHNICAL_BACKUP_CREATION';
+const dashboardRefreshPendingProperty =
+  'ELECTRICITY_DASHBOARD_REFRESH_PENDING';
 
 function createScriptProperties(initialValues = {}) {
   const values = { ...initialValues };
@@ -325,12 +327,15 @@ function testDashboardUsesPendingLocaleAliasesBeforeConfigurationPersists() {
       initializationAliases = headerAliases;
       return false;
     };
-  context.initializeElectricityDashboard_({
+  const deferred = context.initializeElectricityDashboard_({
     getSheetByName: (name) => name === 'Luce' ? {} : null
   }, {
     locale: 'it',
     canonical_supplies: ['luce'],
     sheet_by_supply: { luce: 'Luce' }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(deferred)), {
+    state: 'deferred', reason: 'invalid-source'
   });
   assert.equal(JSON.stringify(initializationAliases),
     JSON.stringify(localization.headerAliases));
@@ -1768,6 +1773,7 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
   context.initializeElectricityDashboard_ = (_spreadsheet, _config, value) => {
     refreshes += 1;
     options.push(value);
+    return { state: 'refreshed', reason: 'test' };
   };
   context.refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, config,
     importedSheet, { reference_year: 2027 });
@@ -1778,39 +1784,48 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
   assert.equal(options[1].extendManagedRanges, true);
 }
 
-function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
-  const context = loadDashboard();
+function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
+  const scriptProperties = createScriptProperties();
+  const context = loadDashboard(scriptProperties);
   const labels = context.getElectricityDashboardLabels_('en');
   const importedSheet = { getName: () => 'Electricity' };
   const technical = { getRange: () => ({ getValues: () => [[2026]] }) };
   const spreadsheet = { getSheetByName: () => technical };
   const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+  let repaired = 0;
+  context.initializeElectricityDashboard_ = () => {
+    repaired += 1;
+    return { state: 'refreshed', reason: 'test' };
+  };
+  context.logCatalogEvent_ = () => {};
+  assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: (name) => name === labels.sheet ? {} : null
-  }, config, importedSheet, { reference_year: 2026 }),
-  /technical sheet is missing/);
+  }, config, importedSheet, { reference_year: 2026 }));
+  assert.equal(repaired, 1);
   assert.doesNotThrow(() => context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: () => null
   }, config, importedSheet, { reference_year: 2026 }));
+  let logged = 0;
+  context.logCatalogEvent_ = () => { logged += 1; };
+  context.classifyCatalogErrorForLog_ = () => 'validation';
   context.isManagedElectricityDashboardTechnicalSheet_ = () => false;
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_({
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_({
     getSheetByName: () => ({})
-  }, config, importedSheet, { reference_year: 2026 }),
-  /technical sheet is unmanaged/);
+  }, config, importedSheet, { reference_year: 2026 }).warning,
+  /invoice data was retained/);
   context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
   context.validateElectricityDashboardSource_ = () => {
     throw new Error('source capacity exceeded');
   };
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2026 }
-  ), /source capacity exceeded/);
+  ).warning, /invoice data was retained/);
 
   context.validateElectricityDashboardSource_ = () => false;
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2026 }
-  ), /source headers are missing or invalid/);
+  ).warning, /invoice data was retained/);
 
-  let logged = 0;
   context.validateElectricityDashboardSource_ = () => true;
   context.hasElectricityDashboardYear_ = () => false;
   context.initializeElectricityDashboard_ = () => {
@@ -1818,10 +1833,53 @@ function testDashboardRefreshValidatesEveryImportAndPropagatesFailures() {
   };
   context.logCatalogEvent_ = () => { logged += 1; };
   context.classifyCatalogErrorForLog_ = () => 'validation';
-  assert.throws(() => context.refreshElectricityDashboardAfterInvoiceImport_(
+  assert.match(context.refreshElectricityDashboardAfterInvoiceImport_(
     spreadsheet, config, importedSheet, { reference_year: 2027 }
-  ), /year capacity exceeded/);
-  assert.equal(logged, 1);
+  ).warning, /invoice data was retained/);
+  assert.equal(logged, 4);
+  const pending = JSON.parse(scriptProperties.values[
+    dashboardRefreshPendingProperty
+  ]);
+  assert.equal(typeof pending.queuedAt, 'number');
+  assert.equal(pending.errorCategory, 'dashboard');
+  context.initializeElectricityDashboard_ = () => ({
+    state: 'refreshed', reason: 'test'
+  });
+  assert.equal(context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2027 }
+  ).warning, '');
+  assert.equal(scriptProperties.values[dashboardRefreshPendingProperty], undefined);
+  assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
+}
+
+function testDashboardRefreshRetainsInvoiceWhenRetryCheckpointCannotPersist() {
+  const context = loadDashboard({
+    api: {
+      getProperty: () => null,
+      setProperty: () => { throw new Error('dashboard retry checkpoint unavailable'); },
+      deleteProperty: () => {}
+    }
+  });
+  const labels = context.getElectricityDashboardLabels_('en');
+  const importedSheet = { getName: () => 'Electricity' };
+  const technical = {};
+  const spreadsheet = { getSheetByName: () => technical };
+  const config = { locale: 'en', sheet_by_supply: { electricity: 'Electricity' } };
+  context.isManagedElectricityDashboardTechnicalSheet_ = () => true;
+  context.validateElectricityDashboardSource_ = () => true;
+  context.initializeElectricityDashboard_ = () => { throw new Error('refresh failed'); };
+  const loggedEvents = [];
+  context.logCatalogEvent_ = (event) => { loggedEvents.push(event); };
+  context.classifyCatalogErrorForLog_ = () => 'validation';
+
+  const result = context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2027 }
+  );
+  assert.match(result.warning, /invoice data was retained/);
+  assert.deepEqual(loggedEvents, [
+    'electricity-dashboard-refresh-failed',
+    'electricity-dashboard-refresh-marker-failed'
+  ]);
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 
@@ -2204,7 +2262,8 @@ testYearDiscoveryUsesReferenceYearThenIssueDate();
 testTechnicalGridExpansionAndLayoutPreservation();
 testTechnicalOwnershipAndCapacityPreflight();
 testDashboardRefreshRebuildsEveryElectricityImport();
-testDashboardRefreshValidatesEveryImportAndPropagatesFailures();
+testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh();
+testDashboardRefreshRetainsInvoiceWhenRetryCheckpointCannotPersist();
 testCustomizedChartBuilderStateSurvivesRefresh();
 testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();

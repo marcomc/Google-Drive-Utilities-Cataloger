@@ -19,6 +19,11 @@ function retryFailedUtilitiesCataloging() {
 function processSingleIntakeFile(fileId) {
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
+    return processSingleIntakeFileWithinLock_(fileId);
+  });
+}
+
+function processSingleIntakeFileWithinLock_(fileId) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
 
     if (hasMutationJournal_(fileId)) {
@@ -53,6 +58,39 @@ function processSingleIntakeFile(fileId) {
     logCatalogResult_(file, result);
     finalizeCatalogResults_(state, [result]);
     return result;
+}
+
+/**
+ * Owner-controlled single-file processing by exact intake filename.
+ *
+ * This resolves the file in the configured intake folder before delegating to
+ * the file-ID entrypoint, so an operator never needs to expose or copy a Drive
+ * identifier and ambiguous filenames fail closed.
+ */
+function processSingleIntakeFileByName(fileName) {
+  if (typeof fileName !== 'string' || !fileName.trim()) {
+    throw new Error('An exact intake PDF filename is required.');
+  }
+
+  assertCatalogConfiguration_();
+  return withCatalogProcessingLock_('manual', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    const iterator = rootFolder.getFilesByName(fileName);
+    const matches = [];
+    while (iterator.hasNext()) {
+      const file = iterator.next();
+      if (isDirectIntakePdf_(file, rootFolder)) {
+        matches.push(file);
+      }
+    }
+
+    if (matches.length === 0) {
+      throw new Error('No matching PDF was found in the direct intake folder.');
+    }
+    if (matches.length > 1) {
+      throw new Error('Multiple matching PDFs were found in the direct intake folder.');
+    }
+    return processSingleIntakeFileWithinLock_(matches[0].getId());
   });
 }
 
@@ -62,6 +100,7 @@ function runUtilitiesCataloging_(triggerSource) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
     const recoveredResults = recoverPendingMutations_(rootFolder);
     flushPendingReports_();
+    recoverPendingElectricityDashboardRefresh_();
     const files = listDirectIntakePdfs_(rootFolder);
     logCatalogEvent_('catalog-scan-completed', {
       triggerSource: triggerSource,
@@ -78,6 +117,36 @@ function runUtilitiesCataloging_(triggerSource) {
     });
     return { triggerSource: triggerSource, results: allResults };
   });
+}
+
+function recoverPendingElectricityDashboardRefresh_() {
+  const properties = PropertiesService.getScriptProperties();
+  const propertyKey = CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING;
+  if (!properties.getProperty(propertyKey)) {
+    return false;
+  }
+  try {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const refreshResult = initializeElectricityDashboard_(spreadsheet, automationConfig, {
+      extendManagedRanges: true
+    });
+    if (!isElectricityDashboardRefreshTerminal_(refreshResult)) {
+      logCatalogEvent_('electricity-dashboard-refresh-deferred', {
+        reason: refreshResult && refreshResult.reason || 'unknown'
+      });
+      return false;
+    }
+    properties.deleteProperty(propertyKey);
+    logCatalogEvent_('electricity-dashboard-refresh-recovered', {});
+    return true;
+  } catch (error) {
+    logCatalogEvent_('electricity-dashboard-refresh-retry-failed', {
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+    return false;
+  }
 }
 
 function withCatalogProcessingLock_(triggerSource, callback) {
@@ -315,6 +384,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
       state.sheetRow = sheetImport.row;
       state.electricityDashboardLayouts =
         sheetImport.electricityDashboardLayouts || null;
+      state.dashboardWarning = sheetImport.dashboardWarning || '';
     }
 
     advanceMutationFailureStage_(file.getId(), state,
@@ -337,7 +407,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy) {
 
     return attachMutationJournal_(
       buildSuccessResult_(
-        file, originalName, assignedName, destination, extracted, sheetLink
+        file, originalName, assignedName, destination, extracted, sheetLink,
+        state.dashboardWarning
       ),
       file.getId()
     );
@@ -748,6 +819,13 @@ function extractUtilityData_(file, driveAgentsPolicy) {
   extracted.original_file_id = file.getId();
   extracted.original_file_name = file.getName();
   const normalized = normalizeExtraction_(extracted);
+  Object.defineProperty(normalized, 'configured_secondary_headers', {
+    value: getConfiguredSecondaryInvoiceHeaders_(
+      headersBySupply[normalized.supply_type] || []
+    ),
+    enumerable: false
+  });
+  inferInvoiceFrequency_(normalized);
   applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
   return normalized;
 }
@@ -923,6 +1001,7 @@ function buildExtractionResponseSchema_() {
     'reference_year',
     'reference_month',
     'frequency',
+    'frequency_source_evidence',
     'period_start',
     'period_end',
     'consumption_description',
@@ -961,6 +1040,10 @@ function buildExtractionResponseSchema_() {
       reference_year: { type: ['integer', 'null'] },
       reference_month: { type: ['string', 'null'], pattern: '^(0[1-9]|1[0-2])$' },
       frequency: nullableString,
+      frequency_source_evidence: {
+        type: ['string', 'null'],
+        enum: ['printed', null]
+      },
       period_start: nullableString,
       period_end: nullableString,
       consumption_description: nullableString,
@@ -1156,6 +1239,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
     '  "frequency": "text or null",',
+    '  "frequency_source_evidence": "printed or null",',
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
     '  "consumption_description": "concise text or null",',
@@ -1169,13 +1253,15 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy) {
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds.',
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
-    'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each printed line item in sheet_values using its exact header. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
-    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If an optional field is genuinely not printed or not applicable, omit it from sheet_values without adding a problem; never infer or copy it from another invoice. If an applicable field is unreadable or ambiguous, omit it and add a concise problem explaining why. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem, and never use a previous invoice to fill it.',
+    'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each mutually exclusive top-level printed cost row in sheet_values using its exact header. If one target header represents a combined category, sum only the mutually exclusive top-level rows in the same printed parent section that belong to that category; never combine similarly named rows from separate sections such as consumption versus fixed/power charges. Do not map subordinate lines introduced by "di cui" (or equivalent wording) into a top-level cost header when their amount is already included in an aggregate or parent row; those subordinate amounts are explanatory evidence, not additional costs. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
+    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem.',
     'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
       JSON.stringify(localization.supplierFieldDefaults || []) + '.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
+    'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
+    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed; otherwise set it to null. If the billing frequency is not printed explicitly or is uncertain, return frequency as null and add a concise diagnostic. The runtime may infer monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply. If cadence cannot be established or conflicts, the diagnostic blocks import. Do not invent a different cadence or copy a transaction-specific value from earlier invoices.',
     'For non-invoice documents, classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. For invoices, address_type is finalized by the runtime comparison with the target supply identity. If no printed service address is present, return null address components and add a concise problem.',
     'Apply these frequency overrides when supplier and supply match: ' +
@@ -1225,6 +1311,7 @@ function validateRawExtractionShape_(extracted) {
     'contract_object',
     'reference_month',
     'frequency',
+    'frequency_source_evidence',
     'period_start',
     'period_end',
     'consumption_description'
@@ -1234,6 +1321,11 @@ function validateRawExtractionShape_(extracted) {
       throw new Error('Gemini extraction field has an invalid type: ' + field);
     }
   });
+  if (extracted.frequency_source_evidence !== null &&
+    extracted.frequency_source_evidence !== undefined &&
+    extracted.frequency_source_evidence !== 'printed') {
+    throw new Error('Gemini extraction frequency provenance is invalid.');
+  }
   ['cost_consumption', 'cost_non_consumption', 'vat', 'total'].forEach(
     function (field) {
       const value = extracted[field];
@@ -1313,9 +1405,12 @@ function normalizeExtraction_(extracted) {
   normalized.cost_non_consumption = normalizeMoney_(normalized.cost_non_consumption);
   normalized.vat = normalizeMoney_(normalized.vat);
   normalized.total = normalizeMoney_(normalized.total);
-  applyFrequencyOverride_(normalized);
   normalized.problems = Array.isArray(normalized.problems) ?
     normalized.problems.slice() : [];
+  normalized.frequency_source_evidence =
+    normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
+  normalizeExtractedInvoiceFrequency_(normalized);
+  applyFrequencyOverride_(normalized);
   normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   return normalized;
 }
@@ -1671,7 +1766,9 @@ function validateExtraction_(extracted) {
     }
     const blockingProblems = extracted.problems.filter(function (problem) {
       return !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
-        !isInformationalTaxInclusionProblem_(problem, extracted);
+        !isInformationalTaxInclusionProblem_(problem, extracted) &&
+        classifyConfiguredSecondaryInvoiceProblem_(problem, extracted).disposition !==
+          'explicit-absence';
     });
     if (blockingProblems.length > 0) {
       return invalidExtraction_('Gemini reported: ' + blockingProblems.join('; '),
@@ -2100,8 +2197,19 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
   if (!sheet) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
-  const electricityDashboardLayouts =
-    captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
+  let electricityDashboardLayouts = null;
+  try {
+    electricityDashboardLayouts =
+      captureElectricityDashboardLayoutsForRollback_(sheet, automationConfig);
+  } catch (error) {
+    // The layout is required to preserve customized managed charts if a later
+    // source-row mutation needs rollback. Stop before changing that row.
+    logCatalogEvent_('electricity-dashboard-refresh-failed', {
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+    throw error;
+  }
   checkpointMutationJournal_(file.getId(), state, {
     electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
       electricityDashboardLayouts
@@ -2122,6 +2230,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       sheetRowPayload: previousRowPayload
     });
     let correctedRow = existingRow;
+    let dashboardResult = null;
     try {
       // Re-extraction is a replacement of the complete literal payload. This
       // prevents stale optional values from surviving when a newer extraction
@@ -2135,7 +2244,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
         stage: 'sheet-existing-written',
         sheetRow: correctedRow
       });
-      refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+      dashboardResult = refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
         sheet, extracted);
     } catch (error) {
       try {
@@ -2159,7 +2268,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       created: false,
       originalRow: existingRow,
       previousRowPayload: previousRowPayload,
-      electricityDashboardLayouts: electricityDashboardLayouts
+      electricityDashboardLayouts: electricityDashboardLayouts,
+      dashboardWarning: dashboardResult && dashboardResult.warning || ''
     };
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
@@ -2171,6 +2281,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     sheetRowPreexisting: false
   });
   insertBlankRowAt_(sheet, targetRow);
+  let dashboardResult = null;
   try {
     copyRowStyleAndFormulas_(sheet, targetRow, layout);
     refreshImportedSourceLink_(sheet, targetRow, file);
@@ -2181,7 +2292,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     writeInvoiceRow_(sheet, targetRow, layout, file, extracted);
     verifyImportedRow_(sheet, targetRow, layout, file, extracted);
     checkpointMutationJournal_(file.getId(), state, { stage: 'sheet-written' });
-    refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
+    dashboardResult = refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
       sheet, extracted);
   } catch (error) {
     let deletionCompleted = false;
@@ -2214,7 +2325,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     sheet: sheet,
     row: targetRow,
     created: true,
-    electricityDashboardLayouts: electricityDashboardLayouts
+    electricityDashboardLayouts: electricityDashboardLayouts,
+    dashboardWarning: dashboardResult && dashboardResult.warning || ''
   };
 }
 
@@ -2933,7 +3045,374 @@ function applyFrequencyOverride_(extracted) {
     return item.supplier === extracted.supplier && item.supply_type === extracted.supply_type;
   })[0];
   if (override && override.frequency) {
-    extracted.frequency = override.frequency;
+    const configuredFrequency = String(override.frequency).trim();
+    extracted.frequency = isRecognizedMissingFrequencyValue_(configuredFrequency) ? '' :
+      normalizeExplicitInvoiceFrequency_(configuredFrequency) || configuredFrequency;
+    if (extracted.frequency) {
+      Object.defineProperty(extracted, 'frequency_override_authoritative_', {
+        value: true,
+        enumerable: false,
+        configurable: true
+      });
+      reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    } else if (!(extracted.problems || []).some(isMissingFrequencyProblem_)) {
+      extracted.problems = extracted.problems || [];
+      extracted.problems.push('Billing frequency is not printed.');
+    }
+  }
+}
+
+function normalizeExtractedInvoiceFrequency_(extracted) {
+  const frequency = String(extracted.frequency || '').trim();
+  extracted.frequency = extracted.frequency_source_evidence === 'printed' ?
+    normalizeExplicitInvoiceFrequency_(frequency) : '';
+  if (!frequency || extracted.frequency) {
+    return;
+  }
+  const recognizedAbsence = isRecognizedMissingFrequencyValue_(frequency);
+  const problem = recognizedAbsence ? 'Billing frequency is not printed.' :
+    'Billing frequency value is unsupported or lacks printed provenance.';
+  const alreadyReported = recognizedAbsence ?
+    (extracted.problems || []).some(isMissingFrequencyProblem_) :
+    (extracted.problems || []).some(function (item) {
+      return /^billing frequency value is unsupported or lacks printed provenance\.?$/i.test(
+        String(item || '').trim());
+    });
+  if (!alreadyReported) {
+    extracted.problems = extracted.problems || [];
+    extracted.problems.push(problem);
+  }
+}
+
+function isRecognizedMissingFrequencyValue_(value) {
+  return /^(?:not\s+(?:explicitly\s+)?(?:printed|indicated|present|reported|applicable|available)|n\s+a|missing|absent|unavailable|non\s+(?:e\s+)?(?:indicata|stampata|presente|riportata|applicabile|disponibile)|assente|mancante)$/i.test(
+    normalizeCellText_(value)
+  );
+}
+
+function normalizeExplicitInvoiceFrequency_(value) {
+  const printed = String(value || '').trim();
+  if (!printed || isRecognizedMissingFrequencyValue_(printed)) {
+    return '';
+  }
+  const inferred = normalizeInferredFrequency_(value);
+  if (inferred) {
+    return inferred;
+  }
+  const text = normalizeCellText_(value);
+  if (/^(?:annual|annually|yearly|annuale|annualmente)$/.test(text) ||
+    /^(?:every\s+1\s+year|ogni\s+1\s+anno)$/.test(text)) {
+    return 'annual';
+  }
+  return printed;
+}
+
+function isMissingFrequencyProblem_(problem) {
+  const text = String(problem || '').trim();
+  if (!text) {
+    return false;
+  }
+  if (/^billing frequency could not be (?:corroborated from prior invoices|established from the billed period or prior invoices)\.?$/i.test(text)) {
+    return true;
+  }
+  if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
+    return false;
+  }
+  return /^(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+}
+
+function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
+  extracted.problems = (extracted.problems || []).filter(function (problem) {
+    return !isMissingFrequencyProblem_(problem);
+  });
+}
+
+function isInvoiceCoreMonetaryReconciled_(extracted) {
+  const values = [extracted.cost_consumption, extracted.cost_non_consumption,
+    extracted.vat, extracted.total];
+  return values.every(function (value) {
+    return typeof value === 'number' && isFinite(value);
+  }) && Math.abs(
+    extracted.cost_consumption + extracted.cost_non_consumption + extracted.vat -
+    extracted.total
+  ) <= CONFIG.MONEY_TOLERANCE;
+}
+
+function getConfiguredSecondaryInvoiceHeaders_(headers) {
+  const localization = getLocalization_();
+  const canonicalKeys = [
+    'issueDate', 'supplier', 'identifier', 'contractNumber', 'accountHolder',
+    'serviceAddress', 'customerCode', 'sourceFile', 'year', 'month',
+    'frequency', 'consumptionCost', 'nonConsumptionCosts', 'vat', 'total'
+  ];
+  const excluded = canonicalKeys.reduce(function (all, key) {
+    return all.concat(getHeaderAliases_(key));
+  }, []).concat(localization.electricityBandHeaders || []).concat(
+    (localization.supplierFieldDefaults || []).map(function (item) {
+      return item.header;
+    })
+  ).map(normalizeHeader_);
+  return (headers || []).filter(function (header) {
+    const normalized = normalizeHeader_(header);
+    return normalized && excluded.indexOf(normalized) === -1;
+  });
+}
+
+function classifyConfiguredSecondaryInvoiceProblem_(problem, extracted) {
+  const blocking = { disposition: 'blocking', field: '' };
+  if (!extracted || !isInvoiceCoreMonetaryReconciled_(extracted)) {
+    return blocking;
+  }
+  const text = String(problem || '').trim();
+  if (!text || /[,;]|(?:[.!?])\s+\S/.test(text) ||
+    /(?:ambigu|incert|unreadable|illeggibil|inconsistent|incoerent|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond)/i.test(text)) {
+    return blocking;
+  }
+  const field = (extracted.configured_secondary_headers || []).slice().sort(
+    function (left, right) {
+      return normalizeCellText_(right).length - normalizeCellText_(left).length;
+    }
+  ).filter(function (header) {
+    const normalizedHeader = normalizeCellText_(header);
+    const normalizedProblem = normalizeCellText_(text);
+    return normalizedHeader && (normalizedProblem === normalizedHeader ||
+      normalizedProblem.indexOf(normalizedHeader + ' ') === 0);
+  })[0];
+  if (!field) {
+    return blocking;
+  }
+  const normalizedField = normalizeHeader_(field);
+  const matchingValues = (extracted.sheet_values || []).filter(function (entry) {
+    return entry && normalizeHeader_(entry.header) === normalizedField;
+  });
+  if (matchingValues.length > 1 ||
+    matchingValues.length === 1 && matchingValues[0].value !== null) {
+    return blocking;
+  }
+  const remainder = normalizeCellText_(text).slice(normalizeCellText_(field).length).trim();
+  if (!/^(?:(?:is\s+)?(?:not\s+(?:printed|present|reported|indicated|applicable)|missing|absent|unavailable)|(?:non\s+(?:e\s+)?(?:stampata|stampato|presente|riportata|riportato|indicata|indicato|applicabile)|assente|mancante))(?:\s+(?:on|in|nel|nella)\s+(?:the\s+)?(?:invoice|document|fattura|documento))?$/.test(remainder)) {
+    return blocking;
+  }
+  return { disposition: 'explicit-absence', field: field };
+}
+
+function getCriticalInvoiceProblemFieldPattern_() {
+  return '(?:supplier|fornitore|supply|fornitura|account\\s+holder|intestatario|' +
+    'service\\s+address|indirizzo(?:\\s+di\\s+fornitura)?|contract|contratto|' +
+    'customer\\s+code|codice\\s+cliente|invoice\\s+(?:identifier|number)|' +
+    'identifier|invoice\\s+number|document\\s+number|numero\\s+(?:fattura|documento|identificativo)|' +
+    'identificativo|codice\\s+documento|riferimento\\s+documento|\\bn\\s*\\.?\\s*fattura\\b|' +
+    'issue\\s+date|data\\s+di\\s+emissione|reference\\s+(?:year|month|period)|' +
+    '(?:anno|mese)\\s+di\\s+riferimento|(?:billing|billed)\\s+period|' +
+    'periodo\\s+di\\s+(?:fatturazione|competenza|riferimento)|' +
+    'cost\\s+consumption|costo\\s+(?:del\\s+)?consumo|non[ -]?consumption\\s+cost|' +
+    'iva|vat|total|totale)';
+}
+
+function normalizeInvoiceProblemStatement_(text) {
+  return String(text || '').replace(
+    /\b(?:supplier|fornitore)\s+(?:invoice|fattura)\b/gi, 'document'
+  );
+}
+
+function hasCriticalInvoiceFieldMention_(text) {
+  return new RegExp(getCriticalInvoiceProblemFieldPattern_(), 'i').test(
+    normalizeInvoiceProblemStatement_(text));
+}
+
+function normalizeInferredFrequency_(value) {
+  const text = normalizeCellText_(value);
+  if (!text) {
+    return '';
+  }
+  if (/^(?:monthly|month|mensile|mensilmente)$/i.test(text) ||
+    /^(?:every\s+)?1\s+(?:month|months|mese|mesi)$/.test(text)) {
+    return 'monthly';
+  }
+  if (/^(?:bimonthly|every\s+two\s+months|bimestrale|bimestralmente)$/i.test(text) ||
+    /^(?:every\s+)?2\s+(?:month|months|mese|mesi)$/.test(text)) {
+    return 'bimonthly';
+  }
+  if (/^(?:quarterly|every\s+three\s+months|trimestrale|trimestralmente)$/i.test(text) ||
+    /^(?:every\s+)?3\s+(?:month|months|mese|mesi)$/.test(text)) {
+    return 'quarterly';
+  }
+  return '';
+}
+
+function completeBillingCycleMonths_(periodStart, periodEnd) {
+  if (!isValidIsoDate_(periodStart) || !isValidIsoDate_(periodEnd)) {
+    return 0;
+  }
+  const startParts = periodStart.split('-').map(Number);
+  const endParts = periodEnd.split('-').map(Number);
+  const start = new Date(Date.UTC(startParts[0], startParts[1] - 1, startParts[2]));
+  const end = new Date(Date.UTC(endParts[0], endParts[1] - 1, endParts[2]));
+  if (end < start) {
+    return 0;
+  }
+  const endLastDay = new Date(Date.UTC(endParts[0], endParts[1], 0)).getUTCDate();
+  const startLastDay = new Date(Date.UTC(startParts[0], startParts[1], 0)).getUTCDate();
+  const monthOffset = (endParts[0] - startParts[0]) * 12 + endParts[1] - startParts[1];
+  if (startParts[2] === 1 && endParts[2] === endLastDay && monthOffset >= 0) {
+    return monthOffset + 1;
+  }
+  if (startParts[2] === startLastDay && endParts[2] === endLastDay && monthOffset >= 1) {
+    return monthOffset;
+  }
+  for (let months = 1; months <= 3; months += 1) {
+    const targetYear = startParts[0] + Math.floor((startParts[1] - 1 + months) / 12);
+    const targetMonth = (startParts[1] - 1 + months) % 12;
+    const targetLastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const anniversary = new Date(Date.UTC(targetYear, targetMonth,
+      Math.min(startParts[2], targetLastDay)));
+    anniversary.setUTCDate(anniversary.getUTCDate() - 1);
+    if (anniversary.getUTCFullYear() === endParts[0] &&
+      anniversary.getUTCMonth() === endParts[1] - 1 &&
+      anniversary.getUTCDate() === endParts[2]) {
+      return months;
+    }
+  }
+  return 0;
+}
+
+function inferFrequencyFromPeriod_(extracted) {
+  const months = completeBillingCycleMonths_(extracted.period_start, extracted.period_end);
+  return { 1: 'monthly', 2: 'bimonthly', 3: 'quarterly' }[months] || '';
+}
+
+function getHistoricalInvoiceFrequencyEvidence_(extracted) {
+  if (typeof SpreadsheetApp === 'undefined' || !extracted.supply_type ||
+    !extracted.supplier) {
+    return { state: 'empty', frequency: '' };
+  }
+  try {
+    const config = getAutomationConfig_();
+    const sheetName = config.sheet_by_supply[extracted.supply_type];
+    if (!sheetName) {
+      return { state: 'empty', frequency: '' };
+    }
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet) {
+      return { state: 'empty', frequency: '' };
+    }
+    const layout = getSheetLayout_(sheet);
+    const supplierColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('supplier'));
+    const frequencyColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('frequency'));
+    const dateColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('issueDate'));
+    const holderColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('accountHolder'));
+    const addressColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('serviceAddress'));
+    const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
+    const dataRows = Math.max(0, sheet.getLastRow() - layout.headerRow);
+    if (!supplierColumn || !frequencyColumn || !holderColumn || !addressColumn ||
+      !extracted.account_holder || !extracted.address_evidence || !dataRows) {
+      return { state: 'empty', frequency: '' };
+    }
+    const values = sheet.getRange(layout.headerRow + 1, 1, dataRows,
+      layout.headers.length).getValues();
+    const currentDate = dateForValue_(extracted.issue_date);
+    if (extracted.issue_date && !currentDate) {
+      return { state: 'conflict', frequency: '' };
+    }
+    if (!dateColumn) {
+      return { state: 'empty', frequency: '' };
+    }
+    const counts = Object.create(null);
+    let independentIdentityUnavailable = false;
+    values.forEach(function (row, index) {
+      if (normalizeCellText_(row[supplierColumn - 1]) !== normalizeCellText_(extracted.supplier)) {
+        return;
+      }
+      if (normalizeNameIdentity_(row[holderColumn - 1]) !==
+        normalizeNameIdentity_(extracted.account_holder) ||
+        normalizeAddressIdentityText_(row[addressColumn - 1]) !==
+          normalizeAddressIdentityText_(extracted.address_evidence)) {
+        return;
+      }
+      if (dateColumn) {
+        const priorDate = dateForValue_(row[dateColumn - 1]);
+        if (!priorDate || (currentDate && priorDate >= currentDate)) {
+          return;
+        }
+      }
+      const frequency = normalizeInferredFrequency_(row[frequencyColumn - 1]);
+      if (!frequency) {
+        return;
+      }
+      if (extracted.original_file_id) {
+        if (!sourceColumn) {
+          independentIdentityUnavailable = true;
+          return;
+        }
+        const sourceFile = getFileFromSourceCell_(
+          sheet.getRange(layout.headerRow + 1 + index, sourceColumn)
+        );
+        if (!sourceFile) {
+          independentIdentityUnavailable = true;
+          return;
+        }
+        if (sourceFile.getId() === extracted.original_file_id) {
+          return;
+        }
+      }
+      counts[frequency] = (counts[frequency] || 0) + 1;
+    });
+    if (independentIdentityUnavailable) {
+      return { state: 'conflict', frequency: '' };
+    }
+    const ranked = Object.keys(counts).sort(function (left, right) {
+      return counts[right] - counts[left];
+    });
+    if (!ranked.length) {
+      return { state: 'empty', frequency: '' };
+    }
+    const countTotal = ranked.reduce(function (total, frequency) {
+      return total + counts[frequency];
+    }, 0);
+    if (counts[ranked[0]] * 2 <= countTotal) {
+      return { state: 'conflict', frequency: '' };
+    }
+    return { state: 'consensus', frequency: ranked[0] };
+  } catch (error) {
+    return { state: 'unavailable', frequency: '' };
+  }
+}
+
+function inferInvoiceFrequency_(extracted) {
+  if (!extracted || extracted.document_type !== 'Invoice') {
+    return;
+  }
+  if (extracted.frequency_override_authoritative_ === true) {
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    return;
+  }
+  normalizeExtractedInvoiceFrequency_(extracted);
+  if (extracted.frequency) {
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    return;
+  }
+  const periodFrequency = inferFrequencyFromPeriod_(extracted);
+  const historicalEvidence = getHistoricalInvoiceFrequencyEvidence_(extracted);
+  const historyConflictsWithPeriod = periodFrequency && historicalEvidence.frequency &&
+    periodFrequency !== historicalEvidence.frequency;
+  const historyVetoesPeriod = historicalEvidence.state === 'conflict' ||
+    historyConflictsWithPeriod;
+  extracted.frequency = historyVetoesPeriod ? '' :
+    periodFrequency || historicalEvidence.frequency || '';
+  if (extracted.frequency) {
+    reconcileResolvedInvoiceFrequencyProblems_(extracted);
+  } else if (historicalEvidence.state === 'unavailable') {
+    extracted.problems = extracted.problems || [];
+    extracted.problems.push('Billing frequency could not be corroborated from prior invoices.');
+  } else if (historyVetoesPeriod) {
+    extracted.problems = extracted.problems || [];
+    extracted.problems.push('Billing frequency evidence is conflicting and was left blank.');
+  } else {
+    extracted.problems = extracted.problems || [];
+    extracted.problems.push(
+      'Billing frequency could not be established from the billed period or prior invoices.'
+    );
   }
 }
 
@@ -3576,17 +4055,24 @@ function buildDrivePathLabel_(file) {
   return 'Intake / ' + file.getName();
 }
 
-function buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink) {
+function buildSuccessResult_(file, originalName, assignedName, destination, extracted, sheetLink,
+  dashboardWarning) {
   const imported = extracted.address_type === 'import' &&
     extracted.document_type === 'Invoice';
+  const warnings = [];
+  if (imported && dashboardWarning) {
+    warnings.push({ field: 'electricity dashboard', reason: dashboardWarning });
+  }
   return {
-    status: imported ? 'IMPORTED' : 'ARCHIVED WITHOUT IMPORT',
+    status: imported ? (warnings.length > 0 ? 'IMPORTED WITH WARNINGS' : 'IMPORTED') :
+      'ARCHIVED WITHOUT IMPORT',
     originalName: originalName,
     assignedName: assignedName,
     fileUrl: file.getUrl(),
     destination: destination.path,
     supplySupplier: extracted.supply_type + ' / ' + extracted.supplier,
     extracted: extracted,
+    warnings: warnings,
     sheetLink: sheetLink,
     actions: destination.createdFolders && destination.createdFolders.length > 0 ?
       'PDF renamed, archived, and destination folders created: ' +
@@ -4091,6 +4577,10 @@ function formatResult_(result, includeExtractionSnapshot) {
         (result.status === 'ERROR' && result.extractionValidated ?
           labels.reconciliationPassed + ': ' : '') +
         calculated + ' EUR / ' + total + ' EUR' : labels.notApplicable),
+    Array.isArray(result.warnings) && result.warnings.length > 0 ?
+      labels.warnings + ': ' + result.warnings.map(function (warning) {
+        return oneLineReportText_(warning.field + ': ' + warning.reason);
+      }).join('; ') : '',
     labels.actions + ': ' + oneLineReportText_(result.actions),
     labels.issue + ': ' + oneLineReportText_(issue),
     profileLink,
@@ -4157,6 +4647,7 @@ function formatEuro_(value) {
 function localizeStatus_(status, localization) {
   const keys = {
     IMPORTED: 'IMPORTED',
+    'IMPORTED WITH WARNINGS': 'IMPORTED_WITH_WARNINGS',
     'ARCHIVED WITHOUT IMPORT': 'ARCHIVED_WITHOUT_IMPORT',
     DUPLICATE: 'DUPLICATE',
     'NEEDS REVIEW': 'NEEDS_REVIEW',

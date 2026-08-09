@@ -36,6 +36,10 @@
   version, authorization, transport, identity, and entry-point failures as
   terminal, and test exact post-update read and wait counts for retryable and
   terminal paths.
+- After uploading an Apps Script version, inspect that exact version's content
+  for every required top-level entrypoint before moving the owner-only API
+  deployment; a local source or syntax check cannot prove the deployed artifact
+  exposes the function.
 - Do not use Apps Script Execution API calls to create or remove installable
   triggers: that API cannot manage triggers, and existing installable triggers
   execute the project HEAD rather than the API executable's pinned version.
@@ -64,6 +68,11 @@
   evidence. During state-less OAuth recovery, adopt only an exact legacy local
   auth profile and exactly one owner-only configured deployment; fail closed
   on ambiguity.
+- Treat optional invoice-field problems as non-blocking only when the core
+  monetary reconciliation passes and the problem explicitly states absence or
+  non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
+  remain blocking; a tied historical cadence must fail closed rather than pick
+  an arbitrary frequency.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled

@@ -94,6 +94,25 @@ fi
 version_id="$(jq -er '
   .versionNumber | select(type == "number")
 ' <<<"${version_json}")"
+version_content_json=""
+# The helpers return explicit failure statuses; this compound guard keeps the
+# source version and entrypoint checks atomic before deployment mutation.
+# shellcheck disable=SC2310
+if ! read_apps_script_version_content \
+  "${auth_file}" \
+  "${script_id}" \
+  "${version_id}" \
+  version_content_json ||
+  ! validate_apps_script_version_entrypoints \
+    "${version_content_json}" \
+    runDailyUtilitiesCataloging \
+    retryFailedUtilitiesCataloging \
+    processSingleIntakeFile \
+    processSingleIntakeFileByName; then
+  printf '%s\n' \
+    "The uploaded Apps Script version does not expose the required processing entrypoints; the API deployment was not updated." >&2
+  exit 1
+fi
 deployment_json=""
 # Helpers explicitly check failures; this branch adds post-push recovery guidance.
 # shellcheck disable=SC2310

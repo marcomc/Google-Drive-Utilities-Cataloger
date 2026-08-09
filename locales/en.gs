@@ -102,12 +102,14 @@ function getEnglishLocalization_() {
     ]),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',
+      IMPORTED_WITH_WARNINGS: 'IMPORTED WITH WARNINGS',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVED WITHOUT IMPORT',
       DUPLICATE: 'DUPLICATE',
       NEEDS_REVIEW: 'NEEDS REVIEW',
       ERROR: 'ERROR'
     }),
     reportLabels: Object.freeze({
+      warnings: 'Warnings',
       softwareVersion: 'Software version',
       status: 'STATUS',
       originalFile: 'Original file',

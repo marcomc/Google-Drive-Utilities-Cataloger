@@ -102,6 +102,21 @@ manual review.
   A difference beyond a few cents blocks the import.
 - A note that line items include VAT is not itself an uncertainty when the
   invoice shows VAT and total explicitly and that reconciliation succeeds.
+- When billing frequency is not printed, the runtime may infer monthly,
+  bimonthly, or quarterly cadence from a complete billed period or verified
+  independent earlier invoices for the same supplier and supply. Conflicting,
+  unavailable, or insufficient cadence evidence blocks import. Never copy
+  transaction-specific values from earlier invoices.
+- Treat a non-inferred cadence as authoritative only when extraction marks it
+  as printed. Reviewed configuration overrides remain authoritative. Missing
+  provenance, invalid provenance, and unsupported model prose block import.
+- An unreadable or ambiguous configured secondary field blocks import. Inspect
+  other current-document tables before reporting the diagnostic. The reviewed
+  subscriber-identifier, tax-inclusion, and supplier-default exceptions remain
+  narrow and unchanged.
+- A configured secondary-field absence is non-blocking only when its exact
+  normalized `sheet_values` entry is omitted or has value `null`. Empty text,
+  zero, false, or duplicate normalized entries remain blocking.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
@@ -120,6 +135,11 @@ manual review.
   when the document does not provide that band value. If a reported band is
   unreadable or ambiguous, leave that value null and add a problem rather than
   silently distributing the total.
+- Do not depend on a supplier's table titles. Infer table roles from their
+  headings and units: bill summaries or energy receipts provide totals/costs,
+  readings and consumption tables provide current kWh bands, historical tables
+  corroborate only, and tax/VAT tables provide taxes. Offer, energy-mix,
+  marketing, and explanatory tables are not required for an invoice import.
 - If the sheet contains separate F1/F2/F3 headers for both consumption and
   cost, populate all matching headers. If only one of the two dimensions is
   present in the document, import only that dimension. Use exact existing
