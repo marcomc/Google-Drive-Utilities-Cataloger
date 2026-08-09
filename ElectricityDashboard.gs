@@ -1681,7 +1681,16 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
-    markElectricityDashboardRefreshPending_();
+    try {
+      markElectricityDashboardRefreshPending_();
+    } catch (markerError) {
+      // The verified invoice row is authoritative. Losing the derived-state
+      // retry marker must not escape into import rollback.
+      logCatalogEvent_('electricity-dashboard-refresh-marker-failed', {
+        errorType: markerError.name || 'Error',
+        errorCategory: classifyCatalogErrorForLog_(markerError)
+      });
+    }
     return {
       warning: 'Electricity dashboard refresh failed; imported invoice data was retained.'
     };

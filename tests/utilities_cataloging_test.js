@@ -1372,6 +1372,43 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
   context.inferInvoiceFrequency_(printed);
   assert.equal(printed.frequency, 'quarterly');
   assert.deepEqual(printed.problems, preservedProblems);
+
+  const annualPrinted = {
+    ...validInvoice(),
+    frequency: 'annuale',
+    problems: ['Frequenza non indicata.']
+  };
+  context.inferInvoiceFrequency_(annualPrinted);
+  assert.equal(annualPrinted.frequency, 'annual');
+  assert.deepEqual(annualPrinted.problems, []);
+
+  context.getAutomationConfig_ = () => ({
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'annual'
+    }]
+  });
+  const annualOverride = {
+    ...validInvoice(),
+    frequency: '',
+    problems: ['Billing frequency is not printed.']
+  };
+  context.applyFrequencyOverride_(annualOverride);
+  assert.equal(annualOverride.frequency, 'annual');
+  assert.deepEqual(annualOverride.problems, []);
+
+  context.getAutomationConfig_ = () => ({
+    frequency_overrides: [{
+      supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'installation-cycle'
+    }]
+  });
+  const customOverride = {
+    ...validInvoice(),
+    frequency: '',
+    problems: ['Billing frequency is not printed.']
+  };
+  context.applyFrequencyOverride_(customOverride);
+  assert.equal(customOverride.frequency, 'installation-cycle');
+  assert.deepEqual(customOverride.problems, []);
 }
 
 function testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation() {
@@ -1520,7 +1557,9 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
     ['bimonthly', 'bimonthly'],
     ['bimestrale', 'bimonthly'],
     ['quarterly', 'quarterly'],
-    ['trimestrale', 'quarterly']
+    ['trimestrale', 'quarterly'],
+    ['annual', 'annual'],
+    ['annuale', 'annual']
   ].forEach(([printed, canonical]) => {
     const extracted = { frequency: printed, problems: [] };
     supportedContext.normalizeExtractedInvoiceFrequency_(extracted);
@@ -1543,6 +1582,7 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
   };
   overrideContext.applyFrequencyOverride_(sentinelOverride);
   assert.equal(sentinelOverride.frequency, '');
+  assert.match(sentinelOverride.problems.join(' '), /not printed/);
   assert.equal(overrideContext.validateExtraction_(sentinelOverride).valid, false);
 
   overrideContext.getAutomationConfig_ = () => ({

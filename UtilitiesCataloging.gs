@@ -3025,23 +3025,25 @@ function applyFrequencyOverride_(extracted) {
     return item.supplier === extracted.supplier && item.supply_type === extracted.supply_type;
   })[0];
   if (override && override.frequency) {
-    extracted.frequency = override.frequency;
-    normalizeExtractedInvoiceFrequency_(extracted);
+    const configuredFrequency = String(override.frequency).trim();
+    extracted.frequency = isRecognizedMissingFrequencyValue_(configuredFrequency) ? '' :
+      normalizeExplicitInvoiceFrequency_(configuredFrequency) || configuredFrequency;
     if (extracted.frequency) {
       reconcileResolvedInvoiceFrequencyProblems_(extracted);
+    } else if (!(extracted.problems || []).some(isMissingFrequencyProblem_)) {
+      extracted.problems = extracted.problems || [];
+      extracted.problems.push('Billing frequency is not printed.');
     }
   }
 }
 
 function normalizeExtractedInvoiceFrequency_(extracted) {
   const frequency = String(extracted.frequency || '').trim();
-  extracted.frequency = normalizeInferredFrequency_(frequency);
+  extracted.frequency = normalizeExplicitInvoiceFrequency_(frequency);
   if (!frequency || extracted.frequency) {
     return;
   }
-  const recognizedAbsence = /^(?:not\s+(?:explicitly\s+)?(?:printed|indicated|present|reported|applicable|available)|n\s+a|missing|absent|unavailable|non\s+(?:e\s+)?(?:indicata|stampata|presente|riportata|applicabile|disponibile)|assente|mancante)$/i.test(
-    normalizeCellText_(frequency)
-  );
+  const recognizedAbsence = isRecognizedMissingFrequencyValue_(frequency);
   const problem = recognizedAbsence ? 'Billing frequency is not printed.' :
     'Billing frequency value is unsupported.';
   const alreadyReported = recognizedAbsence ?
@@ -3053,6 +3055,25 @@ function normalizeExtractedInvoiceFrequency_(extracted) {
     extracted.problems = extracted.problems || [];
     extracted.problems.push(problem);
   }
+}
+
+function isRecognizedMissingFrequencyValue_(value) {
+  return /^(?:not\s+(?:explicitly\s+)?(?:printed|indicated|present|reported|applicable|available)|n\s+a|missing|absent|unavailable|non\s+(?:e\s+)?(?:indicata|stampata|presente|riportata|applicabile|disponibile)|assente|mancante)$/i.test(
+    normalizeCellText_(value)
+  );
+}
+
+function normalizeExplicitInvoiceFrequency_(value) {
+  const inferred = normalizeInferredFrequency_(value);
+  if (inferred) {
+    return inferred;
+  }
+  const text = normalizeCellText_(value);
+  if (/^(?:annual|annually|yearly|annuale|annualmente)$/.test(text) ||
+    /^(?:every\s+1\s+year|ogni\s+1\s+anno)$/.test(text)) {
+    return 'annual';
+  }
+  return '';
 }
 
 function isMissingFrequencyProblem_(problem) {
