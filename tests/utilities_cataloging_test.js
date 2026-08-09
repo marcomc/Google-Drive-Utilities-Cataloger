@@ -2074,7 +2074,67 @@ function testExtractionRepairLoopDefersWhenSharedRuntimeBudgetIsLow() {
   assert.equal(deferred.details.aiCallCount, 1);
   assert.equal(deferred.details.nextExtractionAttempt, 2);
   assert.equal(deferred.details.reason, 'runtime-budget');
+  assert.equal(events.filter((entry) =>
+    entry.event === 'extraction-repair-requested').length, 0);
   assert.equal(JSON.stringify(events).includes('Missing identifier'), false);
+}
+
+function testExtractionRepairLoopPreservesNormalizationSnapshot() {
+  const context = loadCataloger();
+  const repairContexts = [];
+  let calls = 0;
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error(
+        'Gemini extraction has a nonnumeric electricity band consumption value.'
+      );
+      error.invalidExtractionOutput = true;
+      error.extractionIssueCode = 'invalid_extraction_normalization';
+      error.extractionFields = ['sheet_values'];
+      error.extractionSnapshot = { ...validInvoice(), identifier: 'INV-KEEP' };
+      throw error;
+    }
+    return validInvoice();
+  };
+  context.validateExtractedUtilityDataForImport_ = () => ({
+    valid: true, stage: 'target-spreadsheet'
+  });
+  context.logCatalogEvent_ = () => {};
+
+  const result = context.extractUtilityDataWithRepair_(
+    { getId: () => 'file-id' }, 'policy'
+  );
+  assert.equal(result.validation.valid, true);
+  assert.equal(repairContexts[1].previousExtraction.identifier, 'INV-KEEP');
+}
+
+function testGeminiEmptyStopResponseIsRepairableOutput() {
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          candidates: [{ finishReason: 'STOP', content: { parts: [] } }]
+        })
+      })
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-3.6-flash';
+  context.getScriptProperty_ = () => 'developer-secret';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logCatalogEvent_ = () => {};
+  context.logGeminiUsage_ = () => {};
+
+  assert.throws(
+    () => context.callGeminiForPdfWithBackend_(
+      { getBytes: () => [1, 2, 3] }, [], 'policy',
+      { getId: () => 'file-id' }, 'gemini_api', ''
+    ),
+    (error) => error.invalidExtractionOutput === true &&
+      error.extractionIssueCode === 'invalid_extraction_json'
+  );
 }
 
 function testExtractionRepairLoopExhaustsMalformedOutputs() {
@@ -5454,8 +5514,9 @@ function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   context.getRootFolderId_ = () => 'root-folder-id';
   context.isCatalogMaintenanceActive_ = () => false;
   context.logCatalogEvent_ = () => {};
-  context.processSingleIntakeFileWithinLock_ = (fileId) => {
+  context.processSingleIntakeFileWithinLock_ = (fileId, deadlineAt) => {
     calls.push(fileId);
+    assert.ok(deadlineAt > Date.now());
     return { status: 'IMPORTED' };
   };
   const files = [ignoredFile, file];
@@ -5730,6 +5791,8 @@ testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory();
 testExtractionRepairLoopDoesNotRetryNonRepairableState();
 testExtractionRepairLoopRetriesInvalidStructuredOutput();
 testExtractionRepairLoopDefersWhenSharedRuntimeBudgetIsLow();
+testExtractionRepairLoopPreservesNormalizationSnapshot();
+testGeminiEmptyStopResponseIsRepairableOutput();
 testExtractionRepairLoopExhaustsMalformedOutputs();
 testExtractionRepairLoopTracksChangingFeedback();
 testModelNormalizationFailureIsRepairable();

@@ -17,13 +17,14 @@ function retryFailedUtilitiesCataloging() {
  * Manually process one file already in the direct intake folder.
  */
 function processSingleIntakeFile(fileId) {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
-    return processSingleIntakeFileWithinLock_(fileId);
+    return processSingleIntakeFileWithinLock_(fileId, deadlineAt);
   });
 }
 
-function processSingleIntakeFileWithinLock_(fileId) {
+function processSingleIntakeFileWithinLock_(fileId, deadlineAt) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
 
     if (hasMutationJournal_(fileId)) {
@@ -46,7 +47,8 @@ function processSingleIntakeFileWithinLock_(fileId) {
     const state = loadIntakeFileState_();
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
-    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy);
+    const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
+      deadlineAt);
     try {
       addOperatorLinksToResult_(result, rootFolder);
     } catch (error) {
@@ -68,6 +70,7 @@ function processSingleIntakeFileWithinLock_(fileId) {
  * identifier and ambiguous filenames fail closed.
  */
 function processSingleIntakeFileByName(fileName) {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
   if (typeof fileName !== 'string' || !fileName.trim()) {
     throw new Error('An exact intake PDF filename is required.');
   }
@@ -90,11 +93,12 @@ function processSingleIntakeFileByName(fileName) {
     if (matches.length > 1) {
       throw new Error('Multiple matching PDFs were found in the direct intake folder.');
     }
-    return processSingleIntakeFileWithinLock_(matches[0].getId());
+    return processSingleIntakeFileWithinLock_(matches[0].getId(), deadlineAt);
   });
 }
 
 function runUtilitiesCataloging_(triggerSource) {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_(triggerSource, function () {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
@@ -106,7 +110,9 @@ function runUtilitiesCataloging_(triggerSource) {
       triggerSource: triggerSource,
       intakePdfCount: files.length
     });
-    const batch = processEligibleIntakeFiles_(files, rootFolder, triggerSource);
+    const batch = processEligibleIntakeFiles_(
+      files, rootFolder, triggerSource, deadlineAt
+    );
     finalizeCatalogResults_(batch.state, batch.results);
     const allResults = recoveredResults.concat(batch.results);
 
@@ -197,8 +203,10 @@ function isCatalogMaintenanceActive_() {
  * An unchanged error is retried by the daily fallback, never by every event
  * poll. This keeps ambiguous documents from exhausting Gemini quota.
  */
-function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
+function processEligibleIntakeFiles_(files, rootFolder, triggerSource, deadlineAt) {
   const startedAt = Date.now();
+  const processingDeadlineAt = Number(deadlineAt) ||
+    startedAt + CONFIG.MAX_RUNTIME_MS;
   const state = loadIntakeFileState_();
   if (triggerSource === 'daily') {
     pruneIntakeFileState_(state, files);
@@ -218,7 +226,7 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
     loadTrustedExtractionPolicy_(rootFolder) : '';
 
   eligible.forEach(function (file) {
-    if (Date.now() - startedAt >= CONFIG.MAX_RUNTIME_MS) {
+    if (Date.now() >= processingDeadlineAt) {
       const result = buildErrorResult_(file, 'Execution time is nearly exhausted.',
         'The document remains in intake and will be retried by the next daily run.');
       results.push(result);
@@ -238,7 +246,7 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource) {
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
-      startedAt + CONFIG.MAX_RUNTIME_MS);
+      processingDeadlineAt);
     results.push(result);
     try {
       addOperatorLinksToResult_(result, rootFolder);
@@ -817,22 +825,8 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
 
   for (let attempt = 1; attempt <= CONFIG.EXTRACTION_MAX_AI_CALLS;
     attempt += 1) {
-    if (attempt > 1 && Date.now() +
-      CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS >= repairDeadlineAt) {
-      logCatalogEvent_('extraction-repair-deferred', Object.assign(
-        describeFileForLog_(file), {
-          aiCallCount: attempt - 1,
-          nextExtractionAttempt: attempt,
-          issueCode: validation && validation.code || '',
-          issueStage: validation && validation.stage || 'extraction',
-          reason: 'runtime-budget'
-        }
-      ));
-      const deadlineError = new Error(
-        'Extraction repair was deferred because execution time is nearly exhausted.'
-      );
-      deadlineError.extractionRepairDeferred = true;
-      throw deadlineError;
+    if (attempt > 1) {
+      assertExtractionRepairBudget_(file, repairDeadlineAt, attempt, validation);
     }
     try {
       extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext);
@@ -841,7 +835,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
       if (!error.invalidExtractionOutput) {
         throw error;
       }
-      extracted = {};
+      extracted = error.extractionSnapshot || {};
       validation = withExtractionValidationStage_(invalidExtraction_(
         'Gemini returned extraction JSON that failed deterministic validation.',
         'Re-examine the PDF and return a complete object matching the required schema.',
@@ -905,6 +899,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
       };
     }
 
+    assertExtractionRepairBudget_(file, repairDeadlineAt, attempt + 1, validation);
     const feedback = buildExtractionRepairFeedback_(validation, attempt);
     history.push({
       attempt: attempt,
@@ -930,6 +925,26 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
   }
 
   return { extracted: extracted, validation: validation };
+}
+
+function assertExtractionRepairBudget_(file, deadlineAt, nextAttempt, validation) {
+  if (Date.now() + CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS < deadlineAt) {
+    return;
+  }
+  logCatalogEvent_('extraction-repair-deferred', Object.assign(
+    describeFileForLog_(file), {
+      aiCallCount: Math.max(0, nextAttempt - 1),
+      nextExtractionAttempt: nextAttempt,
+      issueCode: validation && validation.code || '',
+      issueStage: validation && validation.stage || 'extraction',
+      reason: 'runtime-budget'
+    }
+  ));
+  const deadlineError = new Error(
+    'Extraction repair was deferred because execution time is nearly exhausted.'
+  );
+  deadlineError.extractionRepairDeferred = true;
+  throw deadlineError;
 }
 
 function validateExtractedUtilityDataForImport_(extracted) {
@@ -1024,6 +1039,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
     const marked = markInvalidExtractionOutput_(error);
     marked.extractionIssueCode = 'invalid_extraction_normalization';
     marked.extractionFields = ['sheet_values'];
+    marked.extractionSnapshot = buildExtractionRepairSnapshot_(extracted);
     throw marked;
   }
   Object.defineProperty(normalized, 'configured_secondary_headers', {
@@ -1205,7 +1221,13 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   }
   const parts = candidate && candidate.content && candidate.content.parts;
   if (!parts || !parts[0] || !parts[0].text) {
-    throw new Error('Gemini did not return valid extraction JSON.');
+    const emptyExtractionError = new Error(
+      'Gemini did not return valid extraction JSON.'
+    );
+    emptyExtractionError.invalidExtractionOutput = true;
+    emptyExtractionError.extractionIssueCode = 'invalid_extraction_json';
+    emptyExtractionError.extractionFields = [];
+    throw emptyExtractionError;
   }
   return parts[0].text;
 }
