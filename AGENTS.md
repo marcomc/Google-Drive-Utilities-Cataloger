@@ -73,6 +73,10 @@
   non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
   remain blocking; a tied historical cadence must fail closed rather than pick
   an arbitrary frequency.
+- Keep a classification decision canonical from admission through every
+  downstream guard and final user-visible status. Discard evidence that cannot
+  contribute to a decision before evaluating its identity, provenance, or trust
+  predicates.
 - Use event payload file identifiers and durable per-file outcome state before
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
@@ -190,3 +194,12 @@
   failure, persist a redacted retry marker and ensure every scheduled recovery
   path consumes it without reprocessing PDFs. Retain the marker on failure and
   clear it only after a successful normal or scheduled refresh.
+- For validator-guided model repair, default failures to non-repairable and
+  require an explicit document-correctable classification with structured
+  stage, code, and affected fields before retrying. Use one absolute deadline
+  across every public entry point, preserve the last sanitized schema-valid
+  extraction across malformed later responses, bound targeted repair passes,
+  and test the maximum call count plus the no-mutation exhaustion path.
+- Keep localized diagnostic recognition bounded and table-driven. Cover common
+  grammatical wrappers and word-order variants alongside ambiguity and mismatch
+  vetoes, and verify the final validator outcome rather than the helper alone.
