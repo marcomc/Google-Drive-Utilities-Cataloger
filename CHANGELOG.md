@@ -24,9 +24,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the field blank rather than choosing an arbitrary cadence.
 - Treat optional line-item problems as non-blocking only when invoice costs,
   VAT, and total reconcile; records now surface as `IMPORTED WITH WARNINGS`
-  when secondary fields are blank or uncertain, while identity, reference-date,
-  reconciliation, and electricity-band consumption evidence still require
-  review.
+  when a configured secondary field is explicitly absent or not applicable;
+  unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking,
+  as do identity, reference-date, reconciliation, and electricity-band
+  consumption evidence.
 
 ## [0.4.0] - 2026-08-07 - Supply identity verification
 
