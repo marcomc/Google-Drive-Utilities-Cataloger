@@ -1650,6 +1650,7 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
         initializeElectricityDashboard_(spreadsheet, automationConfig, {
           extendManagedRanges: true
         });
+        clearElectricityDashboardRefreshPending_();
       }
       return { warning: '' };
     }
@@ -1671,6 +1672,7 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
     initializeElectricityDashboard_(spreadsheet, automationConfig, {
       extendManagedRanges: true
     });
+    clearElectricityDashboardRefreshPending_();
     return { warning: '' };
   } catch (error) {
     // Dashboard sheets and charts are derived presentation state. The source
@@ -1679,9 +1681,36 @@ function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
       errorType: error.name || 'Error',
       errorCategory: classifyCatalogErrorForLog_(error)
     });
+    markElectricityDashboardRefreshPending_();
     return {
       warning: 'Electricity dashboard refresh failed; imported invoice data was retained.'
     };
+  }
+}
+
+function markElectricityDashboardRefreshPending_() {
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING,
+      JSON.stringify({
+        queuedAt: Date.now(),
+        errorCategory: 'dashboard'
+      })
+    );
+  } catch (error) {
+    // The original refresh failure remains reportable even if its retry marker
+    // cannot be persisted in this execution.
+  }
+}
+
+function clearElectricityDashboardRefreshPending_() {
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(
+      CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING
+    );
+  } catch (error) {
+    // A stale marker causes an extra safe recovery attempt; it must not turn a
+    // successful dashboard refresh into an invoice-import failure.
   }
 }
 

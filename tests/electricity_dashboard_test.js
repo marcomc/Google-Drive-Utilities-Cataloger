@@ -14,6 +14,8 @@ const technicalCreationProperty =
   'ELECTRICITY_DASHBOARD_TECHNICAL_CREATION';
 const technicalBackupCreationProperty =
   'ELECTRICITY_DASHBOARD_TECHNICAL_BACKUP_CREATION';
+const dashboardRefreshPendingProperty =
+  'ELECTRICITY_DASHBOARD_REFRESH_PENDING';
 
 function createScriptProperties(initialValues = {}) {
   const values = { ...initialValues };
@@ -1779,7 +1781,8 @@ function testDashboardRefreshRebuildsEveryElectricityImport() {
 }
 
 function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
-  const context = loadDashboard();
+  const scriptProperties = createScriptProperties();
+  const context = loadDashboard(scriptProperties);
   const labels = context.getElectricityDashboardLabels_('en');
   const importedSheet = { getName: () => 'Electricity' };
   const technical = { getRange: () => ({ getValues: () => [[2026]] }) };
@@ -1826,6 +1829,16 @@ function testDashboardRefreshRetainsInvoiceWhenDerivedStateCannotRefresh() {
     spreadsheet, config, importedSheet, { reference_year: 2027 }
   ).warning, /invoice data was retained/);
   assert.equal(logged, 4);
+  const pending = JSON.parse(scriptProperties.values[
+    dashboardRefreshPendingProperty
+  ]);
+  assert.equal(typeof pending.queuedAt, 'number');
+  assert.equal(pending.errorCategory, 'dashboard');
+  context.initializeElectricityDashboard_ = () => {};
+  assert.equal(context.refreshElectricityDashboardAfterInvoiceImport_(
+    spreadsheet, config, importedSheet, { reference_year: 2027 }
+  ).warning, '');
+  assert.equal(scriptProperties.values[dashboardRefreshPendingProperty], undefined);
   assert.equal(labels.dataSheet, 'Electricity Statistics - Data');
 }
 

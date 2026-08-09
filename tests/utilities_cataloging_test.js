@@ -1332,6 +1332,63 @@ function testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation() {
   assert.equal(JSON.stringify(extracted).includes('configured_secondary_headers'), false);
 }
 
+function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
+  const properties = {
+    ["ELECTRICITY_DASHBOARD_REFRESH_PENDING"]: JSON.stringify({
+      queuedAt: 0,
+      errorCategory: 'dashboard'
+    })
+  };
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (key) => properties[key] || '',
+        deleteProperty: (key) => { delete properties[key]; }
+      })
+    }
+  });
+  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = (id) => ({ id });
+  const events = [];
+  context.logCatalogEvent_ = (event) => events.push(event);
+  let refreshes = 0;
+  context.initializeElectricityDashboard_ = () => { refreshes += 1; };
+
+  assert.equal(context.recoverPendingElectricityDashboardRefresh_(), true);
+  assert.equal(refreshes, 1);
+  assert.equal(properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING, undefined);
+  assert.deepEqual(events, ['electricity-dashboard-refresh-recovered']);
+
+  properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING = JSON.stringify({ queuedAt: 0 });
+  context.initializeElectricityDashboard_ = () => { throw new Error('still unavailable'); };
+  assert.equal(context.recoverPendingElectricityDashboardRefresh_(), false);
+  assert.ok(properties.ELECTRICITY_DASHBOARD_REFRESH_PENDING);
+  assert.deepEqual(events, [
+    'electricity-dashboard-refresh-recovered',
+    'electricity-dashboard-refresh-retry-failed'
+  ]);
+}
+
+function testScheduledCatalogRunRetriesDashboardBeforeScanning() {
+  const context = loadCataloger();
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogProcessingLock_ = (_source, callback) => callback();
+  context.DriveApp = { getFolderById: () => ({}) };
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.recoverPendingMutations_ = () => [];
+  context.flushPendingReports_ = () => {};
+  let retries = 0;
+  context.recoverPendingElectricityDashboardRefresh_ = () => { retries += 1; };
+  context.listDirectIntakePdfs_ = () => [];
+  context.logCatalogEvent_ = () => {};
+  context.processEligibleIntakeFiles_ = () => ({ state: {}, results: [] });
+  context.finalizeCatalogResults_ = () => {};
+
+  context.runUtilitiesCataloging_('daily');
+  assert.equal(retries, 1);
+}
+
 function testSupplierDefaultsNormalizeConfiguredIdentities() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
@@ -4774,6 +4831,8 @@ testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
 testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation();
+testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
+testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
 testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();

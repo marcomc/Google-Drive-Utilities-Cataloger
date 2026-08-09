@@ -100,6 +100,7 @@ function runUtilitiesCataloging_(triggerSource) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
     const recoveredResults = recoverPendingMutations_(rootFolder);
     flushPendingReports_();
+    recoverPendingElectricityDashboardRefresh_();
     const files = listDirectIntakePdfs_(rootFolder);
     logCatalogEvent_('catalog-scan-completed', {
       triggerSource: triggerSource,
@@ -116,6 +117,30 @@ function runUtilitiesCataloging_(triggerSource) {
     });
     return { triggerSource: triggerSource, results: allResults };
   });
+}
+
+function recoverPendingElectricityDashboardRefresh_() {
+  const properties = PropertiesService.getScriptProperties();
+  const propertyKey = CONFIG.PROPERTY_KEYS.ELECTRICITY_DASHBOARD_REFRESH_PENDING;
+  if (!properties.getProperty(propertyKey)) {
+    return false;
+  }
+  try {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    initializeElectricityDashboard_(spreadsheet, automationConfig, {
+      extendManagedRanges: true
+    });
+    properties.deleteProperty(propertyKey);
+    logCatalogEvent_('electricity-dashboard-refresh-recovered', {});
+    return true;
+  } catch (error) {
+    logCatalogEvent_('electricity-dashboard-refresh-retry-failed', {
+      errorType: error.name || 'Error',
+      errorCategory: classifyCatalogErrorForLog_(error)
+    });
+    return false;
+  }
 }
 
 function withCatalogProcessingLock_(triggerSource, callback) {

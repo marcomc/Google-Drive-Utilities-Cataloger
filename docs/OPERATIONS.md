@@ -265,7 +265,9 @@ collection-charge evidence keep their stricter reviewed behavior.
 The electricity dashboard and its technical sheet are derived presentation
 state. A refresh failure is logged and reported as an import warning after the
 invoice row has been verified; it never rolls back valid invoice data. The next
-electricity import attempts to rebuild the managed dashboard state.
+scheduled daily or Drive-event run retries the managed refresh even when no
+new PDF is eligible, and clears the pending dashboard-recovery state only after
+that refresh succeeds.
 
 When a report contains the localized supplier-profile link, open that folder to
 review a pending profile or the approved profile. The localized retry-import
