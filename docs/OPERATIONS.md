@@ -177,11 +177,11 @@ reference-month wording was corrected to require literal `mm` text (`01`
 through `12`). This operational policy update did not deploy source code or
 alter processing triggers.
 
-On 2026-08-08, the existing Drive `AGENTS.md` was updated and read back to
-allow imports with warnings when secondary invoice fields or billing frequency
-remain unavailable. Identity, reconciliation, reference-date, and reported
-electricity-band consumption evidence remain hard gates. This operational
-policy update did not deploy source code or alter processing triggers.
+On 2026-08-09, the 2026-08-08 authorization for warning-only missing cadence
+and secondary fields was withdrawn from both the source policy and the live
+Drive `AGENTS.md` in the configured intake folder. The Drive API read-back
+matched the uploaded policy exactly. No PDF, spreadsheet, trigger, or source
+deployment was changed by this policy update.
 
 ## Cadence and cost
 
@@ -245,22 +245,20 @@ applied to invoice, contract, or customer identifiers.
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
 
-For invoices whose billing frequency is not printed explicitly, extraction does
-not fail solely for that absence. The runtime derives `monthly`, `bimonthly`,
-or `quarterly` from a complete calendar or anniversary-aligned billed period
-and corroborating earlier invoices for the same supplier and supply. A unique
-historical majority is required when history is used. Conflicting, unavailable,
-or insufficient evidence leaves frequency blank with an import warning; it
-never copies a transaction-specific value from another invoice. An explicit
-printed frequency or reviewed configuration override remains authoritative.
+For invoices whose billing frequency is not printed explicitly, the runtime may
+derive `monthly`, `bimonthly`, or `quarterly` from a complete calendar or
+anniversary-aligned billed period, or from verified independent earlier invoices
+for the same supplier and supply. A unique historical majority is required when
+history is used. Conflicting, unavailable, or insufficient evidence leaves a
+blocking diagnostic; it never copies a transaction-specific value from another
+invoice. An explicit printed frequency or reviewed configuration override
+remains authoritative.
 
-Explicit absence or non-applicability of configured writable secondary fields
-are import warnings when costs, VAT, and total are complete and reconcile. The
-report marks those documents `IMPORTED WITH WARNINGS`, so missing fields can
-improve future extraction without delaying the archive/import cycle. Identity,
-invoice number, reference date, reconciliation, and reported electricity
-F1/F2/F3 consumption evidence remain blocking. Supplier-specific defaults and
-collection-charge evidence keep their stricter reviewed behavior.
+Explicit absence, non-applicability, unreadability, or ambiguity of configured
+writable secondary fields blocks import. The narrow reviewed
+subscriber-identifier, tax-inclusion, and supplier-default exceptions remain in
+force. `IMPORTED WITH WARNINGS` is reserved for a retained import whose
+electricity dashboard refresh failed.
 
 The electricity dashboard and its technical sheet are derived presentation
 state. A refresh failure is logged and reported as an import warning after the

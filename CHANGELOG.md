@@ -18,16 +18,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Validate both local entrypoint declarations and the exact uploaded Apps Script
   version before updating the owner-only API deployment.
-- Treat an unprinted invoice billing frequency as recoverable: infer monthly,
-  bimonthly, or quarterly cadence from the billed period and prior matching
-  supplier invoices instead of blocking the import; conflicting history leaves
-  the field blank rather than choosing an arbitrary cadence.
-- Treat optional line-item problems as non-blocking only when invoice costs,
-  VAT, and total reconcile; records now surface as `IMPORTED WITH WARNINGS`
-  when a configured secondary field is explicitly absent or not applicable;
-  unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking,
-  as do identity, reference-date, reconciliation, and electricity-band
-  consumption evidence.
+- Infer an unprinted invoice billing frequency only from a complete billed
+  period or verified independent prior invoices for the same supplier and
+  supply. Unresolved or conflicting cadence remains blocking.
+- Keep configured secondary-field diagnostics blocking and reserve
+  `IMPORTED WITH WARNINGS` for retained imports whose electricity dashboard
+  refresh failed. Existing narrow subscriber-identifier, tax-inclusion, and
+  supplier-default exceptions remain unchanged.
 
 ## [0.4.0] - 2026-08-07 - Supply identity verification
 

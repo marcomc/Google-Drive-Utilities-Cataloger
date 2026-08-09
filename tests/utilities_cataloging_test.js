@@ -616,10 +616,7 @@ function testExtractionSchemaAndCalendarValidation() {
     frequency_overrides: []
   });
   const raw = {
-    ...validInvoice(),
-    configured_secondary_headers: [
-      'Unità di misura', 'Tariff', 'Payment method', 'Sconto', 'Custom field'
-    ]
+    ...validInvoice()
   };
   context.validateRawExtractionShape_(raw);
   assert.equal(context.validateExtraction_(raw).valid, true);
@@ -891,7 +888,7 @@ function testExtractionSchemaAndCalendarValidation() {
     frequency: '',
     problems: ['Frequenza di fatturazione non indicata esplicitamente nel documento.']
   };
-  assert.equal(context.validateExtraction_(missingFrequency).valid, true);
+  assert.equal(context.validateExtraction_(missingFrequency).valid, false);
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
@@ -904,12 +901,12 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: [
       'Frequenza di fatturazione non indicata esplicitamente nel documento; periodo ambiguo.'
     ]
-  }).valid, true);
+  }).valid, false);
   [
     'Unità di misura non indicata.',
     'Sconto non applicabile.'
   ].forEach((problem) => {
-    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, true);
+    assert.equal(context.validateExtraction_({ ...raw, problems: [problem] }).valid, false);
   });
   [
     'Quantità consumi F1 incerta.',
@@ -949,20 +946,15 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_({
     ...raw,
     problems: ['Sconto non riportato in fattura.']
-  }).valid, true);
+  }).valid, false);
   assert.equal(context.validateExtraction_({
     ...raw,
     problems: ['Frequenza non indicata in fattura.']
-  }).valid, true);
-  assert.equal(context.validateExtraction_({
-    ...raw,
-    configured_secondary_headers: [],
-    problems: ['Custom field non applicabile.']
   }).valid, false);
   assert.equal(context.validateExtraction_({
     ...raw,
     problems: ['Custom field non applicabile.']
-  }).valid, true);
+  }).valid, false);
   [
     'PDF appears incomplete.',
     'Document authenticity is uncertain.',
@@ -1102,7 +1094,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(extracted);
   assert.equal(extracted.frequency, 'monthly');
-  assert.equal(extracted.field_decisions[0].disposition, 'inferred');
+  assert.equal(context.validateExtraction_(extracted).valid, true);
 
   const historyOnly = {
     ...extracted,
@@ -1199,8 +1191,9 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     same: { getId: () => 'current-file-id' },
     independent: { getId: () => 'prior-file-id' }
   };
+  const sourceIdentityReads = [];
   const replacementSheet = {
-    getLastRow: () => 3,
+    getLastRow: () => 5,
     getRange: (row, column) => ({
       row,
       column,
@@ -1208,7 +1201,11 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
         ['SUPPLIER', 'quarterly', '2026-05-16', 'Avery North',
           'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'same'],
         ['SUPPLIER', 'monthly', '2026-06-16', 'Avery North',
-          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'independent']
+          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'independent'],
+        ['SUPPLIER', '', '2026-04-16', 'Avery North',
+          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'unreadable'],
+        ['SUPPLIER', 'annual', '2026-03-16', 'Avery North',
+          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'unreadable']
       ]
     })
   };
@@ -1222,8 +1219,10 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
     lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
       'service address': 5, 'source file': 6 }
   });
-  context.getFileFromSourceCell_ = (cell) =>
-    cell.row === 2 ? sourceFiles.same : sourceFiles.independent;
+  context.getFileFromSourceCell_ = (cell) => {
+    sourceIdentityReads.push(cell.row);
+    return cell.row === 2 ? sourceFiles.same : sourceFiles.independent;
+  };
   const replacementRetry = {
     ...historyOnly,
     original_file_id: 'current-file-id',
@@ -1231,6 +1230,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   };
   context.inferInvoiceFrequency_(replacementRetry);
   assert.equal(replacementRetry.frequency, 'monthly');
+  assert.deepEqual(sourceIdentityReads, [2, 3]);
 
   context.getFileFromSourceCell_ = () => null;
   const unidentifiedHistory = { ...replacementRetry, frequency: '', problems: [] };
@@ -1271,7 +1271,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(unavailableHistory);
   assert.equal(unavailableHistory.frequency, '');
   assert.match(unavailableHistory.problems.join(' '), /could not be corroborated/);
-  assert.equal(context.validateExtraction_(unavailableHistory).valid, true);
+  assert.equal(context.validateExtraction_(unavailableHistory).valid, false);
 
   const noFrequencyEvidence = {
     ...historyOnly,
@@ -1288,7 +1288,7 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   assert.equal(noFrequencyEvidence.frequency, '');
   assert.match(noFrequencyEvidence.problems.join(' '),
     /could not be established from the billed period or prior invoices/);
-  assert.equal(context.validateExtraction_(noFrequencyEvidence).valid, true);
+  assert.equal(context.validateExtraction_(noFrequencyEvidence).valid, false);
 
   [
     ['2026-05-16', '2026-06-15', 'monthly'],
@@ -1355,63 +1355,6 @@ function testSupplierDefaultsUseRuntimeTargetHeaders() {
     { header: "Spese d'incasso", value: 0 }
   ]));
   assert.equal(JSON.stringify(extracted.problems), JSON.stringify([]));
-}
-
-function testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation() {
-  const context = loadCataloger();
-  context.getAutomationConfig_ = () => ({
-    locale: 'en',
-    canonical_suppliers: ['SUPPLIER'],
-    supplier_aliases: {},
-    canonical_supplies: ['Water'],
-    supply_aliases: {},
-    address_rules: [],
-    address_missing_type: 'import',
-    frequency_overrides: []
-  });
-  context.getSheetHeadersBySupply_ = () => ({
-    Water: ['Issue date', 'Supplier', 'Optional custom field', 'Consumption quantity F1']
-  });
-  context.callGeminiForPdf_ = () => 'model-response';
-  context.parseGeminiJson_ = () => ({ ...validInvoice() });
-  context.validateRawExtractionShape_ = () => {};
-
-  const extracted = context.extractUtilityData_({
-    getBlob: () => ({}),
-    getId: () => 'file-id',
-    getName: () => 'invoice.pdf'
-  }, '');
-
-  assert.deepEqual(JSON.parse(JSON.stringify(extracted.configured_secondary_headers)), [
-    'Optional custom field'
-  ]);
-  assert.equal(JSON.stringify(extracted).includes('configured_secondary_headers'), false);
-}
-
-function testConfiguredSecondaryHeadersUseExactRequiredAliases() {
-  const cases = [
-    { locale: 'en', header: 'Total discount', secondary: true },
-    { locale: 'en', header: 'Contract discount', secondary: true },
-    { locale: 'en', header: 'Total cost', secondary: false },
-    { locale: 'en', header: 'Frequency', secondary: false },
-    { locale: 'en', header: 'Consumption quantity F1', secondary: false },
-    { locale: 'en', header: 'Collection charges', secondary: false },
-    { locale: 'it', header: 'Sconto totale', secondary: true },
-    { locale: 'it', header: 'Sconto contratto', secondary: true },
-    { locale: 'it', header: 'Costo totale', secondary: false },
-    { locale: 'it', header: 'Frequenza', secondary: false },
-    { locale: 'it', header: 'Quantità consumi F1', secondary: false },
-    { locale: 'it', header: "Spese d'incasso", secondary: false }
-  ];
-  cases.forEach(({ locale, header, secondary }) => {
-    const context = loadCataloger();
-    context.getAutomationConfig_ = () => ({ locale });
-    assert.equal(
-      context.getConfiguredSecondaryInvoiceHeaders_([header]).length === 1,
-      secondary,
-      `${locale}: ${header}`
-    );
-  });
 }
 
 function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
@@ -1539,6 +1482,14 @@ function testExtractionInfersMissingFrequencyBeforeValidation() {
   assert.equal(extracted.frequency, 'monthly');
   assert.deepEqual(extracted.problems, []);
   assert.equal(context.validateExtraction_(extracted).valid, true);
+  extracted.address_type = 'import';
+  const result = context.buildSuccessResult_(
+    { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
+    'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
+    extracted, 'https://sheets.example/spreadsheet'
+  );
+  assert.equal(result.status, 'IMPORTED');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), []);
 }
 
 function testAmbiguousAddressRulesFailClosed() {
@@ -2313,31 +2264,9 @@ function testReportFieldsCannotInjectExtraLines() {
   );
 }
 
-function testImportedInvoiceWithSecondaryWarningsIsReported() {
+function testDashboardRefreshWarningIsReported() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({ locale: 'en' });
-  const extracted = {
-    ...validInvoice(),
-    configured_secondary_headers: ['Tariff'],
-    problems: ['Tariff is not applicable.'],
-    field_decisions: [{
-      field: 'frequency',
-      disposition: 'inferred',
-      evidence: 'Derived from the complete billed period.'
-    }]
-  };
-  const result = context.buildSuccessResult_(
-    { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
-    'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
-    extracted, 'https://sheets.example/spreadsheet'
-  );
-  assert.equal(result.status, 'IMPORTED WITH WARNINGS');
-  assert.deepEqual(JSON.parse(JSON.stringify(result.warnings)), [
-    { field: 'secondary field', reason: 'Tariff is not applicable.' },
-    { field: 'frequency', reason: 'Derived from the complete billed period.' }
-  ]);
-  assert.match(context.formatResult_(result),
-    /Warnings: secondary field: Tariff is not applicable.; frequency: Derived from the complete billed period./);
   const dashboardResult = context.buildSuccessResult_(
     { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
     'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
@@ -2385,10 +2314,10 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
   assert.match(prompt,
-    /If a secondary field is genuinely not printed or not applicable/);
-  assert.match(prompt, /For unreadable or ambiguous evidence, inspect other current-document tables/);
-  assert.match(prompt,
-    /runtime may import the invoice with that field blank/);
+    /If a field is not printed, not applicable, unreadable, or ambiguous/);
+  assert.match(prompt, /concise blocking diagnostic/);
+  assert.match(prompt, /If cadence cannot be established or conflicts, the diagnostic blocks import/);
+  assert.doesNotMatch(prompt, /runtime may import the invoice with that field blank/);
   assert.match(prompt,
     /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
   assert.match(prompt,
@@ -4923,8 +4852,6 @@ testServiceIdentityRejectsCivicNumberAmbiguity();
 testServiceIdentityRejectsMissingAddressComponents();
 testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem();
 testSupplierDefaultsUseRuntimeTargetHeaders();
-testExtractionRetainsConfiguredSecondaryHeadersOnlyForValidation();
-testConfiguredSecondaryHeadersUseExactRequiredAliases();
 testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
@@ -4945,7 +4872,7 @@ testGenericRateLimitStaysOnDeveloperApi();
 testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();
-testImportedInvoiceWithSecondaryWarningsIsReported();
+testDashboardRefreshWarningIsReported();
 testPromptKeepsHeadersScopedBySupply();
 testHeadersAreCollectedPerSupply();
 testDuplicateNormalizedSheetHeadersAreRejected();
