@@ -159,6 +159,28 @@ function testFirstInvoiceCanEstablishMissingServiceIdentity() {
   const result = context.validateServiceIdentityForInvoice_(validInvoice());
 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+  const incompleteInvoice = Object.assign({}, validInvoice(), {
+    account_holder: '',
+    address_evidence: '',
+    service_street: '',
+    service_civic_number: '',
+    service_city: ''
+  });
+  const incompleteResult = context.validateServiceIdentityForInvoice_(
+    incompleteInvoice);
+  assert.equal(incompleteResult.valid, false);
+  assert.equal(incompleteResult.code, 'service_identity_missing');
+  assert.equal(incompleteResult.repairable, true);
+  cells[0][4] = 'Avery North';
+  const holderOnlyResult = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(holderOnlyResult.valid, false);
+  assert.equal(holderOnlyResult.code, 'target_identity_not_configured');
+  cells[0][4] = 'Enter account holder here';
+  cells[0][5] = 'Cedar Meridian Boulevard 125 99991 Rivermouth';
+  const addressOnlyResult = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(addressOnlyResult.valid, false);
+  assert.equal(addressOnlyResult.code, 'target_identity_not_configured');
+  cells[0][5] = 'Enter service address here';
   lastRow = 3;
   const migratedResult = context.validateServiceIdentityForInvoice_(validInvoice());
   assert.equal(migratedResult.valid, false);
@@ -193,6 +215,39 @@ function testFirstInvoiceCannotReplaceFormulaBackedIdentityControls() {
       'contract number': 4,
       'account holder': 5,
       'service address': 6
+    }
+  });
+
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'target_identity_not_configured');
+}
+
+function testLegacyHeaderRowWithoutControlsRemainsFailClosed() {
+  const context = loadCataloger();
+  const sheet = {
+    getLastRow: () => 1,
+    getRange: () => {
+      throw new Error('row zero must never be accessed');
+    }
+  };
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Issue date', 'Supplier', 'Invoice number', 'Source file'],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'source file': 4
     }
   });
 
@@ -3991,6 +4046,7 @@ function testMutationRecoveryRestoresInitialServiceIdentity() {
     address: 'Cedar Meridian Boulevard 125 99991 Rivermouth'
   };
   const sheet = {
+    getSheetId: () => 7,
     getLastRow: () => 3,
     getRange: (row, column) => ({
       row,
@@ -4035,14 +4091,17 @@ function testMutationRecoveryRestoresInitialServiceIdentity() {
     sourceFile: ['source file']
   }[key] || []);
   context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  let sourceMarkerFile = file;
   context.getFileFromSourceCell_ = (cell) =>
-    cell.row === 3 && cell.column === 7 ? file : null;
+    cell.row === 3 && cell.column === 7 ? sourceMarkerFile : null;
   context.updateMutationJournal_ = () => {};
   context.refreshElectricityDashboardAfterRollback_ = () => {};
 
   const journal = {
     stage: 'sheet-written',
     sheetName: 'Water',
+    spreadsheetId: 'spreadsheet-id',
+    sheetId: 7,
     sheetRow: 3,
     sheetRowCreated: true,
     sheetRowPreexisting: false,
@@ -4057,6 +4116,22 @@ function testMutationRecoveryRestoresInitialServiceIdentity() {
     },
     serviceIdentityBootstrapCompleted: true
   };
+
+  sheet.getSheetId = () => 8;
+  assert.throws(
+    () => context.rollbackJournalSheetRow_(journal, file),
+    /tab identity no longer matches/
+  );
+  assert.equal(cells.holder, 'Avery North');
+  assert.equal(cells.address, 'Cedar Meridian Boulevard 125 99991 Rivermouth');
+  sheet.getSheetId = () => 7;
+  sourceMarkerFile = { getId: () => 'different-file-id' };
+  assert.throws(
+    () => context.rollbackJournalSheetRow_(journal, file),
+    /source marker is missing/
+  );
+  assert.equal(cells.holder, 'Avery North');
+  sourceMarkerFile = file;
 
   context.rollbackJournalSheetRow_(journal, file);
 
@@ -6111,6 +6186,7 @@ testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
 testFirstInvoiceCanEstablishMissingServiceIdentity();
 testFirstInvoiceCannotReplaceFormulaBackedIdentityControls();
+testLegacyHeaderRowWithoutControlsRemainsFailClosed();
 testInvoiceFrequencyInferenceUsesPeriodAndHistory();
 testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics();
 testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation();

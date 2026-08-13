@@ -1872,22 +1872,25 @@ function getServiceIdentityControls_(sheet, layout) {
   const metadataRow = layout.headerRow - 1;
   return {
     account_holder: normalizeServiceIdentityControlValue_(
-      sheet.getRange(metadataRow, holderColumn).getDisplayValue()
+      sheet.getRange(metadataRow, holderColumn).getDisplayValue(),
+      'accountHolder'
     ),
     service_address: normalizeServiceIdentityControlValue_(
-      sheet.getRange(metadataRow, addressColumn).getDisplayValue()
+      sheet.getRange(metadataRow, addressColumn).getDisplayValue(),
+      'serviceAddress'
     )
   };
 }
 
-function normalizeServiceIdentityControlValue_(value) {
+function normalizeServiceIdentityControlValue_(value, fieldKey) {
   const text = String(value || '').trim();
   const placeholders = [];
   const registry = getLocalizationRegistry_();
   Object.keys(registry).forEach(function (locale) {
     const controls = registry[locale].serviceIdentityControls || {};
-    placeholders.push(controls.accountHolderPlaceholder || '');
-    placeholders.push(controls.serviceAddressPlaceholder || '');
+    placeholders.push(fieldKey === 'accountHolder' ?
+      controls.accountHolderPlaceholder || '' :
+      controls.serviceAddressPlaceholder || '');
   });
   return placeholders.indexOf(text) >= 0 ? '' : text;
 }
@@ -1907,7 +1910,8 @@ function buildInitialServiceIdentity_(extracted) {
 }
 
 function canEstablishInitialServiceIdentity_(sheet, layout, configured) {
-  if (configured.account_holder || configured.service_address ||
+  if (!layout || layout.headerRow <= 1 ||
+    configured.account_holder || configured.service_address ||
     typeof sheet.getLastRow !== 'function' ||
     sheet.getLastRow() > layout.headerRow) {
     return false;
@@ -1924,6 +1928,24 @@ function canEstablishInitialServiceIdentity_(sheet, layout, configured) {
     const control = sheet.getRange(metadataRow, column);
     return typeof control.getFormula !== 'function' || !control.getFormula();
   });
+}
+
+function assertInitialServiceIdentityBootstrapPristine_(bootstrap) {
+  const holderControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
+    bootstrap.holderColumn);
+  const addressControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
+    bootstrap.addressColumn);
+  [holderControl, addressControl].forEach(function (control) {
+    if (typeof control.getFormula === 'function' && control.getFormula()) {
+      throw new Error('Initial service-identity controls are no longer pristine.');
+    }
+  });
+  const currentHolder = String(holderControl.getDisplayValue() || '');
+  const currentAddress = String(addressControl.getDisplayValue() || '');
+  if (currentHolder !== bootstrap.previousAccountHolder ||
+    currentAddress !== bootstrap.previousServiceAddress) {
+    throw new Error('Initial service-identity controls changed during import.');
+  }
 }
 
 function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
@@ -1957,6 +1979,9 @@ function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
     previousServiceAddress: String(addressControl.getDisplayValue() || ''),
     accountHolder: candidate.account_holder,
     serviceAddress: candidate.service_address,
+    spreadsheetId: typeof getSpreadsheetId_ === 'function' ?
+      getSpreadsheetId_() : '',
+    sheetId: typeof sheet.getSheetId === 'function' ? sheet.getSheetId() : '',
     started: false,
     completed: false
   };
@@ -1970,7 +1995,9 @@ function serializeServiceIdentityBootstrap_(bootstrap) {
     previousAccountHolder: bootstrap.previousAccountHolder,
     previousServiceAddress: bootstrap.previousServiceAddress,
     accountHolder: bootstrap.accountHolder,
-    serviceAddress: bootstrap.serviceAddress
+    serviceAddress: bootstrap.serviceAddress,
+    spreadsheetId: bootstrap.spreadsheetId,
+    sheetId: bootstrap.sheetId
   };
 }
 
@@ -1978,6 +2005,7 @@ function applyInitialServiceIdentityBootstrap_(file, state, bootstrap) {
   if (!bootstrap) {
     return;
   }
+  assertInitialServiceIdentityBootstrapPristine_(bootstrap);
   checkpointMutationJournal_(file.getId(), state, {
     serviceIdentityBootstrap: serializeServiceIdentityBootstrap_(bootstrap),
     serviceIdentityBootstrapCompleted: false
@@ -1987,8 +2015,18 @@ function applyInitialServiceIdentityBootstrap_(file, state, bootstrap) {
     bootstrap.sheet.getRange(bootstrap.metadataRow, bootstrap.holderColumn),
     bootstrap.accountHolder
   );
+  const addressControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
+    bootstrap.addressColumn);
+  if (typeof addressControl.getFormula === 'function' &&
+    addressControl.getFormula()) {
+    throw new Error('Initial service-identity controls are now formula-backed.');
+  }
+  if (String(addressControl.getDisplayValue() || '') !==
+    bootstrap.previousServiceAddress) {
+    throw new Error('Initial service-identity controls changed during import.');
+  }
   setLiteralSheetValue_(
-    bootstrap.sheet.getRange(bootstrap.metadataRow, bootstrap.addressColumn),
+    addressControl,
     bootstrap.serviceAddress
   );
   const configured = getServiceIdentityControls_(bootstrap.sheet, {
@@ -2015,6 +2053,12 @@ function restoreInitialServiceIdentityBootstrap_(bootstrap) {
     bootstrap.holderColumn);
   const addressControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
     bootstrap.addressColumn);
+  if ((typeof holderControl.getFormula === 'function' &&
+    holderControl.getFormula()) ||
+    (typeof addressControl.getFormula === 'function' &&
+      addressControl.getFormula())) {
+    throw new Error('Initial service-identity controls are now formula-backed.');
+  }
   assertServiceIdentityBootstrapRollbackTarget_(holderControl, addressControl,
     bootstrap);
   setLiteralSheetValue_(holderControl, bootstrap.previousAccountHolder);
@@ -2104,8 +2148,11 @@ function validateServiceIdentityForInvoice_(extracted) {
   const layout = getSheetLayout_(sheet);
   const configured = getServiceIdentityControls_(sheet, layout);
   if (canEstablishInitialServiceIdentity_(sheet, layout, configured)) {
-    return validateServiceIdentity_(extracted,
-      buildInitialServiceIdentity_(extracted));
+    const candidate = buildInitialServiceIdentity_(extracted);
+    return validateServiceIdentity_(extracted, {
+      account_holder: candidate.account_holder || '__missing_candidate__',
+      service_address: candidate.service_address || '__missing_candidate__'
+    });
   }
   return validateServiceIdentity_(extracted, configured);
 }
@@ -2859,6 +2906,9 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     throw error;
   }
   checkpointMutationJournal_(file.getId(), state, {
+    sheetName: sheetName,
+    spreadsheetId: getSpreadsheetId_(),
+    sheetId: typeof sheet.getSheetId === 'function' ? sheet.getSheetId() : '',
     electricityDashboardLayouts: getElectricityDashboardRollbackLayouts_(
       electricityDashboardLayouts
     )
@@ -2873,6 +2923,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     checkpointMutationJournal_(file.getId(), state, {
       stage: 'sheet-existing',
       sheetName: sheetName,
+      spreadsheetId: getSpreadsheetId_(),
+      sheetId: typeof sheet.getSheetId === 'function' ? sheet.getSheetId() : '',
       sheetRow: existingRow,
       sheetRowCreated: false,
       sheetRowPreexisting: true,
@@ -2926,6 +2978,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
   checkpointMutationJournal_(file.getId(), state, {
     stage: 'sheet-insert-planned',
     sheetName: sheetName,
+    spreadsheetId: getSpreadsheetId_(),
+    sheetId: typeof sheet.getSheetId === 'function' ? sheet.getSheetId() : '',
     sheetRow: targetRow,
     sheetRowCreated: false,
     sheetRowPreexisting: false
@@ -4549,9 +4603,14 @@ function rollbackJournalSheetRow_(journal, file) {
         journal.sheetName + '.'
     );
   }
+  if (journal.serviceIdentityBootstrap &&
+    (!journal.spreadsheetId || String(getSpreadsheetId_()) !==
+      String(journal.spreadsheetId) || !journal.sheetId ||
+    typeof sheet.getSheetId !== 'function' ||
+    String(sheet.getSheetId()) !== String(journal.sheetId))) {
+    throw new Error('The journaled spreadsheet tab identity no longer matches.');
+  }
   const layout = getSheetLayout_(sheet);
-  restoreJournaledInitialServiceIdentityBootstrap_(journal, file, sheet,
-    layout);
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   if (!sourceColumn) {
     throw new Error('The journaled spreadsheet source column no longer exists.');
@@ -4574,6 +4633,17 @@ function rollbackJournalSheetRow_(journal, file) {
     (journal.sheetRowPreexisting === undefined &&
       journal.sheetRowCreated === false &&
       journal.stage !== 'sheet-insert-planned');
+  if (journal.serviceIdentityBootstrap && matches.length === 0 &&
+    !journal.sheetRowDeleted &&
+    (journal.sheetRowCreated || !isPreexistingRow)) {
+    throw new Error('The journaled spreadsheet source marker is missing.');
+  }
+  if (matches.length > 0 && journal.sheetRow &&
+    matches[0] !== journal.sheetRow && journal.sheetRowCreated) {
+    throw new Error('The journaled spreadsheet source row moved unexpectedly.');
+  }
+  restoreJournaledInitialServiceIdentityBootstrap_(journal, file, sheet,
+    layout);
   if (isPreexistingRow) {
     if (matches.length === 0) {
       throw new Error('The pre-existing spreadsheet source row is missing.');

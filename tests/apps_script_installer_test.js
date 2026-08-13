@@ -1367,6 +1367,89 @@ function testServiceIdentityControlsUseVisibleLocalizedPlaceholders() {
   assert.equal(conditionalRules.length, 4);
 }
 
+function testServiceIdentityPlaceholderMatchingIsFieldSpecific() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  assert.equal(context.isInstallerServiceIdentityPlaceholder_(
+    'Enter service address here', 'accountHolder'), false);
+  assert.equal(context.isInstallerServiceIdentityPlaceholder_(
+    'Enter account holder here', 'serviceAddress'), false);
+}
+
+function testFormulaBackedIdentityUsesDisplayedLocalePlaceholder() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const styles = {};
+  let conditionalRules = [];
+  const cells = [
+    ['', '', '', '', 'Enter account holder here', 'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address']
+  ];
+  const formulas = [['', '', '', '', '=Settings!B2', '=Settings!B3'], ['', '', '', '', '', '']];
+  const sheet = {
+    getName: () => 'Water',
+    getConditionalFormatRules: () => conditionalRules,
+    setConditionalFormatRules: (rules) => { conditionalRules = rules; },
+    getRange: (row, column) => ({
+      getA1Notation: () => String.fromCharCode(64 + column) + row,
+      getDisplayValue: () => cells[row - 1][column - 1],
+      getFormula: () => formulas[row - 1][column - 1],
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setBackground: (value) => { styles[`${row}:${column}`] = value; },
+      setFontColor: () => {},
+      setFontWeight: () => {},
+      setBorder: () => {},
+      setNote: () => {}
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'it_IT',
+    serviceIdentityControls: {
+      accountHolderPlaceholder: "Scrivi qui il nome dell'intestatario",
+      serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
+    },
+    headerAliases: {
+      accountHolder: ['Account holder'], serviceAddress: ['Service address']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.SpreadsheetApp = {
+    BorderStyle: { SOLID_THICK: 'SOLID_THICK' },
+    newConditionalFormatRule: () => {
+      const rule = { formula: '' };
+      const builder = {
+        whenFormulaSatisfied: (formula) => { rule.formula = formula; return builder; },
+        setBackground: () => builder,
+        setFontColor: () => builder,
+        setBold: () => builder,
+        setRanges: () => builder,
+        build: () => ({
+          formula: rule.formula,
+          getBooleanCondition: () => ({ getCriteriaValues: () => [rule.formula] })
+        })
+      };
+      return builder;
+    }
+  };
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Water', {
+    headerRow: 2,
+    lookup: { 'Account holder': 5, 'Service address': 6 }
+  }, 'it');
+
+  assert.equal(styles['1:5'], '#fce8b2');
+  assert.equal(styles['1:6'], '#fce8b2');
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('Enter account holder here') &&
+      rule.formula.includes('GDUC_IDENTITY_WARNING')), true);
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('Enter service address here') &&
+      rule.formula.includes('GDUC_IDENTITY_WARNING')), true);
+}
+
 function testNewSupplySheetInitializesServiceIdentityControls() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -2153,6 +2236,8 @@ testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
 testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry();
 testServiceIdentityControlsUseVisibleLocalizedPlaceholders();
+testServiceIdentityPlaceholderMatchingIsFieldSpecific();
+testFormulaBackedIdentityUsesDisplayedLocalePlaceholder();
 testNewSupplySheetInitializesServiceIdentityControls();
 testServiceIdentityMigrationValidatesBeforeMutating();
 testServiceIdentityMigrationRejectsReservedControlColumnOverlap();

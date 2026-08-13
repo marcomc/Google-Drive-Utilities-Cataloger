@@ -186,6 +186,10 @@
   header-recovery boundary. Keep canonical invoice-field precedence shared by
   writes and verification so supplementary `sheet_values` cannot replace
   imported identity fields.
+- When first-invoice identity bootstrap is supported, require a verified
+  metadata row, literal formula-free controls, and a pristine no-data boundary
+  before any write; legacy header-row-1 or partial/formula-backed sheets must
+  fail closed before calculating metadata coordinates.
 - In invoice-extraction prompts, aggregate repeated detailed cost labels only
   within their printed parent section; exclude subordinate `di cui` rows and
   same-named rows from other sections. Cover separate sections that reuse a

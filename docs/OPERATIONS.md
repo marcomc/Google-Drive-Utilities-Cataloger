@@ -60,7 +60,8 @@ flowchart LR
   invoice["Invoice"] --> extract["Extract holder and service address"]
   extract --> state{"Controls configured?"}
   state -- "yes" --> compare["Compare with target supply controls"]
-  state -- "no; pristine tab" --> bootstrap["Corroborate and establish controls"]
+  state -- "no; pristine literal controls" --> bootstrap["Corroborate and establish controls"]
+  state -- "no; partial or formula-backed" --> review["NEEDS REVIEW; leave unchanged"]
   state -- "no; existing rows" --> review["NEEDS REVIEW; leave unchanged"]
   bootstrap --> import["Import and archive"]
   compare -- "match" --> import["Import and archive"]
@@ -427,6 +428,7 @@ unprovenanced row.
 | Nothing is processed | No direct-root PDF, or `AGENTS.md` is missing, duplicated, invalid, or oversized. | Correct the intake folder; do not move PDFs into subfolders to retry. |
 | A document is left untouched | Data, destination, or reconciliation is ambiguous. | Resolve the single reported problem and rerun with a controlled file. |
 | `catalog-mutation-recovery-failed` appears once and the PDF remains blocked | A journaled Drive or Sheet mutation cannot be proven safe to compensate. | Reconcile the file and source-marked row manually; delete that file's `MUTATION_JOURNAL_` and `MUTATION_RECOVERY_ALERT_` Script Properties only after verification. |
+| Recovery reports `Service-identity controls changed since the interrupted import` | An operator edited the holder or service-address control after the interruption. | Reconcile the two controls with the source row and invoice first; only then clear that file's journal/alert properties and retry. Never clear the journal while the source row or controls are unresolved. |
 | A PDF larger than 35 MiB is rejected | Base64 plus the request envelope would exceed the Apps Script URL Fetch limit. | Produce a smaller PDF without changing invoice content. |
 
 `gemini-generation-request` is emitted once for each outbound model request.
