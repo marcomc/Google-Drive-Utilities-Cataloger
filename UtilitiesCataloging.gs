@@ -1963,6 +1963,22 @@ function assertInitialServiceIdentityBootstrapPristine_(bootstrap) {
   }
 }
 
+function assertInitialServiceIdentityBootstrapBoundary_(bootstrap) {
+  const currentLayout = getSheetLayout_(bootstrap.sheet);
+  const currentControls = getServiceIdentityControls_(bootstrap.sheet,
+    currentLayout);
+  if (!canEstablishInitialServiceIdentity_(bootstrap.sheet, currentLayout,
+    currentControls, bootstrap.supplyType) ||
+    currentLayout.headerRow - 1 !== bootstrap.metadataRow ||
+    findHeaderIndex_(currentLayout.lookup, getHeaderAliases_('accountHolder')) !==
+      bootstrap.holderColumn ||
+    findHeaderIndex_(currentLayout.lookup, getHeaderAliases_('serviceAddress')) !==
+      bootstrap.addressColumn) {
+    throw new Error('Initial service-identity bootstrap boundary changed during import.');
+  }
+  assertInitialServiceIdentityBootstrapPristine_(bootstrap);
+}
+
 function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
   const configured = getServiceIdentityControls_(sheet, layout);
   if (!canEstablishInitialServiceIdentity_(sheet, layout, configured,
@@ -1995,6 +2011,7 @@ function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
     previousServiceAddress: String(addressControl.getDisplayValue() || ''),
     accountHolder: candidate.account_holder,
     serviceAddress: candidate.service_address,
+    supplyType: extracted.supply_type,
     spreadsheetId: typeof getSpreadsheetId_ === 'function' ?
       getSpreadsheetId_() : '',
     sheetId: typeof sheet.getSheetId === 'function' ? sheet.getSheetId() : '',
@@ -2012,6 +2029,7 @@ function serializeServiceIdentityBootstrap_(bootstrap) {
     previousServiceAddress: bootstrap.previousServiceAddress,
     accountHolder: bootstrap.accountHolder,
     serviceAddress: bootstrap.serviceAddress,
+    supplyType: bootstrap.supplyType,
     spreadsheetId: bootstrap.spreadsheetId,
     sheetId: bootstrap.sheetId
   };
@@ -3016,7 +3034,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     sheetRowPreexisting: false
   });
   if (identityBootstrap) {
-    assertInitialServiceIdentityBootstrapPristine_(identityBootstrap);
+    assertInitialServiceIdentityBootstrapBoundary_(identityBootstrap);
   }
   insertBlankRowAt_(sheet, targetRow);
   let dashboardResult = null;

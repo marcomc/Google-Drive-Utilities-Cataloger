@@ -5219,6 +5219,44 @@ function testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement() {
   assert.equal(replacementStarted, false);
 }
 
+function testBootstrapBoundaryRejectsNewRowsBeforeInsertion() {
+  const context = loadCataloger();
+  let lastRow = 2;
+  const cells = ['Controllo fornitura', 'Water', '', '',
+    'Enter account holder here', 'Enter service address here'];
+  const sheet = {
+    getName: () => 'Water',
+    getLastRow: () => lastRow,
+    getRange: (_row, column) => ({
+      getDisplayValue: () => cells[column - 1] || '',
+      getFormula: () => ''
+    })
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { 'account holder': 5, 'service address': 6 }
+  });
+  context.getHeaderAliases_ = (key) => ({
+    accountHolder: ['account holder'], serviceAddress: ['service address']
+  }[key] || []);
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  const bootstrap = {
+    sheet,
+    supplyType: 'Water',
+    metadataRow: 1,
+    holderColumn: 5,
+    addressColumn: 6,
+    previousAccountHolder: 'Enter account holder here',
+    previousServiceAddress: 'Enter service address here'
+  };
+  lastRow = 3;
+  assert.throws(
+    () => context.assertInitialServiceIdentityBootstrapBoundary_(bootstrap),
+    /boundary changed/
+  );
+}
+
 function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
   const context = loadCataloger();
   const deletedRows = [];
@@ -6377,6 +6415,7 @@ testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
 testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
 testExpectedBootstrapChangeAbortsBeforeRowInsertion();
 testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement();
+testBootstrapBoundaryRejectsNewRowsBeforeInsertion();
 testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();
