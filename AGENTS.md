@@ -112,6 +112,10 @@
 - Journal cross-service mutations before changing Sheets or Drive. Persist the
   per-file outcome and email body before clearing the journal; recover journals
   before sending pending reports.
+- For rollback of user-facing spreadsheet controls, journal both prior and
+  importer-written values. Restore only after exact sheet identity, coordinates,
+  and current contents prove the importer state remains unchanged; otherwise
+  fail closed and preserve later user edits.
 - When a downstream import fails after validated extraction, preserve a labeled
   non-imported extraction snapshot, failure stage, and rollback status in the
   configured-recipient report without adding document data to Cloud logs.

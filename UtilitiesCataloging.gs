@@ -304,6 +304,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
       return buildVerifyResult_(file, extracted, validation.problem, validation.action);
     }
     state.extractionValidated = true;
+    state.initialServiceIdentityBootstrapExpected =
+      validation.initialServiceIdentityBootstrapEligible === true;
 
     state.failureStage = 'checking-duplicates';
     const duplicate = findDuplicate_(extracted, binaryHash, file.getId());
@@ -1909,11 +1911,24 @@ function buildInitialServiceIdentity_(extracted) {
   };
 }
 
-function canEstablishInitialServiceIdentity_(sheet, layout, configured) {
+function hasManagedServiceIdentityMetadata_(sheet, layout, supplyType) {
+  if (!layout || layout.headerRow <= 1) {
+    return false;
+  }
+  const metadataRow = layout.headerRow - 1;
+  return String(sheet.getRange(metadataRow, 1).getDisplayValue() || '').trim() ===
+    'Controllo fornitura' && normalizeCellText_(
+      sheet.getRange(metadataRow, 2).getDisplayValue()
+    ) === normalizeCellText_(supplyType);
+}
+
+function canEstablishInitialServiceIdentity_(sheet, layout, configured,
+  supplyType) {
   if (!layout || layout.headerRow <= 1 ||
     configured.account_holder || configured.service_address ||
     typeof sheet.getLastRow !== 'function' ||
-    sheet.getLastRow() > layout.headerRow) {
+    sheet.getLastRow() > layout.headerRow ||
+    !hasManagedServiceIdentityMetadata_(sheet, layout, supplyType)) {
     return false;
   }
   const holderColumn = findHeaderIndex_(layout.lookup,
@@ -1950,7 +1965,8 @@ function assertInitialServiceIdentityBootstrapPristine_(bootstrap) {
 
 function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
   const configured = getServiceIdentityControls_(sheet, layout);
-  if (!canEstablishInitialServiceIdentity_(sheet, layout, configured)) {
+  if (!canEstablishInitialServiceIdentity_(sheet, layout, configured,
+    extracted && extracted.supply_type)) {
     return null;
   }
   const candidate = buildInitialServiceIdentity_(extracted);
@@ -2147,12 +2163,17 @@ function validateServiceIdentityForInvoice_(extracted) {
   }
   const layout = getSheetLayout_(sheet);
   const configured = getServiceIdentityControls_(sheet, layout);
-  if (canEstablishInitialServiceIdentity_(sheet, layout, configured)) {
+  if (canEstablishInitialServiceIdentity_(sheet, layout, configured,
+    extracted.supply_type)) {
     const candidate = buildInitialServiceIdentity_(extracted);
-    return validateServiceIdentity_(extracted, {
+    const validation = validateServiceIdentity_(extracted, {
       account_holder: candidate.account_holder || '__missing_candidate__',
       service_address: candidate.service_address || '__missing_candidate__'
     });
+    if (validation.valid) {
+      validation.initialServiceIdentityBootstrapEligible = true;
+    }
+    return validation;
   }
   return validateServiceIdentity_(extracted, configured);
 }
@@ -2974,6 +2995,14 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       dashboardWarning: dashboardResult && dashboardResult.warning || ''
     };
   }
+  if (identityBootstrap || state && state.initialServiceIdentityBootstrapExpected) {
+    const currentIdentityValidation = validateServiceIdentityForInvoice_(
+      extracted);
+    if (!currentIdentityValidation.valid) {
+      throw new Error('Current target service identity could not be revalidated: ' +
+        currentIdentityValidation.problem);
+    }
+  }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
   checkpointMutationJournal_(file.getId(), state, {
     stage: 'sheet-insert-planned',
@@ -2984,6 +3013,9 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     sheetRowCreated: false,
     sheetRowPreexisting: false
   });
+  if (identityBootstrap) {
+    assertInitialServiceIdentityBootstrapPristine_(identityBootstrap);
+  }
   insertBlankRowAt_(sheet, targetRow);
   let dashboardResult = null;
   try {
@@ -4605,7 +4637,8 @@ function rollbackJournalSheetRow_(journal, file) {
   }
   if (journal.serviceIdentityBootstrap &&
     (!journal.spreadsheetId || String(getSpreadsheetId_()) !==
-      String(journal.spreadsheetId) || !journal.sheetId ||
+      String(journal.spreadsheetId) || journal.sheetId === undefined ||
+    journal.sheetId === null || journal.sheetId === '' ||
     typeof sheet.getSheetId !== 'function' ||
     String(sheet.getSheetId()) !== String(journal.sheetId))) {
     throw new Error('The journaled spreadsheet tab identity no longer matches.');

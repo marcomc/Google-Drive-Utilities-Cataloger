@@ -1664,13 +1664,13 @@ function updateInstallerServiceIdentityConditionalFormatting_(sheet,
       function (value) {
         return '(' + cell + '="' + value.replace(/"/g, '""') + '")';
       }));
-    const warningFormula = warningTerms.join('+') +
+    const warningFormula = '=' + warningTerms.join('+') +
       '+N("GDUC_IDENTITY_WARNING")';
     const configuredTerms = ['(' + cell + '<>"")'].concat(placeholders.map(
       function (value) {
         return '(' + cell + '<>"' + value.replace(/"/g, '""') + '")';
       }));
-    const configuredFormula = configuredTerms.join('*') +
+    const configuredFormula = '=' + configuredTerms.join('*') +
       '+N("GDUC_IDENTITY_CONFIGURED")';
     rules.push(SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(warningFormula)

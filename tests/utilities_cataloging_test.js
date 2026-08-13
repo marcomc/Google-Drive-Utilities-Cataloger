@@ -124,7 +124,8 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
 function testFirstInvoiceCanEstablishMissingServiceIdentity() {
   const context = loadCataloger();
   const cells = [
-    ['', '', '', '', 'Enter account holder here', 'Enter service address here'],
+    ['Controllo fornitura', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
     ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
       'Account holder', 'Service address']
   ];
@@ -158,7 +159,10 @@ function testFirstInvoiceCanEstablishMissingServiceIdentity() {
 
   const result = context.validateServiceIdentityForInvoice_(validInvoice());
 
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    valid: true,
+    initialServiceIdentityBootstrapEligible: true
+  });
   const incompleteInvoice = Object.assign({}, validInvoice(), {
     account_holder: '',
     address_evidence: '',
@@ -185,6 +189,39 @@ function testFirstInvoiceCanEstablishMissingServiceIdentity() {
   const migratedResult = context.validateServiceIdentityForInvoice_(validInvoice());
   assert.equal(migratedResult.valid, false);
   assert.equal(migratedResult.code, 'target_identity_not_configured');
+}
+
+function testFirstInvoiceRequiresManagedServiceIdentityMetadata() {
+  const context = loadCataloger();
+  const cells = [
+    ['', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address']
+  ];
+  const sheet = {
+    getLastRow: () => 2,
+    getRange: (row, column) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      getFormula: () => ''
+    })
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.SpreadsheetApp.openById = () => ({ getSheetByName: () => sheet });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { 'account holder': 5, 'service address': 6 }
+  });
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'target_identity_not_configured');
+  cells[0][0] = 'Controllo fornitura';
+  cells[0][1] = 'Electricity';
+  const mismatchResult = context.validateServiceIdentityForInvoice_(
+    validInvoice());
+  assert.equal(mismatchResult.valid, false);
+  assert.equal(mismatchResult.code, 'target_identity_not_configured');
 }
 
 function testFirstInvoiceCannotReplaceFormulaBackedIdentityControls() {
@@ -4124,6 +4161,14 @@ function testMutationRecoveryRestoresInitialServiceIdentity() {
   );
   assert.equal(cells.holder, 'Avery North');
   assert.equal(cells.address, 'Cedar Meridian Boulevard 125 99991 Rivermouth');
+  journal.sheetId = 0;
+  sheet.getSheetId = () => 0;
+  context.rollbackJournalSheetRow_(journal, file);
+  assert.equal(cells.holder, 'Enter account holder here');
+  assert.equal(cells.address, 'Enter service address here');
+  cells.holder = 'Avery North';
+  cells.address = 'Cedar Meridian Boulevard 125 99991 Rivermouth';
+  journal.sheetId = 7;
   sheet.getSheetId = () => 7;
   sourceMarkerFile = { getId: () => 'different-file-id' };
   assert.throws(
@@ -4895,7 +4940,8 @@ function testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement()
 function testFirstInvoiceImportEstablishesServiceIdentityControls() {
   const context = loadCataloger();
   const cells = [
-    ['', 'Water', '', '', 'Enter account holder here', 'Enter service address here'],
+    ['Controllo fornitura', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
     ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
       'Account holder', 'Service address', 'Source file']
   ];
@@ -5051,6 +5097,7 @@ function createInsertedInvoiceRollbackFixture(deleteRow) {
     headers: ['Issue date'],
     lookup: {}
   });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.captureElectricityDashboardLayoutsForRollback_ = () => null;
   context.findSpreadsheetRowBySourceFile_ = () => 0;
   context.getInsertionRow_ = () => 2;
@@ -5113,6 +5160,24 @@ function testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState() {
   assert.equal(journal.stage, 'sheet-marker-written');
   assert.equal(journal.sheetRowCreated, true);
   assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testExpectedBootstrapChangeAbortsBeforeRowInsertion() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {});
+  let inserted = false;
+  fixture.context.insertBlankRowAt_ = () => { inserted = true; };
+  fixture.context.validateServiceIdentityForInvoice_ = () => ({
+    valid: false,
+    problem: 'The target supply has no configured account holder or service address.'
+  });
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice(), { initialServiceIdentityBootstrapExpected: true }
+    ),
+    /could not be revalidated/
+  );
+  assert.equal(inserted, false);
 }
 
 function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
@@ -6185,6 +6250,7 @@ testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
 testFirstInvoiceCanEstablishMissingServiceIdentity();
+testFirstInvoiceRequiresManagedServiceIdentityMetadata();
 testFirstInvoiceCannotReplaceFormulaBackedIdentityControls();
 testLegacyHeaderRowWithoutControlsRemainsFailClosed();
 testInvoiceFrequencyInferenceUsesPeriodAndHistory();
@@ -6270,6 +6336,7 @@ testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
 testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
+testExpectedBootstrapChangeAbortsBeforeRowInsertion();
 testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();

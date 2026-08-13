@@ -1345,6 +1345,8 @@ function testServiceIdentityControlsUseVisibleLocalizedPlaceholders() {
   assert.equal(conditionalRules.some((rule) =>
     rule.formula.includes('GDUC_IDENTITY_CONFIGURED') &&
       rule.formula.includes('$E$1')), true);
+  assert.equal(conditionalRules.every((rule) => rule.formula.startsWith('=')),
+    true);
 
   context.getSheetLayout_ = () => ({
     headerRow: 2,
