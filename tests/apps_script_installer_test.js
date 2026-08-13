@@ -1262,6 +1262,111 @@ function testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry() {
   assert.deepEqual(writes.filter(([, column]) => column === 6 || column === 7), []);
 }
 
+function testServiceIdentityControlsUseVisibleLocalizedPlaceholders() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [
+    ['', '', '', '', '', ''],
+    ['Data di emissione', 'Fornitore', 'Numero fattura', 'Numero contratto',
+      'Intestatario', 'Indirizzo di fornitura']
+  ];
+  const styles = {};
+  let conditionalRules = [];
+  const sheet = {
+    getName: () => 'Acqua',
+    getConditionalFormatRules: () => conditionalRules,
+    setConditionalFormatRules: (rules) => { conditionalRules = rules; },
+    getRange: (row, column) => ({
+      getA1Notation: () => String.fromCharCode(64 + column) + row,
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      getFormula: () => '',
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setBackground: (value) => { styles[`${row}:${column}:background`] = value; },
+      setFontColor: (value) => { styles[`${row}:${column}:fontColor`] = value; },
+      setFontWeight: (value) => { styles[`${row}:${column}:fontWeight`] = value; },
+      setBorder: (...value) => { styles[`${row}:${column}:border`] = value; },
+      setNote: (value) => { styles[`${row}:${column}:note`] = value; }
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'it_IT',
+    serviceIdentityControls: {
+      accountHolderPlaceholder: "Scrivi qui il nome dell'intestatario",
+      serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
+    },
+    headerAliases: {
+      accountHolder: ['Intestatario'],
+      serviceAddress: ['Indirizzo di fornitura']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.SpreadsheetApp = {
+    BorderStyle: { SOLID_THICK: 'SOLID_THICK' },
+    newConditionalFormatRule: () => {
+      const rule = { formula: '', ranges: [] };
+      const builder = {
+        whenFormulaSatisfied: (formula) => {
+          rule.formula = formula;
+          return builder;
+        },
+        setBackground: () => builder,
+        setFontColor: () => builder,
+        setBold: () => builder,
+        setRanges: (ranges) => {
+          rule.ranges = ranges;
+          return builder;
+        },
+        build: () => ({
+          formula: rule.formula,
+          ranges: rule.ranges,
+          getBooleanCondition: () => ({
+            getCriteriaValues: () => [rule.formula]
+          })
+        })
+      };
+      return builder;
+    }
+  };
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Acqua', {
+    headerRow: 2,
+    lookup: { Intestatario: 5, 'Indirizzo di fornitura': 6 }
+  }, 'it');
+
+  assert.equal(cells[0][4], "Scrivi qui il nome dell'intestatario");
+  assert.equal(cells[0][5], "Scrivi qui l'indirizzo di fornitura");
+  assert.equal(styles['1:5:background'], '#fce8b2');
+  assert.equal(styles['1:6:background'], '#fce8b2');
+  assert.equal(styles['1:5:fontWeight'], 'bold');
+  assert.match(styles['1:5:note'], /prima fattura/i);
+  assert.equal(styles['1:5:border'].includes('SOLID_THICK'), true);
+  assert.equal(conditionalRules.length, 4);
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('GDUC_IDENTITY_CONFIGURED') &&
+      rule.formula.includes('$E$1')), true);
+
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { intestatario: 5, 'indirizzo di fornitura': 6 }
+  });
+  context.getHeaderAliases_ = (key) => ({
+    accountHolder: ['intestatario'],
+    serviceAddress: ['indirizzo di fornitura']
+  }[key] || []);
+  assert.equal(context.hasInstallerServiceIdentityControls_(sheet), false);
+
+  cells[0][4] = 'Mario Rossi';
+  cells[0][5] = 'Via Roma 1, Milano';
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Acqua', {
+    headerRow: 2,
+    lookup: { Intestatario: 5, 'Indirizzo di fornitura': 6 }
+  }, 'it');
+  assert.equal(styles['1:5:background'], '#d9ead3');
+  assert.equal(styles['1:6:background'], '#d9ead3');
+  assert.equal(conditionalRules.length, 4);
+}
+
 function testNewSupplySheetInitializesServiceIdentityControls() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -2047,6 +2152,7 @@ testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
 testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry();
+testServiceIdentityControlsUseVisibleLocalizedPlaceholders();
 testNewSupplySheetInitializesServiceIdentityControls();
 testServiceIdentityMigrationValidatesBeforeMutating();
 testServiceIdentityMigrationRejectsReservedControlColumnOverlap();

@@ -126,18 +126,27 @@ headers:
 | `Account holder` / `Intestatario` | Expected full name of the contract holder. |
 | `Service address` / `Indirizzo di fornitura` | Expected street, civic number, and city. |
 
+Empty controls show localized prompts with an amber warning state; completed
+controls turn green automatically. On a pristine supply tab, the first valid
+invoice replaces both prompts with its printed account holder and a canonical
+address built from the corroborated street, civic number, postal code when
+available, and city.
+
 For an existing installation, run the owner-controlled
 `migrateCatalogerServiceIdentityFields` function once after deployment. The
 operation inserts the two columns between contract number and customer code,
-adds the control row, and is safe to repeat. Complete the control values
-manually before processing invoices. Imported rows retain the printed holder
-and address, so address changes remain visible in the historical record.
+adds the control row, and is safe to repeat. A migrated tab that already has
+invoice rows remains fail-closed until both controls are completed manually;
+the importer never derives a new baseline from later history. Partially filled
+or formula-backed blank controls also require manual correction. Imported rows
+retain the printed holder and address, so address changes remain visible in the
+historical record.
 
 Comparison ignores case, punctuation, repeated whitespace, line breaks, and
 common Italian street abbreviations. Street, civic number, and city must all
 be present; field order, CAP, and formatting do not have to match. A missing
 control value or mismatch produces `NEEDS REVIEW` without changing Drive or
-Sheets.
+Sheets, except for the explicit pristine-tab first-import bootstrap above.
 
 ## Drive policy
 

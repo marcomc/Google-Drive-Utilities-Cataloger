@@ -380,6 +380,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
       state.electricityDashboardLayouts =
         sheetImport.electricityDashboardLayouts || null;
       state.dashboardWarning = sheetImport.dashboardWarning || '';
+      state.serviceIdentityBootstrap =
+        sheetImport.serviceIdentityBootstrap || null;
     }
 
     advanceMutationFailureStage_(file.getId(), state,
@@ -486,6 +488,19 @@ function rollbackProcessingMutations_(file, rootFolder, originalName, state) {
       refreshElectricityDashboardAfterRollback_(state);
     } catch (error) {
       state.rollbackErrors.push('Spreadsheet rollback failed: ' + describeError_(error));
+    }
+  }
+  if (state.serviceIdentityBootstrap &&
+    state.serviceIdentityBootstrap.started) {
+    try {
+      restoreInitialServiceIdentityBootstrap_(state.serviceIdentityBootstrap);
+      checkpointMutationJournal_(file.getId(), state, {
+        serviceIdentityBootstrapCompleted: false,
+        serviceIdentityBootstrapRestored: true
+      });
+    } catch (error) {
+      state.rollbackErrors.push('Service identity rollback failed: ' +
+        describeError_(error));
     }
   }
 }
@@ -1856,9 +1871,222 @@ function getServiceIdentityControls_(sheet, layout) {
   }
   const metadataRow = layout.headerRow - 1;
   return {
-    account_holder: String(sheet.getRange(metadataRow, holderColumn).getDisplayValue() || '').trim(),
-    service_address: String(sheet.getRange(metadataRow, addressColumn).getDisplayValue() || '').trim()
+    account_holder: normalizeServiceIdentityControlValue_(
+      sheet.getRange(metadataRow, holderColumn).getDisplayValue()
+    ),
+    service_address: normalizeServiceIdentityControlValue_(
+      sheet.getRange(metadataRow, addressColumn).getDisplayValue()
+    )
   };
+}
+
+function normalizeServiceIdentityControlValue_(value) {
+  const text = String(value || '').trim();
+  const placeholders = [];
+  const registry = getLocalizationRegistry_();
+  Object.keys(registry).forEach(function (locale) {
+    const controls = registry[locale].serviceIdentityControls || {};
+    placeholders.push(controls.accountHolderPlaceholder || '');
+    placeholders.push(controls.serviceAddressPlaceholder || '');
+  });
+  return placeholders.indexOf(text) >= 0 ? '' : text;
+}
+
+function buildInitialServiceIdentity_(extracted) {
+  return {
+    account_holder: String(extracted && extracted.account_holder || '').trim(),
+    service_address: [
+      extracted && extracted.service_street,
+      extracted && extracted.service_civic_number,
+      extracted && extracted.service_postal_code,
+      extracted && extracted.service_city
+    ].map(function (value) {
+      return String(value || '').trim();
+    }).filter(Boolean).join(' ')
+  };
+}
+
+function canEstablishInitialServiceIdentity_(sheet, layout, configured) {
+  if (configured.account_holder || configured.service_address ||
+    typeof sheet.getLastRow !== 'function' ||
+    sheet.getLastRow() > layout.headerRow) {
+    return false;
+  }
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  const metadataRow = layout.headerRow - 1;
+  return [holderColumn, addressColumn].every(function (column) {
+    if (!column) {
+      return false;
+    }
+    const control = sheet.getRange(metadataRow, column);
+    return typeof control.getFormula !== 'function' || !control.getFormula();
+  });
+}
+
+function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
+  const configured = getServiceIdentityControls_(sheet, layout);
+  if (!canEstablishInitialServiceIdentity_(sheet, layout, configured)) {
+    return null;
+  }
+  const candidate = buildInitialServiceIdentity_(extracted);
+  if (!validateServiceIdentity_(extracted, candidate).valid) {
+    return null;
+  }
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  const metadataRow = layout.headerRow - 1;
+  const holderControl = sheet.getRange(metadataRow, holderColumn);
+  const addressControl = sheet.getRange(metadataRow, addressColumn);
+  if ((typeof holderControl.getFormula === 'function' &&
+    holderControl.getFormula()) ||
+    (typeof addressControl.getFormula === 'function' &&
+      addressControl.getFormula())) {
+    return null;
+  }
+  return {
+    sheet: sheet,
+    metadataRow: metadataRow,
+    holderColumn: holderColumn,
+    addressColumn: addressColumn,
+    previousAccountHolder: String(holderControl.getDisplayValue() || ''),
+    previousServiceAddress: String(addressControl.getDisplayValue() || ''),
+    accountHolder: candidate.account_holder,
+    serviceAddress: candidate.service_address,
+    started: false,
+    completed: false
+  };
+}
+
+function serializeServiceIdentityBootstrap_(bootstrap) {
+  return {
+    metadataRow: bootstrap.metadataRow,
+    holderColumn: bootstrap.holderColumn,
+    addressColumn: bootstrap.addressColumn,
+    previousAccountHolder: bootstrap.previousAccountHolder,
+    previousServiceAddress: bootstrap.previousServiceAddress,
+    accountHolder: bootstrap.accountHolder,
+    serviceAddress: bootstrap.serviceAddress
+  };
+}
+
+function applyInitialServiceIdentityBootstrap_(file, state, bootstrap) {
+  if (!bootstrap) {
+    return;
+  }
+  checkpointMutationJournal_(file.getId(), state, {
+    serviceIdentityBootstrap: serializeServiceIdentityBootstrap_(bootstrap),
+    serviceIdentityBootstrapCompleted: false
+  });
+  bootstrap.started = true;
+  setLiteralSheetValue_(
+    bootstrap.sheet.getRange(bootstrap.metadataRow, bootstrap.holderColumn),
+    bootstrap.accountHolder
+  );
+  setLiteralSheetValue_(
+    bootstrap.sheet.getRange(bootstrap.metadataRow, bootstrap.addressColumn),
+    bootstrap.serviceAddress
+  );
+  const configured = getServiceIdentityControls_(bootstrap.sheet, {
+    headerRow: bootstrap.metadataRow + 1,
+    lookup: getSheetLayout_(bootstrap.sheet).lookup
+  });
+  if (normalizeNameIdentity_(configured.account_holder) !==
+    normalizeNameIdentity_(bootstrap.accountHolder) ||
+    normalizeAddressIdentityText_(configured.service_address) !==
+      normalizeAddressIdentityText_(bootstrap.serviceAddress)) {
+    throw new Error('Initial service-identity controls could not be verified.');
+  }
+  bootstrap.completed = true;
+  checkpointMutationJournal_(file.getId(), state, {
+    serviceIdentityBootstrapCompleted: true
+  });
+}
+
+function restoreInitialServiceIdentityBootstrap_(bootstrap) {
+  if (!bootstrap || !bootstrap.started) {
+    return;
+  }
+  const holderControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
+    bootstrap.holderColumn);
+  const addressControl = bootstrap.sheet.getRange(bootstrap.metadataRow,
+    bootstrap.addressColumn);
+  assertServiceIdentityBootstrapRollbackTarget_(holderControl, addressControl,
+    bootstrap);
+  setLiteralSheetValue_(holderControl, bootstrap.previousAccountHolder);
+  setLiteralSheetValue_(addressControl, bootstrap.previousServiceAddress);
+  verifyServiceIdentityBootstrapRollback_(holderControl, addressControl,
+    bootstrap);
+  bootstrap.started = false;
+  bootstrap.completed = false;
+}
+
+function assertServiceIdentityBootstrapRollbackTarget_(holderControl,
+  addressControl, bootstrap) {
+  if (typeof holderControl.getDisplayValue !== 'function') {
+    return;
+  }
+  const currentHolder = String(holderControl.getDisplayValue() || '');
+  const currentAddress = String(addressControl.getDisplayValue() || '');
+  const holderUnchanged = currentHolder === bootstrap.accountHolder ||
+    currentHolder === bootstrap.previousAccountHolder;
+  const addressUnchanged = currentAddress === bootstrap.serviceAddress ||
+    currentAddress === bootstrap.previousServiceAddress;
+  if (!holderUnchanged || !addressUnchanged) {
+    throw new Error('Service-identity controls changed since the interrupted import.');
+  }
+}
+
+function verifyServiceIdentityBootstrapRollback_(holderControl,
+  addressControl, bootstrap) {
+  if (typeof holderControl.getDisplayValue === 'function' &&
+    (String(holderControl.getDisplayValue() || '') !==
+      bootstrap.previousAccountHolder ||
+      String(addressControl.getDisplayValue() || '') !==
+        bootstrap.previousServiceAddress)) {
+    throw new Error('Service-identity rollback could not be verified.');
+  }
+}
+
+function restoreJournaledInitialServiceIdentityBootstrap_(journal, file,
+  sheet, layout) {
+  const bootstrap = journal && journal.serviceIdentityBootstrap;
+  if (!bootstrap || journal.serviceIdentityBootstrapRestored) {
+    return;
+  }
+  const holderColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('accountHolder'));
+  const addressColumn = findHeaderIndex_(layout.lookup,
+    getHeaderAliases_('serviceAddress'));
+  if (bootstrap.metadataRow !== layout.headerRow - 1 ||
+    bootstrap.holderColumn !== holderColumn ||
+    bootstrap.addressColumn !== addressColumn) {
+    throw new Error('Journaled service-identity controls no longer match the target sheet.');
+  }
+  const holderControl = sheet.getRange(bootstrap.metadataRow,
+    bootstrap.holderColumn);
+  const addressControl = sheet.getRange(bootstrap.metadataRow,
+    bootstrap.addressColumn);
+  if ((typeof holderControl.getFormula === 'function' &&
+    holderControl.getFormula()) ||
+    (typeof addressControl.getFormula === 'function' &&
+      addressControl.getFormula())) {
+    throw new Error('Journaled service-identity controls are now formula-backed.');
+  }
+  assertServiceIdentityBootstrapRollbackTarget_(holderControl, addressControl,
+    bootstrap);
+  setLiteralSheetValue_(holderControl, bootstrap.previousAccountHolder);
+  setLiteralSheetValue_(addressControl, bootstrap.previousServiceAddress);
+  verifyServiceIdentityBootstrapRollback_(holderControl, addressControl,
+    bootstrap);
+  updateMutationJournal_(file.getId(), {
+    serviceIdentityBootstrapCompleted: false,
+    serviceIdentityBootstrapRestored: true
+  });
 }
 
 function validateServiceIdentityForInvoice_(extracted) {
@@ -1874,8 +2102,12 @@ function validateServiceIdentityForInvoice_(extracted) {
     );
   }
   const layout = getSheetLayout_(sheet);
-  return validateServiceIdentity_(extracted,
-    getServiceIdentityControls_(sheet, layout));
+  const configured = getServiceIdentityControls_(sheet, layout);
+  if (canEstablishInitialServiceIdentity_(sheet, layout, configured)) {
+    return validateServiceIdentity_(extracted,
+      buildInitialServiceIdentity_(extracted));
+  }
+  return validateServiceIdentity_(extracted, configured);
 }
 
 function applySupplierFieldDefaults_(extracted, availableHeaders) {
@@ -2632,6 +2864,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     )
   });
   const layout = getSheetLayout_(sheet);
+  const identityBootstrap = prepareInitialServiceIdentityBootstrap_(sheet,
+    layout, extracted);
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
     const previousRowPayload = captureImportedRowPayload_(sheet, existingRow,
@@ -2710,6 +2944,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     checkpointMutationJournal_(file.getId(), state, { stage: 'sheet-written' });
     dashboardResult = refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
       sheet, extracted);
+    applyInitialServiceIdentityBootstrap_(file, state, identityBootstrap);
   } catch (error) {
     let deletionCompleted = false;
     try {
@@ -2734,6 +2969,13 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
           describeError_(dashboardError);
       }
     }
+    try {
+      restoreInitialServiceIdentityBootstrap_(identityBootstrap);
+    } catch (identityRollbackError) {
+      error.mutationRollbackIncomplete = true;
+      error.message += ' Service identity rollback also failed: ' +
+        describeError_(identityRollbackError);
+    }
     throw error;
   }
   return {
@@ -2741,6 +2983,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     sheet: sheet,
     row: targetRow,
     created: true,
+    serviceIdentityBootstrap: identityBootstrap,
     electricityDashboardLayouts: electricityDashboardLayouts,
     dashboardWarning: dashboardResult && dashboardResult.warning || ''
   };
@@ -4307,6 +4550,8 @@ function rollbackJournalSheetRow_(journal, file) {
     );
   }
   const layout = getSheetLayout_(sheet);
+  restoreJournaledInitialServiceIdentityBootstrap_(journal, file, sheet,
+    layout);
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   if (!sourceColumn) {
     throw new Error('The journaled spreadsheet source column no longer exists.');
