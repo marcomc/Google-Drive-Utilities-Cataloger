@@ -1917,9 +1917,9 @@ function hasManagedServiceIdentityMetadata_(sheet, layout, supplyType) {
   }
   const metadataRow = layout.headerRow - 1;
   return String(sheet.getRange(metadataRow, 1).getDisplayValue() || '').trim() ===
-    'Controllo fornitura' && normalizeCellText_(
-      sheet.getRange(metadataRow, 2).getDisplayValue()
-    ) === normalizeCellText_(supplyType);
+    'Controllo fornitura' && getAutomationConfig_().sheet_by_supply[
+      supplyType
+    ] === sheet.getName();
 }
 
 function canEstablishInitialServiceIdentity_(sheet, layout, configured,
@@ -2913,6 +2913,8 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
   if (!sheet) {
     throw new Error('Configured sheet was not found: ' + sheetName);
   }
+  const sheetLinkPrefix = spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() +
+    '&range=A';
   let electricityDashboardLayouts = null;
   try {
     electricityDashboardLayouts =
@@ -2937,6 +2939,14 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
   const layout = getSheetLayout_(sheet);
   const identityBootstrap = prepareInitialServiceIdentityBootstrap_(sheet,
     layout, extracted);
+  if (identityBootstrap || state && state.initialServiceIdentityBootstrapExpected) {
+    const currentIdentityValidation = validateServiceIdentityForInvoice_(
+      extracted);
+    if (!currentIdentityValidation.valid) {
+      throw new Error('Current target service identity could not be revalidated: ' +
+        currentIdentityValidation.problem);
+    }
+  }
   const existingRow = findSpreadsheetRowBySourceFile_(sheet, layout, file.getId());
   if (existingRow) {
     const previousRowPayload = captureImportedRowPayload_(sheet, existingRow,
@@ -2985,7 +2995,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       throw error;
     }
     return {
-      link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + correctedRow,
+      link: sheetLinkPrefix + correctedRow,
       sheet: sheet,
       row: correctedRow,
       created: false,
@@ -2994,14 +3004,6 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       electricityDashboardLayouts: electricityDashboardLayouts,
       dashboardWarning: dashboardResult && dashboardResult.warning || ''
     };
-  }
-  if (identityBootstrap || state && state.initialServiceIdentityBootstrapExpected) {
-    const currentIdentityValidation = validateServiceIdentityForInvoice_(
-      extracted);
-    if (!currentIdentityValidation.valid) {
-      throw new Error('Current target service identity could not be revalidated: ' +
-        currentIdentityValidation.problem);
-    }
   }
   const targetRow = getInsertionRow_(sheet, layout, extracted.issue_date);
   checkpointMutationJournal_(file.getId(), state, {
@@ -3065,7 +3067,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     throw error;
   }
   return {
-    link: spreadsheet.getUrl() + '#gid=' + sheet.getSheetId() + '&range=A' + targetRow,
+    link: sheetLinkPrefix + targetRow,
     sheet: sheet,
     row: targetRow,
     created: true,

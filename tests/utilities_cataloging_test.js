@@ -131,6 +131,7 @@ function testFirstInvoiceCanEstablishMissingServiceIdentity() {
   ];
   let lastRow = 2;
   const sheet = {
+    getName: () => 'Water',
     getLastRow: () => lastRow,
     getRange: (row, column) => ({
       getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || '')
@@ -200,6 +201,7 @@ function testFirstInvoiceRequiresManagedServiceIdentityMetadata() {
       'Account holder', 'Service address']
   ];
   const sheet = {
+    getName: () => 'Water',
     getLastRow: () => 2,
     getRange: (row, column) => ({
       getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
@@ -218,6 +220,12 @@ function testFirstInvoiceRequiresManagedServiceIdentityMetadata() {
   assert.equal(result.code, 'target_identity_not_configured');
   cells[0][0] = 'Controllo fornitura';
   cells[0][1] = 'Electricity';
+  const sharedTabResult = context.validateServiceIdentityForInvoice_(
+    validInvoice());
+  assert.equal(sharedTabResult.valid, true);
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Water: 'Different target tab' }
+  });
   const mismatchResult = context.validateServiceIdentityForInvoice_(
     validInvoice());
   assert.equal(mismatchResult.valid, false);
@@ -5180,6 +5188,37 @@ function testExpectedBootstrapChangeAbortsBeforeRowInsertion() {
   assert.equal(inserted, false);
 }
 
+function testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement() {
+  const context = loadCataloger();
+  let replacementStarted = false;
+  const sheet = { getName: () => 'Water', getSheetId: () => 7 };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.getSheetLayout_ = () => ({ headerRow: 1, headers: [], lookup: {} });
+  context.prepareInitialServiceIdentityBootstrap_ = () => null;
+  context.validateServiceIdentityForInvoice_ = () => ({
+    valid: false,
+    problem: 'The target supply has no configured account holder or service address.'
+  });
+  context.findSpreadsheetRowBySourceFile_ = () => 2;
+  context.writeInvoiceRow_ = () => { replacementStarted = true; };
+  context.updateMutationJournal_ = () => {};
+
+  assert.throws(
+    () => context.importUtilityInvoiceToSheet_(
+      { getId: () => 'file-id' }, validInvoice(),
+      { initialServiceIdentityBootstrapExpected: true }
+    ),
+    /could not be revalidated/
+  );
+  assert.equal(replacementStarted, false);
+}
+
 function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
   const context = loadCataloger();
   const deletedRows = [];
@@ -6337,6 +6376,7 @@ testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
 testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
 testExpectedBootstrapChangeAbortsBeforeRowInsertion();
+testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement();
 testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();
