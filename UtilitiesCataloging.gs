@@ -982,14 +982,19 @@ function validateExtractedUtilityDataForImport_(extracted) {
     }
     extracted.address_type = 'import';
   }
-  return withExtractionValidationStage_(
+  const targetValidation = withExtractionValidationStage_(
     validateTargetSheetValues_(extracted), 'target-spreadsheet'
   );
+  if (targetValidation.valid &&
+    validation.initialServiceIdentityBootstrapEligible === true) {
+    targetValidation.initialServiceIdentityBootstrapEligible = true;
+  }
+  return targetValidation;
 }
 
 function withExtractionValidationStage_(validation, stage) {
   if (!validation || validation.valid) {
-    return { valid: true, stage: stage };
+    return Object.assign({}, validation || {}, { valid: true, stage: stage });
   }
   return Object.assign({}, validation, { stage: stage });
 }

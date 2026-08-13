@@ -2119,6 +2119,24 @@ function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
   assert.equal(eventText.includes('Invoice identifier is missing'), false);
 }
 
+function testValidationPipelinePreservesBootstrapEligibility() {
+  const context = loadCataloger();
+  const extracted = validInvoice();
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({
+    valid: true,
+    initialServiceIdentityBootstrapEligible: true
+  });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+
+  const validation = context.validateExtractedUtilityDataForImport_(extracted);
+
+  assert.equal(validation.valid, true);
+  assert.equal(validation.stage, 'target-spreadsheet');
+  assert.equal(validation.initialServiceIdentityBootstrapEligible, true);
+  assert.equal(extracted.address_type, 'import');
+}
+
 function testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory() {
   const context = loadCataloger();
   const repairContexts = [];
@@ -6349,6 +6367,7 @@ testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
 testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid();
+testValidationPipelinePreservesBootstrapEligibility();
 testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory();
 testExtractionRepairLoopDoesNotRetryNonRepairableState();
 testExtractionRepairLoopRetriesInvalidStructuredOutput();
