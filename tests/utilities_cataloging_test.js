@@ -121,6 +121,187 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   );
 }
 
+function testFirstInvoiceCanEstablishMissingServiceIdentity() {
+  const context = loadCataloger();
+  const cells = [
+    ['Controllo fornitura', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address']
+  ];
+  let lastRow = 2;
+  const sheet = {
+    getName: () => 'Water',
+    getLastRow: () => lastRow,
+    getRange: (row, column) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || '')
+    })
+  };
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: cells[1],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'contract number': 4,
+      'account holder': 5,
+      'service address': 6
+    }
+  });
+
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    valid: true,
+    initialServiceIdentityBootstrapEligible: true
+  });
+  const incompleteInvoice = Object.assign({}, validInvoice(), {
+    account_holder: '',
+    address_evidence: '',
+    service_street: '',
+    service_civic_number: '',
+    service_city: ''
+  });
+  const incompleteResult = context.validateServiceIdentityForInvoice_(
+    incompleteInvoice);
+  assert.equal(incompleteResult.valid, false);
+  assert.equal(incompleteResult.code, 'service_identity_missing');
+  assert.equal(incompleteResult.repairable, true);
+  cells[0][4] = 'Avery North';
+  const holderOnlyResult = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(holderOnlyResult.valid, false);
+  assert.equal(holderOnlyResult.code, 'target_identity_not_configured');
+  cells[0][4] = 'Enter account holder here';
+  cells[0][5] = 'Cedar Meridian Boulevard 125 99991 Rivermouth';
+  const addressOnlyResult = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(addressOnlyResult.valid, false);
+  assert.equal(addressOnlyResult.code, 'target_identity_not_configured');
+  cells[0][5] = 'Enter service address here';
+  lastRow = 3;
+  const migratedResult = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(migratedResult.valid, false);
+  assert.equal(migratedResult.code, 'target_identity_not_configured');
+}
+
+function testFirstInvoiceRequiresManagedServiceIdentityMetadata() {
+  const context = loadCataloger();
+  const cells = [
+    ['', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address']
+  ];
+  const sheet = {
+    getName: () => 'Water',
+    getLastRow: () => 2,
+    getRange: (row, column) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      getFormula: () => ''
+    })
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.SpreadsheetApp.openById = () => ({ getSheetByName: () => sheet });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { 'account holder': 5, 'service address': 6 }
+  });
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'target_identity_not_configured');
+  cells[0][0] = 'Controllo fornitura';
+  cells[0][1] = 'Electricity';
+  const sharedTabResult = context.validateServiceIdentityForInvoice_(
+    validInvoice());
+  assert.equal(sharedTabResult.valid, true);
+  context.getAutomationConfig_ = () => ({
+    sheet_by_supply: { Water: 'Different target tab' }
+  });
+  const mismatchResult = context.validateServiceIdentityForInvoice_(
+    validInvoice());
+  assert.equal(mismatchResult.valid, false);
+  assert.equal(mismatchResult.code, 'target_identity_not_configured');
+}
+
+function testFirstInvoiceCannotReplaceFormulaBackedIdentityControls() {
+  const context = loadCataloger();
+  const sheet = {
+    getLastRow: () => 2,
+    getRange: (_row, column) => ({
+      getDisplayValue: () => '',
+      getFormula: () => column === 5 ? '=Settings!B2' : '=Settings!B3'
+    })
+  };
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address'],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'contract number': 4,
+      'account holder': 5,
+      'service address': 6
+    }
+  });
+
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'target_identity_not_configured');
+}
+
+function testLegacyHeaderRowWithoutControlsRemainsFailClosed() {
+  const context = loadCataloger();
+  const sheet = {
+    getLastRow: () => 1,
+    getRange: () => {
+      throw new Error('row zero must never be accessed');
+    }
+  };
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 1,
+    headers: ['Issue date', 'Supplier', 'Invoice number', 'Source file'],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'source file': 4
+    }
+  });
+
+  const result = context.validateServiceIdentityForInvoice_(validInvoice());
+
+  assert.equal(result.valid, false);
+  assert.equal(result.code, 'target_identity_not_configured');
+}
+
 function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
   const context = loadCataloger();
   const expectedAddresses = [
@@ -1938,6 +2119,24 @@ function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
   assert.equal(eventText.includes('Invoice identifier is missing'), false);
 }
 
+function testValidationPipelinePreservesBootstrapEligibility() {
+  const context = loadCataloger();
+  const extracted = validInvoice();
+  context.validateExtraction_ = () => ({ valid: true });
+  context.validateServiceIdentityForInvoice_ = () => ({
+    valid: true,
+    initialServiceIdentityBootstrapEligible: true
+  });
+  context.validateTargetSheetValues_ = () => ({ valid: true });
+
+  const validation = context.validateExtractedUtilityDataForImport_(extracted);
+
+  assert.equal(validation.valid, true);
+  assert.equal(validation.stage, 'target-spreadsheet');
+  assert.equal(validation.initialServiceIdentityBootstrapEligible, true);
+  assert.equal(extracted.address_type, 'import');
+}
+
 function testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory() {
   const context = loadCataloger();
   const repairContexts = [];
@@ -2912,7 +3111,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.2',
+      applicationVersion: '0.4.3',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -2923,7 +3122,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.2',
+      applicationVersion: '0.4.3',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -2972,6 +3171,71 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.equal(incompleteRollbackResult.keepMutationJournal, true);
   assert.match(context.formatResult_(incompleteRollbackResult),
     /Stato importazione: rollback incompleto; verifica manuale necessaria/);
+}
+
+function testFailedFirstImportRestoresServiceIdentityControls() {
+  const context = loadCataloger();
+  const cells = {
+    holder: 'Avery North',
+    address: 'Cedar Meridian Boulevard 125 99991 Rivermouth'
+  };
+  const sheet = {
+    getName: () => 'Water',
+    getRange: (_row, column) => ({
+      setRichTextValue: (value) => {
+        if (column === 5) {
+          cells.holder = value.text;
+        } else if (column === 6) {
+          cells.address = value.text;
+        }
+      }
+    })
+  };
+  const bootstrap = {
+    sheet,
+    metadataRow: 1,
+    holderColumn: 5,
+    addressColumn: 6,
+    previousAccountHolder: 'Enter account holder here',
+    previousServiceAddress: 'Enter service address here',
+    started: true,
+    completed: true
+  };
+  const file = {
+    getId: () => 'file-id',
+    getName: () => 'invoice.pdf',
+    getSize: () => 100,
+    getUrl: () => 'https://drive.test/file-id',
+    setName: () => { throw new Error('Drive rename failed'); }
+  };
+  context.sha256ForFile_ = () => 'hash';
+  context.extractUtilityDataWithRepair_ = () => ({
+    extracted: validInvoice(),
+    validation: { valid: true, stage: 'target-spreadsheet' }
+  });
+  context.findDuplicate_ = () => ({ status: 'none' });
+  context.buildAssignedName_ = () => 'assigned.pdf';
+  context.saveMutationJournal_ = () => {};
+  context.updateMutationJournal_ = () => {};
+  context.getDestinationFolder_ = () => ({ folder: {}, path: 'Water/2026' });
+  context.getDestinationCollision_ = () => ({ status: 'none' });
+  context.importUtilityInvoiceToSheet_ = () => ({
+    link: 'https://sheets.test',
+    sheet,
+    row: 3,
+    created: true,
+    serviceIdentityBootstrap: bootstrap
+  });
+  context.rollbackImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+  context.logCatalogEvent_ = () => {};
+  context.classifyCatalogErrorForLog_ = () => 'drive';
+
+  const result = context.processIntakeFile_(file, {}, 'policy');
+
+  assert.equal(result.status, 'ERROR');
+  assert.equal(cells.holder, 'Enter account holder here');
+  assert.equal(cells.address, 'Enter service address here');
 }
 
 function testPreExtractionErrorReportKeepsDataUnavailable() {
@@ -3837,6 +4101,124 @@ function testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint() {
   assert.equal(dashboardRefreshes, 2);
 }
 
+function testMutationRecoveryRestoresInitialServiceIdentity() {
+  const context = loadCataloger();
+  const file = { getId: () => 'file-id' };
+  const cells = {
+    holder: 'Avery North',
+    address: 'Cedar Meridian Boulevard 125 99991 Rivermouth'
+  };
+  const sheet = {
+    getSheetId: () => 7,
+    getLastRow: () => 3,
+    getRange: (row, column) => ({
+      row,
+      column,
+      getDisplayValue: () => {
+        if (row === 1 && column === 5) {
+          return cells.holder;
+        }
+        if (row === 1 && column === 6) {
+          return cells.address;
+        }
+        return '';
+      },
+      getFormula: () => '',
+      setRichTextValue: (value) => {
+        if (row === 1 && column === 5) {
+          cells.holder = value.text;
+        } else if (row === 1 && column === 6) {
+          cells.address = value.text;
+        }
+      }
+    }),
+    deleteRow: () => {}
+  };
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    headers: ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address', 'Source file'],
+    lookup: {
+      'account holder': 5,
+      'service address': 6,
+      'source file': 7
+    }
+  });
+  context.getHeaderAliases_ = (key) => ({
+    accountHolder: ['account holder'],
+    serviceAddress: ['service address'],
+    sourceFile: ['source file']
+  }[key] || []);
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  let sourceMarkerFile = file;
+  context.getFileFromSourceCell_ = (cell) =>
+    cell.row === 3 && cell.column === 7 ? sourceMarkerFile : null;
+  context.updateMutationJournal_ = () => {};
+  context.refreshElectricityDashboardAfterRollback_ = () => {};
+
+  const journal = {
+    stage: 'sheet-written',
+    sheetName: 'Water',
+    spreadsheetId: 'spreadsheet-id',
+    sheetId: 7,
+    sheetRow: 3,
+    sheetRowCreated: true,
+    sheetRowPreexisting: false,
+    serviceIdentityBootstrap: {
+      metadataRow: 1,
+      holderColumn: 5,
+      addressColumn: 6,
+      previousAccountHolder: 'Enter account holder here',
+      previousServiceAddress: 'Enter service address here',
+      accountHolder: 'Avery North',
+      serviceAddress: 'Cedar Meridian Boulevard 125 99991 Rivermouth'
+    },
+    serviceIdentityBootstrapCompleted: true
+  };
+
+  sheet.getSheetId = () => 8;
+  assert.throws(
+    () => context.rollbackJournalSheetRow_(journal, file),
+    /tab identity no longer matches/
+  );
+  assert.equal(cells.holder, 'Avery North');
+  assert.equal(cells.address, 'Cedar Meridian Boulevard 125 99991 Rivermouth');
+  journal.sheetId = 0;
+  sheet.getSheetId = () => 0;
+  context.rollbackJournalSheetRow_(journal, file);
+  assert.equal(cells.holder, 'Enter account holder here');
+  assert.equal(cells.address, 'Enter service address here');
+  cells.holder = 'Avery North';
+  cells.address = 'Cedar Meridian Boulevard 125 99991 Rivermouth';
+  journal.sheetId = 7;
+  sheet.getSheetId = () => 7;
+  sourceMarkerFile = { getId: () => 'different-file-id' };
+  assert.throws(
+    () => context.rollbackJournalSheetRow_(journal, file),
+    /source marker is missing/
+  );
+  assert.equal(cells.holder, 'Avery North');
+  sourceMarkerFile = file;
+
+  context.rollbackJournalSheetRow_(journal, file);
+
+  assert.equal(cells.holder, 'Enter account holder here');
+  assert.equal(cells.address, 'Enter service address here');
+
+  cells.holder = 'Manually corrected holder';
+  cells.address = 'Manually corrected address';
+  assert.throws(
+    () => context.rollbackJournalSheetRow_(journal, file),
+    /changed since the interrupted import/
+  );
+  assert.equal(cells.holder, 'Manually corrected holder');
+  assert.equal(cells.address, 'Manually corrected address');
+}
+
 function testMutationRecoveryReportsUnavailableFileOnce() {
   const context = loadCataloger();
   const extraction = validInvoice();
@@ -4581,6 +4963,75 @@ function testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement()
   assert.equal(numberFormat, originalNumberFormat);
 }
 
+function testFirstInvoiceImportEstablishesServiceIdentityControls() {
+  const context = loadCataloger();
+  const cells = [
+    ['Controllo fornitura', 'Water', '', '', 'Enter account holder here',
+      'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address', 'Source file']
+  ];
+  let lastRow = 2;
+  const sheet = {
+    getName: () => 'Water',
+    getSheetId: () => 7,
+    getLastRow: () => lastRow,
+    getRange: (row, column) => ({
+      getDisplayValue: () => String((cells[row - 1] || [])[column - 1] || ''),
+      getFormula: () => '',
+      setValue: (value) => {
+        cells[row - 1] = cells[row - 1] || [];
+        cells[row - 1][column - 1] = value;
+      },
+      setRichTextValue: (value) => {
+        cells[row - 1] = cells[row - 1] || [];
+        cells[row - 1][column - 1] = value.text;
+      }
+    }),
+    deleteRow: () => { lastRow -= 1; }
+  };
+  const layout = {
+    headerRow: 2,
+    headers: cells[1],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'invoice number': 3,
+      'contract number': 4,
+      'account holder': 5,
+      'service address': 6,
+      'source file': 7
+    }
+  };
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    sheet_by_supply: { Water: 'Water' }
+  });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.getSheetLayout_ = () => layout;
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.findSpreadsheetRowBySourceFile_ = () => 0;
+  context.getInsertionRow_ = () => 3;
+  context.insertBlankRowAt_ = () => { lastRow += 1; };
+  context.copyRowStyleAndFormulas_ = () => {};
+  context.refreshImportedSourceLink_ = () => {};
+  context.writeInvoiceRow_ = () => {};
+  context.verifyImportedRow_ = () => {};
+  context.refreshElectricityDashboardAfterInvoiceImport_ = () => null;
+  context.updateMutationJournal_ = () => {};
+
+  context.importUtilityInvoiceToSheet_(
+    { getId: () => 'file-id' }, validInvoice(), {}
+  );
+
+  assert.equal(cells[0][4], 'Avery North');
+  assert.equal(cells[0][5], 'Cedar Meridian Boulevard 125 99991 Rivermouth');
+}
+
 function testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice() {
   const context = loadCataloger();
   const moves = [];
@@ -4672,6 +5123,7 @@ function createInsertedInvoiceRollbackFixture(deleteRow) {
     headers: ['Issue date'],
     lookup: {}
   });
+  context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
   context.captureElectricityDashboardLayoutsForRollback_ = () => null;
   context.findSpreadsheetRowBySourceFile_ = () => 0;
   context.getInsertionRow_ = () => 2;
@@ -4734,6 +5186,93 @@ function testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState() {
   assert.equal(journal.stage, 'sheet-marker-written');
   assert.equal(journal.sheetRowCreated, true);
   assert.equal(journal.sheetRowDeleted, undefined);
+}
+
+function testExpectedBootstrapChangeAbortsBeforeRowInsertion() {
+  const fixture = createInsertedInvoiceRollbackFixture(() => {});
+  let inserted = false;
+  fixture.context.insertBlankRowAt_ = () => { inserted = true; };
+  fixture.context.validateServiceIdentityForInvoice_ = () => ({
+    valid: false,
+    problem: 'The target supply has no configured account holder or service address.'
+  });
+
+  assert.throws(
+    () => fixture.context.importUtilityInvoiceToSheet_(
+      fixture.file, validInvoice(), { initialServiceIdentityBootstrapExpected: true }
+    ),
+    /could not be revalidated/
+  );
+  assert.equal(inserted, false);
+}
+
+function testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement() {
+  const context = loadCataloger();
+  let replacementStarted = false;
+  const sheet = { getName: () => 'Water', getSheetId: () => 7 };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.SpreadsheetApp.openById = () => ({
+    getSheetByName: () => sheet,
+    getUrl: () => 'https://sheets.test/spreadsheet-id'
+  });
+  context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+  context.getSheetLayout_ = () => ({ headerRow: 1, headers: [], lookup: {} });
+  context.prepareInitialServiceIdentityBootstrap_ = () => null;
+  context.validateServiceIdentityForInvoice_ = () => ({
+    valid: false,
+    problem: 'The target supply has no configured account holder or service address.'
+  });
+  context.findSpreadsheetRowBySourceFile_ = () => 2;
+  context.writeInvoiceRow_ = () => { replacementStarted = true; };
+  context.updateMutationJournal_ = () => {};
+
+  assert.throws(
+    () => context.importUtilityInvoiceToSheet_(
+      { getId: () => 'file-id' }, validInvoice(),
+      { initialServiceIdentityBootstrapExpected: true }
+    ),
+    /could not be revalidated/
+  );
+  assert.equal(replacementStarted, false);
+}
+
+function testBootstrapBoundaryRejectsNewRowsBeforeInsertion() {
+  const context = loadCataloger();
+  let lastRow = 2;
+  const cells = ['Controllo fornitura', 'Water', '', '',
+    'Enter account holder here', 'Enter service address here'];
+  const sheet = {
+    getName: () => 'Water',
+    getLastRow: () => lastRow,
+    getRange: (_row, column) => ({
+      getDisplayValue: () => cells[column - 1] || '',
+      getFormula: () => ''
+    })
+  };
+  context.getAutomationConfig_ = () => ({ sheet_by_supply: { Water: 'Water' } });
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { 'account holder': 5, 'service address': 6 }
+  });
+  context.getHeaderAliases_ = (key) => ({
+    accountHolder: ['account holder'], serviceAddress: ['service address']
+  }[key] || []);
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  const bootstrap = {
+    sheet,
+    supplyType: 'Water',
+    metadataRow: 1,
+    holderColumn: 5,
+    addressColumn: 6,
+    previousAccountHolder: 'Enter account holder here',
+    previousServiceAddress: 'Enter service address here'
+  };
+  lastRow = 3;
+  assert.throws(
+    () => context.assertInitialServiceIdentityBootstrapBoundary_(bootstrap),
+    /boundary changed/
+  );
 }
 
 function testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns() {
@@ -5805,6 +6344,10 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testFirstInvoiceCanEstablishMissingServiceIdentity();
+testFirstInvoiceRequiresManagedServiceIdentityMetadata();
+testFirstInvoiceCannotReplaceFormulaBackedIdentityControls();
+testLegacyHeaderRowWithoutControlsRemainsFailClosed();
 testInvoiceFrequencyInferenceUsesPeriodAndHistory();
 testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics();
 testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation();
@@ -5824,6 +6367,7 @@ testPendingDashboardRefreshRetriesWithoutProcessingPdfs();
 testScheduledCatalogRunRetriesDashboardBeforeScanning();
 testExtractionInfersMissingFrequencyBeforeValidation();
 testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid();
+testValidationPipelinePreservesBootstrapEligibility();
 testExtractionRepairLoopUsesAtMostThreeAiCallsWithHistory();
 testExtractionRepairLoopDoesNotRetryNonRepairableState();
 testExtractionRepairLoopRetriesInvalidStructuredOutput();
@@ -5848,6 +6392,7 @@ testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
 testRepairContextSurvivesAutomaticVertexFallback();
 testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
+testFailedFirstImportRestoresServiceIdentityControls();
 testPreExtractionErrorReportKeepsDataUnavailable();
 testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testDestinationFolderCreationCheckpointsEachCreatedPath();
@@ -5867,6 +6412,7 @@ testMutationJournalCapturesValidatedReportingContextBeforeMutations();
 testMutationJournalPersistsFailureStageAtProcessingCheckpoints();
 testMutationJournalChunksLargeValidatedExtractionSnapshots();
 testMutationRecoveryPersistsDeletedRowWithFallbackCheckpoint();
+testMutationRecoveryRestoresInitialServiceIdentity();
 testMutationRecoveryReportsUnavailableFileOnce();
 testRuntimeExhaustionPersistsOperatorLinks();
 testTargetMutationJournalRecoveryLeavesUnrelatedJournalUntouched();
@@ -5881,10 +6427,14 @@ testMissingRowFormulaDoesNotUnprotectTemplateColumn();
 testSourceHyperlinkFormulaIsPreserved();
 testExistingInvoicePayloadRestoresAndRepositions();
 testExistingInvoiceRollbackRestoresNumberFormatAfterFailedReplacement();
+testFirstInvoiceImportEstablishesServiceIdentityControls();
 testCorrectedInvoiceMovesImmediatelyBeforeNewerInvoice();
 testCorrectedInvoiceAppendsWithoutBlankRow();
 testInsertedInvoiceDeleteFailureBeforeMarkerPreservesJournalState();
 testInsertedInvoiceDeleteFailureAfterMarkerPreservesJournalState();
+testExpectedBootstrapChangeAbortsBeforeRowInsertion();
+testExpectedBootstrapChangeAbortsBeforeExistingRowReplacement();
+testBootstrapBoundaryRejectsNewRowsBeforeInsertion();
 testInsertedInvoiceRetainsRowWhenDashboardRefreshWarns();
 testDashboardRollbackForcesRegeneration();
 testRowDeletionIsJournaledBeforeDashboardRollback();

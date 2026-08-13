@@ -1514,15 +1514,180 @@ function writeInstallerServiceIdentityMetadata_(sheet, supply, layout, locale) {
     String(holderControl.getDisplayValue() || '').trim() : '';
   const currentAddress = headerRow > 1 ?
     String(addressControl.getDisplayValue() || '').trim() : '';
+  const controlLabels = getInstallerServiceIdentityControlLabels_(localization);
+  const holderValue = isInstallerServiceIdentityPlaceholder_(currentHolder,
+    'accountHolder') ||
+    !currentHolder ? controlLabels.accountHolderPlaceholder : currentHolder;
+  const addressValue = isInstallerServiceIdentityPlaceholder_(currentAddress,
+    'serviceAddress') ||
+    !currentAddress ? controlLabels.serviceAddressPlaceholder : currentAddress;
   sheet.getRange(metadataRow, 1).setValue('Controllo fornitura');
   sheet.getRange(metadataRow, 2).setValue(currentSupply || supply);
   sheet.getRange(metadataRow, 3).setValue(
     isItalian ? 'Intestatario / indirizzo: modifica i campi di controllo' :
       'Account holder / address: edit the control fields'
   );
-  writeInstallerServiceIdentityControlValue_(holderControl, currentHolder);
-  writeInstallerServiceIdentityControlValue_(addressControl, currentAddress);
+  writeInstallerServiceIdentityControlValue_(holderControl, holderValue);
+  writeInstallerServiceIdentityControlValue_(addressControl, addressValue);
+  styleInstallerServiceIdentityControl_(holderControl, holderValue,
+    controlLabels.accountHolderPlaceholder, controlLabels.note, 'accountHolder');
+  styleInstallerServiceIdentityControl_(addressControl, addressValue,
+    controlLabels.serviceAddressPlaceholder, controlLabels.note, 'serviceAddress');
+  updateInstallerServiceIdentityConditionalFormatting_(sheet, [
+    { range: holderControl, placeholder: controlLabels.accountHolderPlaceholder,
+      fieldKey: 'accountHolder' },
+    { range: addressControl, placeholder: controlLabels.serviceAddressPlaceholder,
+      fieldKey: 'serviceAddress' }
+  ]);
   sheet.getRange(metadataRow, 1, 1, 3).setFontWeight('bold');
+}
+
+function getInstallerServiceIdentityControlLabels_(localization) {
+  const isItalian = localization.spreadsheetLocale === 'it_IT';
+  const configured = localization.serviceIdentityControls || {};
+  return {
+    accountHolderPlaceholder: configured.accountHolderPlaceholder ||
+      (isItalian ? "Scrivi qui il nome dell'intestatario" :
+        'Enter account holder here'),
+    serviceAddressPlaceholder: configured.serviceAddressPlaceholder ||
+      (isItalian ? "Scrivi qui l'indirizzo di fornitura" :
+        'Enter service address here'),
+    note: isItalian ?
+      'Compila questo controllo manualmente oppure lascia che la prima fattura valida lo configuri.' :
+      'Complete this control manually or let the first valid invoice configure it.'
+  };
+}
+
+function getInstallerServiceIdentityPlaceholderValues_(fieldKey) {
+  const values = [];
+  const add = function (value) {
+    const text = String(value || '').trim();
+    if (text && values.indexOf(text) < 0) {
+      values.push(text);
+    }
+  };
+  const fallback = {
+    accountHolder: [
+      'Enter account holder here',
+      "Scrivi qui il nome dell'intestatario"
+    ],
+    serviceAddress: [
+      'Enter service address here',
+      "Scrivi qui l'indirizzo di fornitura"
+    ]
+  };
+  if (typeof getLocalizationRegistry_ !== 'function') {
+    (fallback[fieldKey] || []).forEach(add);
+    return values;
+  }
+  const registry = getLocalizationRegistry_();
+  Object.keys(registry).forEach(function (locale) {
+    const labels = getInstallerServiceIdentityControlLabels_(registry[locale]);
+    add(fieldKey === 'accountHolder' ? labels.accountHolderPlaceholder :
+      fieldKey === 'serviceAddress' ? labels.serviceAddressPlaceholder : '');
+  });
+  return values;
+}
+
+function isInstallerServiceIdentityPlaceholder_(value, fieldKey) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return false;
+  }
+  if (fieldKey) {
+    return getInstallerServiceIdentityPlaceholderValues_(fieldKey)
+      .indexOf(text) >= 0;
+  }
+  return getInstallerServiceIdentityPlaceholderValues_('accountHolder')
+    .concat(getInstallerServiceIdentityPlaceholderValues_('serviceAddress'))
+    .indexOf(text) >= 0;
+}
+
+function styleInstallerServiceIdentityControl_(control, value, placeholder,
+  note, fieldKey) {
+  const displayedValue = typeof control.getDisplayValue === 'function' ?
+    String(control.getDisplayValue() || '').trim() : String(value || '').trim();
+  const configured = Boolean(displayedValue &&
+    !isInstallerServiceIdentityPlaceholder_(displayedValue, fieldKey));
+  if (typeof control.setBackground === 'function') {
+    control.setBackground(configured ? '#d9ead3' : '#fce8b2');
+  }
+  if (typeof control.setFontColor === 'function') {
+    control.setFontColor(configured ? '#274e13' : '#7f6000');
+  }
+  if (typeof control.setFontWeight === 'function') {
+    control.setFontWeight('bold');
+  }
+  if (typeof control.setNote === 'function') {
+    control.setNote(note);
+  }
+  if (typeof control.setBorder === 'function') {
+    const borderStyle = typeof SpreadsheetApp !== 'undefined' &&
+      SpreadsheetApp.BorderStyle ?
+      SpreadsheetApp.BorderStyle.SOLID_THICK : null;
+    control.setBorder(true, true, true, true, false, false,
+      configured ? '#6aa84f' : '#e69138', borderStyle);
+  }
+}
+
+function updateInstallerServiceIdentityConditionalFormatting_(sheet,
+  controls) {
+  if (typeof SpreadsheetApp === 'undefined' ||
+    typeof SpreadsheetApp.newConditionalFormatRule !== 'function' ||
+    typeof sheet.getConditionalFormatRules !== 'function' ||
+    typeof sheet.setConditionalFormatRules !== 'function') {
+    return;
+  }
+  const rules = sheet.getConditionalFormatRules().filter(function (rule) {
+    if (!rule || typeof rule.getBooleanCondition !== 'function') {
+      return true;
+    }
+    const condition = rule.getBooleanCondition();
+    if (!condition || typeof condition.getCriteriaValues !== 'function') {
+      return true;
+    }
+    return !condition.getCriteriaValues().some(function (value) {
+      return String(value || '').indexOf('GDUC_IDENTITY_') >= 0;
+    });
+  });
+  controls.forEach(function (control) {
+    if (!control.range || typeof control.range.getA1Notation !== 'function') {
+      return;
+    }
+    const cell = control.range.getA1Notation().replace(
+      /^([A-Z]+)(\d+)$/,
+      '$$$1$$$2'
+    );
+    const placeholders = getInstallerServiceIdentityPlaceholderValues_(
+      control.fieldKey);
+    const warningTerms = ['(' + cell + '="")'].concat(placeholders.map(
+      function (value) {
+        return '(' + cell + '="' + value.replace(/"/g, '""') + '")';
+      }));
+    const warningFormula = '=' + warningTerms.join('+') +
+      '+N("GDUC_IDENTITY_WARNING")';
+    const configuredTerms = ['(' + cell + '<>"")'].concat(placeholders.map(
+      function (value) {
+        return '(' + cell + '<>"' + value.replace(/"/g, '""') + '")';
+      }));
+    const configuredFormula = '=' + configuredTerms.join('*') +
+      '+N("GDUC_IDENTITY_CONFIGURED")';
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(warningFormula)
+      .setBackground('#fce8b2')
+      .setFontColor('#7f6000')
+      .setBold(true)
+      .setRanges([control.range])
+      .build());
+    rules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(configuredFormula)
+      .setBackground('#d9ead3')
+      .setFontColor('#274e13')
+      .setBold(true)
+      .setRanges([control.range])
+      .build());
+  });
+  sheet.setConditionalFormatRules(rules);
 }
 
 function writeInstallerServiceIdentityControlValue_(control, value) {
@@ -1541,10 +1706,13 @@ function hasInstallerServiceIdentityControls_(sheet) {
   if (layout.headerRow <= 1 || !holderColumn || !addressColumn) {
     return false;
   }
-  return Boolean(
-    String(sheet.getRange(layout.headerRow - 1, holderColumn).getDisplayValue() || '').trim() &&
-    String(sheet.getRange(layout.headerRow - 1, addressColumn).getDisplayValue() || '').trim()
-  );
+  const holder = String(sheet.getRange(layout.headerRow - 1,
+    holderColumn).getDisplayValue() || '').trim();
+  const address = String(sheet.getRange(layout.headerRow - 1,
+    addressColumn).getDisplayValue() || '').trim();
+  return Boolean(holder && address &&
+    !isInstallerServiceIdentityPlaceholder_(holder, 'accountHolder') &&
+    !isInstallerServiceIdentityPlaceholder_(address, 'serviceAddress'));
 }
 
 function captureInstallerSheetChartState_(sheet) {

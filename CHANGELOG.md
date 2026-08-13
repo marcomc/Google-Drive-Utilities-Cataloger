@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-08-13 - First-invoice supply identity setup
+
+### Added
+
+- Show localized account-holder and service-address placeholders with prominent
+  borders and conditional warning/configured colors in every supply control
+  row.
+- Let the first valid invoice on a pristine supply sheet establish the
+  persistent account holder and canonical service address after corroborating
+  the structured address components against the printed address evidence.
+
+### Fixed
+
+- Restore first-import identity controls together with the inserted row when a
+  later Drive mutation fails or journal recovery rolls back an interrupted
+  import.
+- Keep migrated sheets with existing invoice rows, partially configured
+  controls, or formula-backed blank controls fail-closed.
+
 ## [0.4.2] - 2026-08-09 - Validator-guided extraction repair loop
 
 ### Added

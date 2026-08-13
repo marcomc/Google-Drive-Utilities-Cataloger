@@ -250,12 +250,19 @@ fields above the headers: account holder and service address. These values are
 the persistent ownership check across supplier changes; contract and customer
 identifiers are recorded but are not used as the cross-supplier identity.
 
+The empty controls contain localized prompts, use an amber warning style, and
+turn green when configured. For a newly created tab with no invoice rows, the
+first valid invoice establishes both values automatically from its
+corroborated printed identity.
+
 After deploying this release to an existing installation, run the owner-only
 Apps Script function `migrateCatalogerServiceIdentityFields`. It inserts the
 new columns between contract number and customer code, preserves existing rows,
-and checks that source-sheet chart presentation is unchanged. Set the holder
-and address in the control row before importing the next invoice. The migration
-is idempotent and does not recreate unmanaged charts.
+and checks that source-sheet chart presentation is unchanged. If the tab
+already contains invoice rows, set the holder and address in the control row
+before importing the next invoice; the first-import bootstrap never applies
+retroactively. The migration is idempotent and does not recreate unmanaged
+charts.
 
 Required ownership and access:
 

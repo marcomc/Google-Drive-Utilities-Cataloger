@@ -62,6 +62,10 @@ function getEnglishLocalization_() {
       invoice: 'Invoice', fattura: 'Invoice', contract: 'Contract',
       contratto: 'Contract', report: 'Report'
     }),
+    serviceIdentityControls: Object.freeze({
+      accountHolderPlaceholder: 'Enter account holder here',
+      serviceAddressPlaceholder: 'Enter service address here'
+    }),
     subscriberIdentifierProblemPatterns: Object.freeze({
       missing: '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
       contractNumber: '(?:contract(?:\\s+(?:number|code))?|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto)',

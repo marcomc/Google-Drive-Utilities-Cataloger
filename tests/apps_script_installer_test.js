@@ -1262,6 +1262,196 @@ function testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry() {
   assert.deepEqual(writes.filter(([, column]) => column === 6 || column === 7), []);
 }
 
+function testServiceIdentityControlsUseVisibleLocalizedPlaceholders() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const cells = [
+    ['', '', '', '', '', ''],
+    ['Data di emissione', 'Fornitore', 'Numero fattura', 'Numero contratto',
+      'Intestatario', 'Indirizzo di fornitura']
+  ];
+  const styles = {};
+  let conditionalRules = [];
+  const sheet = {
+    getName: () => 'Acqua',
+    getConditionalFormatRules: () => conditionalRules,
+    setConditionalFormatRules: (rules) => { conditionalRules = rules; },
+    getRange: (row, column) => ({
+      getA1Notation: () => String.fromCharCode(64 + column) + row,
+      getDisplayValue: () => String(cells[row - 1][column - 1] || ''),
+      getFormula: () => '',
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setBackground: (value) => { styles[`${row}:${column}:background`] = value; },
+      setFontColor: (value) => { styles[`${row}:${column}:fontColor`] = value; },
+      setFontWeight: (value) => { styles[`${row}:${column}:fontWeight`] = value; },
+      setBorder: (...value) => { styles[`${row}:${column}:border`] = value; },
+      setNote: (value) => { styles[`${row}:${column}:note`] = value; }
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'it_IT',
+    serviceIdentityControls: {
+      accountHolderPlaceholder: "Scrivi qui il nome dell'intestatario",
+      serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
+    },
+    headerAliases: {
+      accountHolder: ['Intestatario'],
+      serviceAddress: ['Indirizzo di fornitura']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.SpreadsheetApp = {
+    BorderStyle: { SOLID_THICK: 'SOLID_THICK' },
+    newConditionalFormatRule: () => {
+      const rule = { formula: '', ranges: [] };
+      const builder = {
+        whenFormulaSatisfied: (formula) => {
+          rule.formula = formula;
+          return builder;
+        },
+        setBackground: () => builder,
+        setFontColor: () => builder,
+        setBold: () => builder,
+        setRanges: (ranges) => {
+          rule.ranges = ranges;
+          return builder;
+        },
+        build: () => ({
+          formula: rule.formula,
+          ranges: rule.ranges,
+          getBooleanCondition: () => ({
+            getCriteriaValues: () => [rule.formula]
+          })
+        })
+      };
+      return builder;
+    }
+  };
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Acqua', {
+    headerRow: 2,
+    lookup: { Intestatario: 5, 'Indirizzo di fornitura': 6 }
+  }, 'it');
+
+  assert.equal(cells[0][4], "Scrivi qui il nome dell'intestatario");
+  assert.equal(cells[0][5], "Scrivi qui l'indirizzo di fornitura");
+  assert.equal(styles['1:5:background'], '#fce8b2');
+  assert.equal(styles['1:6:background'], '#fce8b2');
+  assert.equal(styles['1:5:fontWeight'], 'bold');
+  assert.match(styles['1:5:note'], /prima fattura/i);
+  assert.equal(styles['1:5:border'].includes('SOLID_THICK'), true);
+  assert.equal(conditionalRules.length, 4);
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('GDUC_IDENTITY_CONFIGURED') &&
+      rule.formula.includes('$E$1')), true);
+  assert.equal(conditionalRules.every((rule) => rule.formula.startsWith('=')),
+    true);
+
+  context.getSheetLayout_ = () => ({
+    headerRow: 2,
+    lookup: { intestatario: 5, 'indirizzo di fornitura': 6 }
+  });
+  context.getHeaderAliases_ = (key) => ({
+    accountHolder: ['intestatario'],
+    serviceAddress: ['indirizzo di fornitura']
+  }[key] || []);
+  assert.equal(context.hasInstallerServiceIdentityControls_(sheet), false);
+
+  cells[0][4] = 'Mario Rossi';
+  cells[0][5] = 'Via Roma 1, Milano';
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Acqua', {
+    headerRow: 2,
+    lookup: { Intestatario: 5, 'Indirizzo di fornitura': 6 }
+  }, 'it');
+  assert.equal(styles['1:5:background'], '#d9ead3');
+  assert.equal(styles['1:6:background'], '#d9ead3');
+  assert.equal(conditionalRules.length, 4);
+}
+
+function testServiceIdentityPlaceholderMatchingIsFieldSpecific() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  assert.equal(context.isInstallerServiceIdentityPlaceholder_(
+    'Enter service address here', 'accountHolder'), false);
+  assert.equal(context.isInstallerServiceIdentityPlaceholder_(
+    'Enter account holder here', 'serviceAddress'), false);
+}
+
+function testFormulaBackedIdentityUsesDisplayedLocalePlaceholder() {
+  const context = loadInstaller(() => {
+    throw new Error('fetch must not run');
+  });
+  const styles = {};
+  let conditionalRules = [];
+  const cells = [
+    ['', '', '', '', 'Enter account holder here', 'Enter service address here'],
+    ['Issue date', 'Supplier', 'Invoice number', 'Contract number',
+      'Account holder', 'Service address']
+  ];
+  const formulas = [['', '', '', '', '=Settings!B2', '=Settings!B3'], ['', '', '', '', '', '']];
+  const sheet = {
+    getName: () => 'Water',
+    getConditionalFormatRules: () => conditionalRules,
+    setConditionalFormatRules: (rules) => { conditionalRules = rules; },
+    getRange: (row, column) => ({
+      getA1Notation: () => String.fromCharCode(64 + column) + row,
+      getDisplayValue: () => cells[row - 1][column - 1],
+      getFormula: () => formulas[row - 1][column - 1],
+      setValue: (value) => { cells[row - 1][column - 1] = value; },
+      setBackground: (value) => { styles[`${row}:${column}`] = value; },
+      setFontColor: () => {},
+      setFontWeight: () => {},
+      setBorder: () => {},
+      setNote: () => {}
+    })
+  };
+  context.getInstallerLocalization_ = () => ({
+    spreadsheetLocale: 'it_IT',
+    serviceIdentityControls: {
+      accountHolderPlaceholder: "Scrivi qui il nome dell'intestatario",
+      serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
+    },
+    headerAliases: {
+      accountHolder: ['Account holder'], serviceAddress: ['Service address']
+    }
+  });
+  context.findHeaderIndex_ = (lookup, aliases) => lookup[aliases[0]] || 0;
+  context.SpreadsheetApp = {
+    BorderStyle: { SOLID_THICK: 'SOLID_THICK' },
+    newConditionalFormatRule: () => {
+      const rule = { formula: '' };
+      const builder = {
+        whenFormulaSatisfied: (formula) => { rule.formula = formula; return builder; },
+        setBackground: () => builder,
+        setFontColor: () => builder,
+        setBold: () => builder,
+        setRanges: () => builder,
+        build: () => ({
+          formula: rule.formula,
+          getBooleanCondition: () => ({ getCriteriaValues: () => [rule.formula] })
+        })
+      };
+      return builder;
+    }
+  };
+
+  context.writeInstallerServiceIdentityMetadata_(sheet, 'Water', {
+    headerRow: 2,
+    lookup: { 'Account holder': 5, 'Service address': 6 }
+  }, 'it');
+
+  assert.equal(styles['1:5'], '#fce8b2');
+  assert.equal(styles['1:6'], '#fce8b2');
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('Enter account holder here') &&
+      rule.formula.includes('GDUC_IDENTITY_WARNING')), true);
+  assert.equal(conditionalRules.some((rule) =>
+    rule.formula.includes('Enter service address here') &&
+      rule.formula.includes('GDUC_IDENTITY_WARNING')), true);
+}
+
 function testNewSupplySheetInitializesServiceIdentityControls() {
   const context = loadInstaller(() => {
     throw new Error('fetch must not run');
@@ -2047,6 +2237,9 @@ testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
 testServiceIdentityMetadataUsesDetectedColumns();
 testServiceIdentityMetadataPreservesFormulaBackedControlsOnReentry();
+testServiceIdentityControlsUseVisibleLocalizedPlaceholders();
+testServiceIdentityPlaceholderMatchingIsFieldSpecific();
+testFormulaBackedIdentityUsesDisplayedLocalePlaceholder();
 testNewSupplySheetInitializesServiceIdentityControls();
 testServiceIdentityMigrationValidatesBeforeMutating();
 testServiceIdentityMigrationRejectsReservedControlColumnOverlap();
