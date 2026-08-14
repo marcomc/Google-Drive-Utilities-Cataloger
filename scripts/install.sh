@@ -966,7 +966,7 @@ collect_installation_inputs() {
     "${project_name} - Utilities" \
     "${GDUC_SPREADSHEET_TITLE:-}"
   gemini_mode="$(select_gemini_mode)"
-  gemini_model="${GDUC_GEMINI_MODEL:-gemini-3.6-flash}"
+  gemini_model="${GDUC_GEMINI_MODEL:-gemini-3.7-flash}"
   vertex_ai_location="${GDUC_VERTEX_AI_LOCATION:-global}"
   evaluate_predicate is_valid_gemini_model "${gemini_model}"
   if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then

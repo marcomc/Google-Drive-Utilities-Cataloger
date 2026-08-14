@@ -1123,7 +1123,7 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     responseMimeType: 'application/json',
     responseJsonSchema: buildExtractionResponseSchema_()
   };
-  if (model === 'gemini-3.6-flash') {
+  if (model === 'gemini-3.7-flash') {
     generationConfig.thinkingConfig = {
       thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
     };
@@ -1393,10 +1393,13 @@ function normalizeGeminiTokenCount_(value) {
 }
 
 function estimateGeminiUsageCostUsd_(backend, model, usage) {
-  if (backend !== 'vertex_ai' || model !== 'gemini-2.5-flash') {
+  if (backend !== 'vertex_ai') {
     return null;
   }
-  const pricing = CONFIG.VERTEX_GEMINI_25_FLASH_USD_PER_MILLION_TOKENS;
+  const pricing = CONFIG.VERTEX_GEMINI_PRICING_BY_MODEL[model];
+  if (!pricing) {
+    return null;
+  }
   const inputCostUsd = usage.promptTokenCount * pricing.input / 1000000;
   const outputTokenCount = usage.candidatesTokenCount + usage.thoughtsTokenCount;
   const outputCostUsd = outputTokenCount * pricing.output / 1000000;

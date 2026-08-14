@@ -1,6 +1,6 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.4.3',
-  DEFAULT_MODEL: 'gemini-3.6-flash',
+  APP_VERSION: '0.5.0',
+  DEFAULT_MODEL: 'gemini-3.7-flash',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -25,7 +25,7 @@ const CONFIG = Object.freeze({
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
   // Keep invoice extraction below the model's response ceiling.
   GEMINI_MAX_OUTPUT_TOKENS: 8192,
-  // Gemini 3.6 Flash defaults to medium thinking. Make it explicit so
+  // Gemini 3.7 Flash defaults to medium thinking. Make it explicit so
   // the Developer API and Vertex AI fallback use the same runtime behavior.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
   // One initial extraction plus at most two validator-guided repair passes.
@@ -38,9 +38,11 @@ const CONFIG = Object.freeze({
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,
   // Update this only after checking the Vertex AI list-price page. This is an
   // operational estimate; Cloud Billing remains the accounting source of truth.
-  VERTEX_GEMINI_25_FLASH_USD_PER_MILLION_TOKENS: Object.freeze({
-    input: 0.30,
-    output: 2.50
+  VERTEX_GEMINI_PRICING_BY_MODEL: Object.freeze({
+    'gemini-2.5-flash': Object.freeze({
+      input: 0.30,
+      output: 2.50
+    })
   }),
   DRIVE_AGENTS_FILE_NAME: 'AGENTS.md',
   MAX_SUPPLIER_PROFILE_BYTES: 16 * 1024,
@@ -161,7 +163,7 @@ function getGeminiModel_() {
 
 function normalizeGeminiModel_(model) {
   const normalizedModel = String(model || '').trim();
-  return normalizedModel === 'gemini-3.5-flash' ?
+  return normalizedModel === 'gemini-3.6-flash' ?
     CONFIG.DEFAULT_MODEL : normalizedModel || CONFIG.DEFAULT_MODEL;
 }
 

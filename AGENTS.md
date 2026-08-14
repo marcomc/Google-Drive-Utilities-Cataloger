@@ -59,6 +59,9 @@
 - Count quota-limited model calls at the outbound request boundary, not from
   trigger executions. Record provider token usage separately from versioned
   cost estimates, and keep Cloud Billing as the accounting source of truth.
+- When a Gemini model has no verified Vertex price table, keep provider token
+  counts in usage telemetry but omit cost-estimate fields; test the caller-level
+  event payload as well as the pricing helper.
 - For structured output from thinking models, set and test explicit thinking
   and response budgets; log the finish reason without logging document data,
   and fail closed unless the provider explicitly reports a successful terminal
@@ -211,3 +214,7 @@
 - Keep localized diagnostic recognition bounded and table-driven. Cover common
   grammatical wrappers and word-order variants alongside ambiguity and mismatch
   vetoes, and verify the final validator outcome rather than the helper alone.
+- Match localized spreadsheet sentinels in field context rather than as a
+  cross-field union, and derive formula-backed presentation state from the
+  displayed value used by the sheet. Cover locale changes and partial-field
+  sentinel cases.
