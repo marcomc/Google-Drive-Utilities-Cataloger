@@ -1123,7 +1123,7 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     responseMimeType: 'application/json',
     responseJsonSchema: buildExtractionResponseSchema_()
   };
-  if (model === 'gemini-3.6-flash') {
+  if (model === 'gemini-3.7-flash') {
     generationConfig.thinkingConfig = {
       thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
     };

@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
+
+### Changed
+
+- Use `gemini-3.7-flash` as the default model for Gemini Developer API and
+  Vertex AI fallback, including new installations and legacy 3.6 migrations.
+
 ## [0.4.3] - 2026-08-13 - First-invoice supply identity setup
 
 ### Added

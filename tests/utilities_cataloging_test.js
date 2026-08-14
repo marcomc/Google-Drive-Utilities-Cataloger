@@ -2357,7 +2357,7 @@ function testGeminiEmptyStopResponseIsRepairableOutput() {
       })
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.6-flash';
+  context.getGeminiModel_ = () => 'gemini-3.7-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -2632,7 +2632,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.6-flash';
+  context.getGeminiModel_ = () => 'gemini-3.7-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -2726,16 +2726,16 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   });
   context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
 
-  assert.equal(context.getGeminiModel_(), 'gemini-3.6-flash');
-  properties.GEMINI_MODEL = 'gemini-3.5-flash';
-  assert.equal(context.getGeminiModel_(), 'gemini-3.6-flash');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.7-flash');
+  properties.GEMINI_MODEL = 'gemini-3.6-flash';
+  assert.equal(context.getGeminiModel_(), 'gemini-3.7-flash');
 
-  const result = context.configureGeminiModel('gemini-3.5-flash');
+  const result = context.configureGeminiModel('gemini-3.6-flash');
 
-  assert.equal(properties.GEMINI_MODEL, 'gemini-3.6-flash');
-  assert.equal(result.geminiModel, 'gemini-3.6-flash');
+  assert.equal(properties.GEMINI_MODEL, 'gemini-3.7-flash');
+  assert.equal(result.geminiModel, 'gemini-3.7-flash');
   assert.throws(
-    () => context.configureGeminiModel('models/gemini-3.6-flash'),
+    () => context.configureGeminiModel('models/gemini-3.7-flash'),
     /must be a Gemini model identifier/
   );
 }
@@ -2790,7 +2790,7 @@ function testGeminiResponseWithoutFinishReasonFailsClosed() {
       })
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.6-flash';
+  context.getGeminiModel_ = () => 'gemini-3.7-flash';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logGeminiUsage_ = () => {};
@@ -3111,7 +3111,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.3',
+      applicationVersion: '0.5.0',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -3122,7 +3122,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.4.3',
+      applicationVersion: '0.5.0',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',

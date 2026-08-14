@@ -211,3 +211,7 @@
 - Keep localized diagnostic recognition bounded and table-driven. Cover common
   grammatical wrappers and word-order variants alongside ambiguity and mismatch
   vetoes, and verify the final validator outcome rather than the helper alone.
+- Match localized spreadsheet sentinels in field context rather than as a
+  cross-field union, and derive formula-backed presentation state from the
+  displayed value used by the sheet. Cover locale changes and partial-field
+  sentinel cases.
