@@ -2765,6 +2765,32 @@ function testVertexCostEstimateDoesNotReusePricingForGemini37() {
   );
 }
 
+function testGemini37UsageTelemetryOmitsUnpricedEstimate() {
+  const events = [];
+  const context = loadCataloger();
+  context.getGeminiModel_ = () => 'gemini-3.7-flash';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+  context.logGeminiUsage_({
+    promptTokenCount: 1,
+    candidatesTokenCount: 2,
+    thoughtsTokenCount: 3,
+    totalTokenCount: 6
+  }, { getId: () => 'file-id' }, 'vertex_ai', '', 1);
+
+  const payload = events[0].details;
+  assert.equal(events[0].event, 'gemini-generation-usage');
+  assert.equal(payload.model, 'gemini-3.7-flash');
+  assert.equal(payload.promptTokenCount, 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, 'estimatedCostUsd'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, 'pricingSource'), false);
+
+  context.getGeminiModel_ = () => 'unpriced-model';
+  context.logGeminiUsage_({ promptTokenCount: 1 }, { getId: () => 'file-id' },
+    'vertex_ai', '', 1);
+  const unknownPayload = events[1].details;
+  assert.equal(Object.prototype.hasOwnProperty.call(unknownPayload, 'estimatedCostUsd'), false);
+}
+
 function testIncompleteGeminiResponseReportsFinishReason() {
   const events = [];
   const context = loadCataloger({
