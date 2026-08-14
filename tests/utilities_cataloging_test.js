@@ -2740,6 +2740,31 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   );
 }
 
+function testVertexCostEstimateDoesNotReusePricingForGemini37() {
+  const context = loadCataloger();
+  const usage = {
+    promptTokenCount: 1000000,
+    candidatesTokenCount: 1000000,
+    thoughtsTokenCount: 0
+  };
+
+  assert.equal(
+    context.estimateGeminiUsageCostUsd_('vertex_ai', 'gemini-3.7-flash', usage),
+    null
+  );
+  assert.equal(
+    JSON.stringify(context.estimateGeminiUsageCostUsd_(
+      'vertex_ai', 'gemini-2.5-flash', usage
+    )),
+    JSON.stringify({
+      pricingSource: 'vertex-ai-standard-list-price-2026-07',
+      estimatedInputCostUsd: 0.3,
+      estimatedOutputCostUsd: 2.5,
+      estimatedCostUsd: 2.8
+    })
+  );
+}
+
 function testIncompleteGeminiResponseReportsFinishReason() {
   const events = [];
   const context = loadCataloger({
@@ -6386,6 +6411,7 @@ testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
+testVertexCostEstimateDoesNotReusePricingForGemini37();
 testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();

@@ -38,9 +38,11 @@ const CONFIG = Object.freeze({
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,
   // Update this only after checking the Vertex AI list-price page. This is an
   // operational estimate; Cloud Billing remains the accounting source of truth.
-  VERTEX_GEMINI_25_FLASH_USD_PER_MILLION_TOKENS: Object.freeze({
-    input: 0.30,
-    output: 2.50
+  VERTEX_GEMINI_PRICING_BY_MODEL: Object.freeze({
+    'gemini-2.5-flash': Object.freeze({
+      input: 0.30,
+      output: 2.50
+    })
   }),
   DRIVE_AGENTS_FILE_NAME: 'AGENTS.md',
   MAX_SUPPLIER_PROFILE_BYTES: 16 * 1024,
