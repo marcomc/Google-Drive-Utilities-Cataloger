@@ -75,7 +75,8 @@ function getItalianLocalization_() {
         header: "Spese d'incasso",
         value: 0,
         fieldPattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b",
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'OENERGY',
@@ -83,7 +84,8 @@ function getItalianLocalization_() {
         header: 'Ricalcoli',
         value: 0,
         fieldPattern: '\\bricalcol[io]\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -91,7 +93,8 @@ function getItalianLocalization_() {
         header: 'Trasporto e gestione contatore',
         value: 0,
         fieldPattern: '\\btrasporto\\s+e\\s+gestione\\s+contatore\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -99,7 +102,8 @@ function getItalianLocalization_() {
         header: 'Oneri di sistema',
         value: 0,
         fieldPattern: '\\boneri\\s+di\\s+sistema\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        explicitAbsenceDiagnosticPattern: "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|è)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?(?:[.]|$)"
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -107,7 +111,8 @@ function getItalianLocalization_() {
         header: 'Ricalcoli',
         value: 0,
         fieldPattern: '\\bricalcol[io]\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        explicitAbsenceDiagnosticPattern: ''
       })
     ]),
     supplierProfiles: Object.freeze({

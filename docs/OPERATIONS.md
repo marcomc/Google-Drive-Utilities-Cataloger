@@ -494,13 +494,15 @@ Vertex model has a price table encoded in `Config.gs`, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
-The default `gemini-flash-latest` Developer API runtime uses explicit `medium`
-thinking and an 8,192-token JSON response budget. Vertex AI uses the same alias
-and output budget with explicit `thinkingBudget: 4096` to retain reasoning for
-aggregate and subordinate invoice cost rows. Vertex also receives the shared extraction contract converted to
-its OpenAPI-style `responseSchema`; the
-Developer API receives the JSON Schema `responseJsonSchema` form. The alias may
-resolve to a newer Flash release without a source or Script Properties update.
+The default `gemini-flash-latest` Developer API runtime uses Google's
+Interactions API with explicit `medium` thinking, an 8,192-token JSON response
+budget, the shared JSON Schema contract, and `store:false` for stateless invoice
+processing. Vertex AI continues to use `generateContent` with the same alias
+and output budget plus an explicit `thinkingBudget: 4096` to retain reasoning
+for aggregate and subordinate invoice cost rows. Vertex receives the shared
+extraction contract converted to its OpenAPI-style `responseSchema`. The alias
+may resolve to a newer Flash release without a source or Script Properties
+update.
 Until a verified Vertex price is added to `Config.gs`, usage events for the
 alias and other unpriced models retain provider token counts but intentionally
 omit cost-estimate fields; Cloud Billing remains authoritative.

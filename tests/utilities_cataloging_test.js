@@ -100,6 +100,28 @@ function validInvoice() {
   };
 }
 
+function mockedInteractionsResponse(text = '{}', status = 'completed',
+  stepStatus = 'done') {
+  return {
+    getResponseCode: () => 200,
+    getContentText: () => JSON.stringify({
+      model: 'gemini-3.8-flash',
+      status,
+      steps: [{
+        type: 'model_output',
+        status: stepStatus,
+        content: [{ type: 'text', text }]
+      }],
+      usage: {
+        total_input_tokens: 1,
+        total_output_tokens: 1,
+        total_thought_tokens: 0,
+        total_tokens: 2
+      }
+    })
+  };
+}
+
 function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   const context = loadCataloger();
   const extracted = {
@@ -1023,6 +1045,23 @@ function testExtractionSchemaAndCalendarValidation() {
     { header: 'Ricalcoli', value: 0 }
   ]));
   assert.deepEqual(energygasAbsentCharges.problems, []);
+
+  const energygasAggregateAbsence = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ENERGYGAS',
+    supply_type: 'Luce',
+    problems: [
+      'Oneri di sistema non presente nel documento, le voci ASOS/ARIM sono subordinate o aggregate.'
+    ],
+    sheet_values: [{ header: 'Oneri di sistema', value: '0' }]
+  });
+  context.applySupplierFieldDefaults_(energygasAggregateAbsence, [
+    'Oneri di sistema'
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(energygasAggregateAbsence.sheet_values)), [{
+    header: 'Oneri di sistema', value: 0
+  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(energygasAggregateAbsence.problems)), []);
 
   for (const zero of ['0', '0.00', '0,00', 0]) {
     const textualZero = context.normalizeExtraction_({
@@ -2735,12 +2774,7 @@ function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepai
 function testGeminiEmptyStopResponseIsRepairableOutput() {
   const context = loadCataloger({
     UrlFetchApp: {
-      fetch: () => ({
-        getResponseCode: () => 200,
-        getContentText: () => JSON.stringify({
-          candidates: [{ finishReason: 'STOP', content: { parts: [] } }]
-        })
-      })
+      fetch: () => mockedInteractionsResponse('', 'completed', 'done')
     }
   });
   context.getGeminiModel_ = () => 'gemini-3.7-flash';
@@ -3014,6 +3048,7 @@ function testHiddenPdfsAreExcludedFromIntake() {
 
 function testDeveloperApiKeyUsesHeader() {
   const requests = [];
+  const usageRecords = [];
   const context = loadCataloger({
     UrlFetchApp: {
       fetch: (url, options) => {
@@ -3021,10 +3056,19 @@ function testDeveloperApiKeyUsesHeader() {
         return {
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({
-            candidates: [{
-              finishReason: 'STOP',
-              content: { parts: [{ text: '{}' }] }
-            }]
+            model: 'gemini-3.8-flash',
+            status: 'completed',
+            steps: [{
+              type: 'model_output',
+              status: 'done',
+              content: [{ type: 'text', text: '{}' }]
+            }],
+            usage: {
+              total_input_tokens: 11,
+              total_output_tokens: 7,
+              total_thought_tokens: 3,
+              total_tokens: 21
+            }
           })
         };
       }
@@ -3034,7 +3078,7 @@ function testDeveloperApiKeyUsesHeader() {
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
-  context.logGeminiUsage_ = () => {};
+  context.logGeminiUsage_ = (usage) => usageRecords.push(usage);
   const file = { getId: () => 'file-id' };
   const blob = { getBytes: () => [1, 2, 3] };
 
@@ -3051,18 +3095,22 @@ function testDeveloperApiKeyUsesHeader() {
   assert.equal(requests[0].url.includes('?key='), false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
   const payload = JSON.parse(requests[0].options.payload);
+  assert.equal(payload.model, 'gemini-flash-latest');
+  assert.equal(payload.store, false);
   assert.equal(
-    payload.generationConfig.maxOutputTokens,
+    payload.generation_config.max_output_tokens,
     vm.runInContext('CONFIG.GEMINI_MAX_OUTPUT_TOKENS', context)
   );
   assert.equal(
-    payload.generationConfig.thinkingConfig.thinkingLevel,
+    payload.generation_config.thinking_level,
     vm.runInContext('CONFIG.GEMINI_FLASH_THINKING_LEVEL', context)
   );
-  assert.equal(payload.generationConfig.responseMimeType, 'application/json');
-  assert.equal(payload.generationConfig.responseJsonSchema.type, 'object');
+  assert.equal(payload.response_format.length, 1);
+  assert.equal(payload.response_format[0].type, 'text');
+  assert.equal(payload.response_format[0].mime_type, 'application/json');
+  assert.equal(payload.response_format[0].schema.type, 'object');
   assert.deepEqual(
-    payload.generationConfig.responseJsonSchema.required,
+    payload.response_format[0].schema.required,
     [
       'document_type',
       'supplier',
@@ -3095,19 +3143,28 @@ function testDeveloperApiKeyUsesHeader() {
     ]
   );
   assert.deepEqual(
-    payload.generationConfig.responseJsonSchema.properties.document_type.enum,
+    payload.response_format[0].schema.properties.document_type.enum,
     ['Invoice', 'Contract', 'Report', 'unknown']
   );
   assert.deepEqual(
-    payload.generationConfig.responseJsonSchema.properties.sheet_values
+    payload.response_format[0].schema.properties.sheet_values
       .items.properties.value.type,
     ['string', 'number', 'boolean', 'null']
   );
   assert.deepEqual(
-    payload.generationConfig.responseJsonSchema.properties.sheet_values
+    payload.response_format[0].schema.properties.sheet_values
       .items.properties.source_evidence.enum,
     ['printed']
   );
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0].options.headers)), {
+    'x-goog-api-key': 'developer-secret'
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(usageRecords[0])), {
+    promptTokenCount: 11,
+    candidatesTokenCount: 7,
+    thoughtsTokenCount: 3,
+    totalTokenCount: 21
+  });
 }
 
 function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
@@ -3304,15 +3361,8 @@ function testIncompleteGeminiResponseReportsFinishReason() {
   const events = [];
   const context = loadCataloger({
     UrlFetchApp: {
-      fetch: () => ({
-        getResponseCode: () => 200,
-        getContentText: () => JSON.stringify({
-          candidates: [{
-            finishReason: 'MAX_TOKENS',
-            content: { parts: [{ text: '{"partial":' }] }
-          }]
-        })
-      })
+      fetch: () => mockedInteractionsResponse('{"partial":', 'max_tokens',
+        'done')
     }
   });
   context.getGeminiModel_ = () => 'gemini-2.5-flash';
@@ -3345,7 +3395,9 @@ function testGeminiResponseWithoutFinishReasonFailsClosed() {
       fetch: () => ({
         getResponseCode: () => 200,
         getContentText: () => JSON.stringify({
-          candidates: [{ content: { parts: [{ text: '{}' }] } }]
+          model: 'gemini-3.8-flash',
+          status: 'completed',
+          steps: []
         })
       })
     }
@@ -3409,15 +3461,7 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
         }]
       })
     },
-    {
-      getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({
-        candidates: [{
-          finishReason: 'STOP',
-          content: { parts: [{ text: '{}' }] }
-        }]
-      })
-    }
+    mockedInteractionsResponse()
   ];
   const context = loadCataloger({
     PropertiesService: {
@@ -3494,7 +3538,7 @@ function testRepairContextSurvivesAutomaticVertexFallback() {
         error: {
           code: 429,
           status: 'RESOURCE_EXHAUSTED',
-          message: 'Daily quota exhausted.'
+          message: 'GenerateRequestsPerDay quota exhausted.'
         }
       })
     },
@@ -3542,8 +3586,9 @@ function testRepairContextSurvivesAutomaticVertexFallback() {
   ), '{}');
   assert.equal(requests.length, 2);
   requests.forEach((request) => {
-    assert.equal(request.payload.contents[0].parts[0].text,
-      'repair-attempt:2');
+    const prompt = request.url.includes('aiplatform.googleapis.com') ?
+      request.payload.contents[0].parts[0].text : request.payload.input[0].text;
+    assert.equal(prompt, 'repair-attempt:2');
   });
   assert.equal(events.filter((entry) =>
     ['gemini-generation-request', 'gemini-generation-response']
@@ -3916,15 +3961,7 @@ function testGenericRateLimitStaysOnDeveloperApi() {
         }
       })
     },
-    {
-      getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({
-        candidates: [{
-          finishReason: 'STOP',
-          content: { parts: [{ text: '{}' }] }
-        }]
-      })
-    }
+    mockedInteractionsResponse()
   ];
   const context = loadCataloger({
     UrlFetchApp: {

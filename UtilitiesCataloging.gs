@@ -1187,6 +1187,7 @@ function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   driveAgentsPolicy, file, backend, fallbackReason, repairContext) {
   const isVertexAi = backend === 'vertex_ai';
+  const isGeminiInteractionsApi = !isVertexAi;
   const extractionAttempt = repairContext ? Number(repairContext.attempt) : 1;
   const model = getGeminiModel_();
   const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
@@ -1196,11 +1197,15 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       data: Utilities.base64Encode(blob.getBytes())
     }
   } : {
-    inline_data: {
-      mime_type: MimeType.PDF,
-      data: Utilities.base64Encode(blob.getBytes())
-    }
+    type: 'document',
+    data: Utilities.base64Encode(blob.getBytes()),
+    mime_type: MimeType.PDF
   };
+  const prompt = buildExtractionPrompt_(
+    sheetHeadersBySupply,
+    driveAgentsPolicy,
+    repairContext
+  );
   const generationConfig = {
     maxOutputTokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS,
     responseMimeType: 'application/json'
@@ -1221,17 +1226,29 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET
     };
   }
-  const payload = {
+  const payload = isGeminiInteractionsApi ? {
+    model: model,
+    input: [
+      { type: 'text', text: prompt },
+      pdfPart
+    ],
+    response_format: [{
+      type: 'text',
+      mime_type: 'application/json',
+      schema: buildExtractionResponseSchema_()
+    }],
+    generation_config: {
+      thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL,
+      max_output_tokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS
+    },
+    // Invoice PDFs are processed statelessly and must not be retained by the
+    // Interactions API after the response is returned.
+    store: false
+  } : {
     contents: [{
       role: 'user',
       parts: [
-        {
-          text: buildExtractionPrompt_(
-            sheetHeadersBySupply,
-            driveAgentsPolicy,
-            repairContext
-          )
-        },
+        { text: prompt },
         pdfPart
       ]
     }],
@@ -1294,8 +1311,12 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         throw new Error('Gemini returned invalid response JSON.');
       }
       candidate = body.candidates && body.candidates[0];
-      responseLog.modelVersion = String(body.modelVersion || 'UNSPECIFIED');
-      responseLog.finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
+      responseLog.modelVersion = String(
+        body.modelVersion || body.model || 'UNSPECIFIED'
+      );
+      responseLog.finishReason = isGeminiInteractionsApi ?
+        getGeminiInteractionsFinishReason_(body) :
+        String(candidate && candidate.finishReason || 'UNSPECIFIED');
       logCatalogEvent_('gemini-generation-response', responseLog);
       break;
     }
@@ -1330,15 +1351,19 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return a usable response.');
   }
 
-  logGeminiUsage_(body.usageMetadata, file, backend, fallbackReason,
+  logGeminiUsage_(getGeminiUsageMetadata_(body, isGeminiInteractionsApi), file, backend, fallbackReason,
     extractionAttempt);
-  const finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
-  if (finishReason !== 'STOP') {
+  const finishReason = isGeminiInteractionsApi ?
+    getGeminiInteractionsFinishReason_(body) :
+    String(candidate && candidate.finishReason || 'UNSPECIFIED');
+  if (finishReason !== 'STOP' && finishReason !== 'COMPLETED') {
     throw new Error('Gemini extraction was incomplete (finish reason: ' +
       finishReason + ').');
   }
-  const parts = candidate && candidate.content && candidate.content.parts;
-  if (!parts || !parts[0] || !parts[0].text) {
+  const outputText = isGeminiInteractionsApi ?
+    getGeminiInteractionsOutputText_(body) :
+    getGeminiGenerateContentOutputText_(candidate);
+  if (!outputText) {
     const emptyExtractionError = new Error(
       'Gemini did not return valid extraction JSON.'
     );
@@ -1347,7 +1372,58 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     emptyExtractionError.extractionFields = [];
     throw emptyExtractionError;
   }
-  return parts[0].text;
+  return outputText;
+}
+
+function getGeminiGenerateContentOutputText_(candidate) {
+  const parts = candidate && candidate.content && candidate.content.parts;
+  return parts && parts[0] && parts[0].text || '';
+}
+
+function getGeminiInteractionsOutputText_(body) {
+  const steps = Array.isArray(body && body.steps) ? body.steps : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (!step || step.type !== 'model_output' || !Array.isArray(step.content)) {
+      continue;
+    }
+    for (let contentIndex = step.content.length - 1; contentIndex >= 0;
+      contentIndex -= 1) {
+      const content = step.content[contentIndex];
+      if (content && content.type === 'text' && content.text) {
+        return content.text;
+      }
+    }
+  }
+  return '';
+}
+
+function getGeminiInteractionsFinishReason_(body) {
+  if (!body || body.status !== 'completed') {
+    return String(body && body.status || 'UNSPECIFIED').toUpperCase();
+  }
+  const steps = Array.isArray(body.steps) ? body.steps : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index] && steps[index].type === 'model_output') {
+      // The Interactions API may omit the per-step status on a completed
+      // synchronous response; the root completed status is authoritative.
+      return 'COMPLETED';
+    }
+  }
+  return 'UNSPECIFIED';
+}
+
+function getGeminiUsageMetadata_(body, isGeminiInteractionsApi) {
+  if (!isGeminiInteractionsApi) {
+    return body && body.usageMetadata;
+  }
+  const usage = body && body.usage || {};
+  return {
+    promptTokenCount: usage.total_input_tokens,
+    candidatesTokenCount: usage.total_output_tokens,
+    thoughtsTokenCount: usage.total_thought_tokens,
+    totalTokenCount: usage.total_tokens
+  };
 }
 
 function buildExtractionResponseSchema_() {
@@ -1551,8 +1627,7 @@ function roundGeminiCostUsd_(value) {
 }
 
 function getGeminiApiEndpoint_() {
-  return 'https://generativelanguage.googleapis.com/v1beta/models/' +
-    encodeURIComponent(getGeminiModel_()) + ':generateContent';
+  return 'https://generativelanguage.googleapis.com/v1beta/interactions';
 }
 
 function getVertexAiEndpoint_() {
@@ -2496,6 +2571,10 @@ function isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue) {
   }
   const rawProblem = String(problem || '');
   const fieldPattern = new RegExp(defaultValue.fieldPattern, 'i');
+  if (fieldPattern.test(rawProblem) && defaultValue.explicitAbsenceDiagnosticPattern &&
+    new RegExp(defaultValue.explicitAbsenceDiagnosticPattern, 'i').test(rawProblem)) {
+    return true;
+  }
   if (fieldPattern.test(rawProblem) &&
     isStandaloneInformationalProblem_(rawProblem.replace(fieldPattern, 'FIELD')) &&
     new RegExp(defaultValue.explicitAbsencePattern, 'i').test(rawProblem)) {

@@ -674,6 +674,43 @@ function readInstallerBootstrapOptions_(options) {
   return privateOptions;
 }
 
+/**
+ * Rotate only the Gemini Developer API credential from a private handoff.
+ *
+ * This owner-only maintenance entrypoint deliberately preserves the existing
+ * installation, transport, triggers, and Vertex fallback configuration.
+ * The secret version contains the cataloger's Cloud project identity so the
+ * existing installation handoff ownership checks remain in force.
+ */
+function rotateGeminiDeveloperApiKeyFromSecret(options) {
+  const privateOptions = readInstallerBootstrapOptions_(options);
+  const apiKey = String(privateOptions.geminiApiKey || '').trim();
+  const model = normalizeGeminiModel_(privateOptions.geminiModel);
+  const apiProjectId = String(privateOptions.geminiApiProjectId || '').trim();
+  if (!apiKey) {
+    throw new Error('Gemini Developer API key is missing from the handoff.');
+  }
+  if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(apiProjectId)) {
+    throw new Error('Gemini API project identity is invalid.');
+  }
+  validateInstallerGeminiDeveloperApi_({
+    geminiApiKey: apiKey,
+    geminiModel: model
+  });
+
+  const properties = PropertiesService.getScriptProperties();
+  withCatalogLifecycleLock_('gemini-api-key-rotation', function () {
+    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY, apiKey);
+    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_MODEL, model);
+    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_BACKEND, 'gemini_api');
+    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_AUTO_VERTEX_FALLBACK, 'true');
+    properties.deleteProperty(CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL);
+  });
+  return Object.assign(getSetupStatus(), {
+    geminiApiProjectId: apiProjectId
+  });
+}
+
 function validateInstallerGeminiAccess_(options) {
   if (options.geminiBackend === 'gemini_api') {
     validateInstallerGeminiDeveloperApi_(options);

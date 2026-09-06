@@ -60,8 +60,11 @@ Flash model variation. Google documents that this alias is hot-swapped when a
 new Flash release becomes available and provides advance notice for breaking
 changes. The alias does not pin a numeric Flash version; record the provider's
 reported model version when available rather than inferring it from the alias.
-The default request uses an 8,192-token output budget with explicit `medium`
-thinking on the Developer API and a 4,096-token thinking budget on Vertex AI.
+The default Developer API request uses Google's Interactions API with an
+8,192-token output budget, explicit `medium` thinking, structured JSON output,
+and `store:false` so invoice documents are not retained as Interaction state.
+Vertex AI continues to use `generateContent`, the same alias and output budget,
+with an explicit `thinkingBudget: 4096`.
 
 Persisted `gemini-3.6-flash` and `gemini-3.7-flash` values are automatically
 treated as `gemini-flash-latest`, so source deployment upgrades existing

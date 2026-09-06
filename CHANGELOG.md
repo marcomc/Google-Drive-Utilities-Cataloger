@@ -52,6 +52,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   mapping commentary while retaining unresolved document problems.
 - Omit unsupported `thinking_level` from Vertex AI requests using the latest
   Flash alias while preserving explicit medium thinking on the Developer API.
+- Use Google's Generally Available Interactions API for Developer API PDF
+  extraction, preserving structured JSON output, explicit thinking and output
+  budgets, and stateless processing for invoice documents.
+- Accept the reviewed Energygas ASOS/ARIM aggregate diagnostic as explicit
+  absence evidence for the configured zero `Oneri di sistema` default.
 - Convert the shared extraction contract to Vertex AI's `responseSchema` format
   so structured PDF extraction remains bounded and schema-constrained.
 - Accept reviewed Italian honorifics, street-name connectors, and province

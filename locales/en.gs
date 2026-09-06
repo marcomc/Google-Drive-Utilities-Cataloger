@@ -78,7 +78,8 @@ function getEnglishLocalization_() {
         header: 'Collection charges',
         value: 0,
         fieldPattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'OENERGY',
@@ -86,7 +87,8 @@ function getEnglishLocalization_() {
         header: 'Recalculations',
         value: 0,
         fieldPattern: '\\brecalculations?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -94,7 +96,8 @@ function getEnglishLocalization_() {
         header: 'Transport and meter management',
         value: 0,
         fieldPattern: '\\btransport\\s+and\\s+meter\\s+management\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -102,7 +105,8 @@ function getEnglishLocalization_() {
         header: 'System charges',
         value: 0,
         fieldPattern: '\\bsystem\\s+charges?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
+        explicitAbsenceDiagnosticPattern: ''
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -110,7 +114,8 @@ function getEnglishLocalization_() {
         header: 'Recalculations',
         value: 0,
         fieldPattern: '\\brecalculations?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
+        explicitAbsenceDiagnosticPattern: ''
       })
     ]),
     supplierProfiles: Object.freeze({

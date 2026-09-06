@@ -1986,6 +1986,58 @@ function testGeminiDeveloperApiValidation() {
   assert.equal(requests[0].url.includes('developer-secret'), false);
 }
 
+function testGeminiDeveloperApiKeyRotationPreservesInstallation() {
+  const writes = [];
+  const deleted = [];
+  let validated;
+  const context = loadInstaller(() => {
+    throw new Error('Secret Manager must be read by the handoff helper');
+  });
+  context.CONFIG = { PROPERTY_KEYS: {
+    GEMINI_API_KEY: 'GEMINI_API_KEY',
+    GEMINI_MODEL: 'GEMINI_MODEL',
+    GEMINI_BACKEND: 'GEMINI_BACKEND',
+    GEMINI_AUTO_VERTEX_FALLBACK: 'GEMINI_AUTO_VERTEX_FALLBACK',
+    GEMINI_VERTEX_FALLBACK_UNTIL: 'GEMINI_VERTEX_FALLBACK_UNTIL'
+  } };
+  context.readInstallerBootstrapOptions_ = () => ({
+    geminiApiKey: 'new-developer-secret',
+    geminiModel: 'gemini-flash-latest',
+    geminiApiProjectId: 'hostello-gemini-free-260906'
+  });
+  context.normalizeGeminiModel_ = (model) => model;
+  context.validateInstallerGeminiDeveloperApi_ = (options) => {
+    validated = options;
+  };
+  context.PropertiesService = { getScriptProperties: () => ({
+    setProperty: (key, value) => writes.push([key, value]),
+    deleteProperty: (key) => deleted.push(key)
+  }) };
+  context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+  context.getSetupStatus = () => ({
+    geminiBackend: 'gemini_api',
+    geminiApiKeyConfigured: true
+  });
+
+  const result = context.rotateGeminiDeveloperApiKeyFromSecret({
+    bootstrapSecretVersion: 'private-secret-version'
+  });
+
+  assert.deepEqual(writes, [
+    ['GEMINI_API_KEY', 'new-developer-secret'],
+    ['GEMINI_MODEL', 'gemini-flash-latest'],
+    ['GEMINI_BACKEND', 'gemini_api'],
+    ['GEMINI_AUTO_VERTEX_FALLBACK', 'true']
+  ]);
+  assert.deepEqual(deleted, ['GEMINI_VERTEX_FALLBACK_UNTIL']);
+  assert.deepEqual(JSON.parse(JSON.stringify(validated)), {
+    geminiApiKey: 'new-developer-secret',
+    geminiModel: 'gemini-flash-latest'
+  });
+  assert.equal(result.geminiApiProjectId, 'hostello-gemini-free-260906');
+  assert.equal(JSON.stringify(result).includes('new-developer-secret'), false);
+}
+
 function testVertexValidation() {
   const requests = [];
   const context = loadInstaller((url, options) => {
@@ -2370,6 +2422,7 @@ testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
 testServiceIdentityMigrationRestoresCompleteChartState();
 testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
+testGeminiDeveloperApiKeyRotationPreservesInstallation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
 testConfiguredGeminiAccessValidationIsRedacted();
