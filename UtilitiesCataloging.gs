@@ -970,6 +970,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
     });
     repairContext = {
       attempt: attempt + 1,
+      monetaryValidated: extracted.monetary_validated_ === true,
       previousExtraction: buildExtractionRepairSnapshot_(extracted),
       feedback: feedback,
       history: history.slice()
@@ -1009,6 +1010,9 @@ function assertExtractionRepairBudget_(file, deadlineAt, nextAttempt, validation
 }
 
 function validateExtractedUtilityDataForImport_(extracted) {
+  Object.defineProperty(extracted, 'monetary_validated_', {
+    value: false, enumerable: false, configurable: true
+  });
   const detailedCostValidation = withExtractionValidationStage_(
     validateEnergygasLuceDetailedReconciliation_(extracted),
     'energygas-detail-reconciliation'
@@ -1029,6 +1033,10 @@ function validateExtractedUtilityDataForImport_(extracted) {
   if (!validation.valid) {
     return validation;
   }
+  Object.defineProperty(extracted, 'monetary_validated_', {
+    value: extracted.document_type === 'Invoice', enumerable: false,
+    configurable: true
+  });
   if (extracted.document_type === 'Invoice') {
     validation = withExtractionValidationStage_(
       validateServiceIdentityForInvoice_(extracted), 'service-identity'
@@ -1124,6 +1132,10 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
     throw marked;
   }
   preserveUnimplicatedRepairFields_(normalized, repairContext);
+  Object.defineProperty(normalized, 'configured_writable_headers', {
+    value: (headersBySupply[normalized.supply_type] || []).slice(),
+    enumerable: false
+  });
   Object.defineProperty(normalized, 'configured_secondary_headers', {
     value: getConfiguredSecondaryInvoiceHeaders_(
       headersBySupply[normalized.supply_type] || []
@@ -1132,6 +1144,18 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
   });
   inferInvoiceFrequency_(normalized);
   applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
+  try {
+    normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
+  } catch (error) {
+    if (!isModelExtractionNormalizationError_(error)) {
+      throw error;
+    }
+    const marked = markInvalidExtractionOutput_(error);
+    marked.extractionIssueCode = 'invalid_extraction_normalization';
+    marked.extractionFields = ['sheet_values'];
+    marked.extractionSnapshot = buildExtractionRepairSnapshot_(normalized);
+    throw marked;
+  }
   return normalized;
 }
 
@@ -1144,11 +1168,14 @@ function preserveUnimplicatedRepairFields_(extracted, repairContext) {
   const issues = repairContext.feedback.issues;
   // An early failure proves nothing about later identity/date validations.
   // Preserve only a reconciled monetary group, and reopen it as a unit.
-  if (!isInvoiceCoreMonetaryReconciled_(repairContext.previousExtraction) ||
+  if (repairContext.monetaryValidated !== true ||
+    !isInvoiceCoreMonetaryReconciled_(repairContext.previousExtraction) ||
     issues.some(function (issue) {
-      return issue.stage === 'raw-output' || !(issue.fields || []).length ||
+      return issue.stage === 'raw-output' || /reconciliation/.test(issue.stage || '') ||
+        !(issue.fields || []).length ||
         issue.fields.some(function (field) {
-          return monetaryFields.indexOf(field) >= 0;
+          return monetaryFields.indexOf(field) >= 0 ||
+            isNumericInvoiceHeader_(field);
         });
     })) {
     return;
@@ -1171,7 +1198,7 @@ function markInvalidExtractionOutput_(error) {
 }
 
 function isModelExtractionNormalizationError_(error) {
-  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|consumption quantity|unit cost) value\.$/
+  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|consumption quantity|unit cost|monetary) value\.$/
     .test(String(error && error.message || error));
 }
 
@@ -1210,16 +1237,10 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   };
   if (isVertexAi) {
     generationConfig.responseSchema = buildVertexExtractionResponseSchema_();
-  } else {
-    generationConfig.responseJsonSchema = buildExtractionResponseSchema_();
   }
   // Vertex exposes the token-budget control. Keep reasoning enabled for
   // document interpretation while bounding its share of the output budget.
-  if (model === CONFIG.DEFAULT_MODEL && !isVertexAi) {
-    generationConfig.thinkingConfig = {
-      thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
-    };
-  } else if (model === CONFIG.DEFAULT_MODEL && isVertexAi) {
+  if (model === CONFIG.DEFAULT_MODEL && isVertexAi) {
     generationConfig.thinkingConfig = {
       thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET
     };
@@ -1354,7 +1375,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   const finishReason = isGeminiInteractionsApi ?
     getGeminiInteractionsFinishReason_(body) :
     String(candidate && candidate.finishReason || 'UNSPECIFIED');
-  if (finishReason !== 'STOP' && finishReason !== 'COMPLETED') {
+  const successfulFinishReason = isGeminiInteractionsApi ? 'COMPLETED' : 'STOP';
+  if (finishReason !== successfulFinishReason) {
     throw new Error('Gemini extraction was incomplete (finish reason: ' +
       finishReason + ').');
   }
@@ -1379,6 +1401,8 @@ function getGeminiGenerateContentOutputText_(candidate) {
 }
 
 function getGeminiInteractionsOutputText_(body) {
+  // The May 2026 REST migration replaced legacy outputs with typed steps:
+  // https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026
   const steps = Array.isArray(body && body.steps) ? body.steps : [];
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const step = steps[index];
@@ -1532,14 +1556,23 @@ function convertExtractionSchemaToVertex_(schema) {
   const types = Array.isArray(schema.type) ? schema.type.filter(function (type) {
     return type !== 'null';
   }) : [schema.type];
-  if (types.length > 0 && types[0]) {
+  if (types.length > 1) {
+    vertexSchema.anyOf = types.map(function (type) {
+      return { type: String(type).toUpperCase() };
+    });
+  } else if (types.length > 0 && types[0]) {
     vertexSchema.type = String(types[0]).toUpperCase();
   }
   if (Array.isArray(schema.type) && schema.type.indexOf('null') >= 0) {
     vertexSchema.nullable = true;
   }
   if (Array.isArray(schema.enum)) {
-    vertexSchema.enum = schema.enum.slice();
+    vertexSchema.enum = schema.enum.filter(function (value) {
+      return value !== null;
+    });
+  }
+  if (typeof schema.pattern === 'string') {
+    vertexSchema.pattern = schema.pattern;
   }
   if (Array.isArray(schema.required)) {
     vertexSchema.required = schema.required.slice();
@@ -1952,7 +1985,9 @@ function normalizeExtraction_(extracted) {
     normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
   normalizeExtractedInvoiceFrequency_(normalized);
   applyFrequencyOverride_(normalized);
-  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
+  // Apply reviewed supplier defaults to their original representation before
+  // monetary text normalization can turn a non-approved representation into 0.
+  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values, true);
   return normalized;
 }
 
@@ -2037,7 +2072,8 @@ function hasAddressComponentPlacement_(addressTokens, components,
   const componentLength = components.reduce(function (total, component) {
     return total + component.length;
   }, 0);
-  if (requireCompleteIdentity && componentLength !== addressTokens.length) {
+  if (requireCompleteIdentity && (componentLength > addressTokens.length ||
+    componentLength + 1 < addressTokens.length)) {
     return false;
   }
   const placements = components.map(function (component) {
@@ -2055,9 +2091,15 @@ function hasAddressComponentPlacement_(addressTokens, components,
   if (placements.some(function (matches) { return !matches.length; })) {
     return false;
   }
-  function placeComponent(index, occupied) {
+  function placeComponent(index, occupied, cityStart) {
     if (index === placements.length) {
-      return true;
+      // A postal code is optional only as one unclaimed token immediately
+      // before the matched city. Never discard digits belonging to a matched
+      // street, civic number or city, even when they look like a postal code.
+      return !requireCompleteIdentity || occupied.every(function (used, tokenIndex) {
+        return used || (tokenIndex === cityStart - 1 &&
+          isAddressPostalCodeToken_(addressTokens[tokenIndex]));
+      });
     }
     return placements[index].some(function (placement) {
       for (let tokenIndex = placement.start; tokenIndex < placement.end;
@@ -2071,7 +2113,8 @@ function hasAddressComponentPlacement_(addressTokens, components,
         tokenIndex += 1) {
         nextOccupied[tokenIndex] = true;
       }
-      return placeComponent(index + 1, nextOccupied);
+      return placeComponent(index + 1, nextOccupied,
+        index === 2 ? placement.start : cityStart);
     });
   }
   return placeComponent(0, Array(addressTokens.length).fill(false));
@@ -2094,10 +2137,10 @@ function validateServiceIdentity_(extracted, expected) {
   const addressComponents = [street, civicNumber, city];
   const configuredAddress = normalizeAddressTokenSequence_(
     configured.service_address
-  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  );
   const evidenceAddress = normalizeAddressTokenSequence_(
     extracted && extracted.address_evidence
-  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  );
   if (!holder || !street.length || !civicNumber.length || !city.length) {
     return invalidExtraction_(
       'The invoice account holder or service address is missing or ambiguous.',
@@ -2592,7 +2635,7 @@ function escapeRegExp_(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function normalizeSheetValues_(sheetValues) {
+function normalizeSheetValues_(sheetValues, deferMonetary) {
   if (!Array.isArray(sheetValues)) {
     return [];
   }
@@ -2633,8 +2676,58 @@ function normalizeSheetValues_(sheetValues) {
       }
       normalized.value = quantity;
     }
+    if (!deferMonetary && !isUnitCostHeader_(normalized.header) &&
+      !isConsumptionQuantityHeader_(normalized.header) &&
+      isNumericInvoiceHeader_(normalized.header) && normalized.value !== null &&
+      normalized.value !== undefined) {
+      const numeric = parseUnambiguousSheetNumber_(normalized.value);
+      if (numeric === null) {
+        throw new Error('Gemini extraction has a nonnumeric monetary value.');
+      }
+      normalized.value = numeric;
+    }
     return normalized;
   });
+}
+
+function isNumericInvoiceHeader_(header) {
+  const normalized = normalizeHeader_(header);
+  const registry = getLocalizationRegistry_();
+  return isUnitCostHeader_(header) || isConsumptionQuantityHeader_(header) ||
+    Object.keys(registry).some(function (locale) {
+      const localization = registry[locale];
+      const aliases = localization.headerAliases || {};
+      return ['consumptionCost', 'nonConsumptionCosts', 'vat', 'total'].reduce(
+        function (headers, key) { return headers.concat(aliases[key] || []); },
+        localization.numericSupplementaryHeaders || []
+      ).map(normalizeHeader_).indexOf(normalized) >= 0;
+    });
+}
+
+function parseUnambiguousSheetNumber_(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  let text = value.trim().replace(/^(?:€|EUR)\s*|\s*(?:€|EUR)$/gi, '').trim();
+  // A single three-digit suffix is ambiguous between grouping and decimals.
+  // Leading zero cannot be a thousands group; retain rates such as 0.123.
+  if (/^[+-]?[1-9]\d{0,2}[.,]\d{3}$/.test(text)) {
+    return null;
+  }
+  if (/^[+-]?[1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?$/.test(text)) {
+    text = text.replace(/,/g, '');
+  } else if (/^[+-]?[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?$/.test(text)) {
+    text = text.replace(/\./g, '').replace(',', '.');
+  } else if (/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(text)) {
+    text = text.replace(',', '.');
+  } else {
+    return null;
+  }
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function isUnitCostHeader_(header) {
@@ -2683,29 +2776,12 @@ function normalizeElectricityBandConsumption_(value) {
   if (typeof value !== 'string') {
     return null;
   }
-  let text = value.trim().replace(/\s+/g, '');
-  text = text.replace(/kwh$/i, '');
-  if (!/^[+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?$/.test(text)) {
+  const text = value.trim().replace(/\s*kwh$/i, '').trim();
+  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text) || /(?:€|EUR)/i.test(text)) {
     return null;
   }
-  // With only one separator, a three-digit suffix can be either a grouping
-  // separator or a decimal fraction. Reject it rather than silently changing
-  // an invoice quantity such as 1,234 kWh into 1.234 kWh.
-  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text)) {
-    return null;
-  }
-  if (/^[+]?\d{1,3}(?:[.,]\d{3})+$/.test(text)) {
-    text = text.replace(/[.,]/g, '');
-  } else if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
-    const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
-      ',' : '.';
-    const groupingSeparator = decimalSeparator === ',' ? /\./g : /,/g;
-    text = text.replace(groupingSeparator, '').replace(decimalSeparator, '.');
-  } else if (text.indexOf(',') >= 0) {
-    text = text.replace(',', '.');
-  }
-  const quantity = Number(text);
-  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
+  const quantity = parseUnambiguousSheetNumber_(text);
+  return quantity !== null && quantity >= 0 ? quantity : null;
 }
 
 function validateExtraction_(extracted) {
@@ -3940,39 +4016,11 @@ function setLiteralSheetValue_(range, value) {
 }
 
 function normalizeSheetValueForCell_(range, value, header) {
-  const quantitative = isReconciliationCostHeader_(normalizeHeader_(header)) ||
-    isUnitCostHeader_(header) || isElectricityBandConsumptionHeader_(header) ||
-    Object.keys(getLocalizationRegistry_()).some(function (locale) {
-      return (getLocalizationRegistry_()[locale].numericSupplementaryHeaders || [])
-        .map(normalizeHeader_).indexOf(normalizeHeader_(header)) >= 0;
-    });
-  if (!quantitative) {
+  if (!isNumericInvoiceHeader_(header) || value === null || value === undefined) {
     return value;
   }
-  if (typeof value !== 'string' || !range ||
-    typeof range.getNumberFormat !== 'function') {
-    return value;
-  }
-  const numberFormat = String(range.getNumberFormat() || '');
-  // Numeric/currency formats use #, 0, or ?. Date/time formats use their
-  // alphabetic tokens instead; never reinterpret arbitrary text in those
-  // cells. Formula-like or nonnumeric text remains literal rich text.
-  if (!/[#0?]/.test(numberFormat) || /[ymdhsg]/i.test(numberFormat)) {
-    return value;
-  }
-  if (isConsumptionQuantityHeader_(header)) {
-    const quantity = normalizeElectricityBandConsumption_(value);
-    if (quantity === null) {
-      throw new Error('Gemini extraction has a nonnumeric consumption quantity value.');
-    }
-    return quantity;
-  }
-  const normalized = value.trim();
-  if (!/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(normalized)) {
-    return value;
-  }
-  const numeric = Number(normalized.replace(',', '.'));
-  return Number.isFinite(numeric) ? numeric : value;
+  // The header owns the type contract; user-controlled cell formatting does not.
+  return normalizeSheetValues_([{ header: header, value: value }])[0].value;
 }
 
 function setTextValueForHeaders_(sheet, row, layout, formulaColumns, aliases,
@@ -4401,105 +4449,134 @@ function isInvoiceCoreMonetaryReconciled_(extracted) {
   ) <= CONFIG.MONEY_TOLERANCE;
 }
 
-function validateEnergygasLuceDetailedReconciliation_(extracted) {
-  if (!extracted || extracted.document_type !== 'Invoice' ||
-    normalizeCellText_(extracted.supplier) !== 'energygas italia' ||
-    normalizeCellText_(extracted.supply_type) !== 'luce') {
+function getSupplierReconciliationGroups_(key) {
+  const registry = getLocalizationRegistry_();
+  const contracts = Object.keys(registry).map(function (locale) {
+    return registry[locale].supplierReconciliation;
+  });
+  const first = contracts[0][key];
+  return (Array.isArray(first) ? first : [first]).map(function (_, index) {
+    return contracts.map(function (contract) {
+      return Array.isArray(contract[key]) ? contract[key][index] : contract[key];
+    });
+  });
+}
+
+function readConfiguredReconciliationField_(extracted, aliases) {
+  const normalizedAliases = aliases.map(normalizeHeader_);
+  const available = extracted.configured_writable_headers ||
+    (extracted.sheet_values || []).map(function (entry) { return entry.header; });
+  const headers = available.filter(function (header) {
+    return normalizedAliases.indexOf(normalizeHeader_(header)) >= 0;
+  });
+  const entries = (extracted.sheet_values || []).filter(function (entry) {
+    return entry && normalizedAliases.indexOf(normalizeHeader_(entry.header)) >= 0;
+  });
+  const header = headers[0] || aliases[0];
+  const missing = !entries.length || entries[0].value === null;
+  const absence = missing && (extracted.problems || []).some(function (problem) {
+    const classification = classifyConfiguredSecondaryInvoiceProblem_(problem, extracted);
+    return classification.disposition === 'explicit-absence' &&
+      normalizeHeader_(classification.field) === normalizeHeader_(header);
+  });
+  return {
+    header: header,
+    configured: headers.length > 0,
+    duplicate: headers.length > 1 || entries.length > 1,
+    present: entries.length > 0,
+    value: entries.length ? parseSheetMoneyValue_(entries[0].value) : null,
+    rawValue: entries.length ? entries[0].value : null,
+    absent: absence
+  };
+}
+
+function validateSupplierNonConsumptionDetails_(extracted, key, code, label) {
+  const details = getSupplierReconciliationGroups_(key).map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  const invalid = details.filter(function (detail) {
+    return detail.configured && (detail.duplicate ||
+      detail.value === null && !detail.absent);
+  });
+  const fields = details.filter(function (detail) { return detail.configured; })
+    .map(function (detail) { return detail.header; }).concat([
+      'cost_consumption', 'cost_non_consumption', 'vat', 'total'
+    ]);
+  if (invalid.length) {
+    return invalidExtraction_(label + ' configured detailed costs are missing or nonnumeric.',
+      'Re-read each configured detail. Resolve absence only through the reviewed default or explicit non-applicability rule; never invent a zero.',
+      { code: code + '_incomplete', repairable: true, fields: fields });
+  }
+  // Simple sheets and formula-backed columns do not expose a complete writable
+  // partition. Explicit optional absence is not a printed numerical zero.
+  if (!details.every(function (detail) {
+    return detail.configured && detail.value !== null;
+  })) {
     return { valid: true };
   }
-  const rateHeaders = ['Costo unitario', 'Costo unitario F1',
-    'Costo unitario F2', 'Costo unitario F3'];
-  const numericValue = function (header) {
-    const entry = (extracted.sheet_values || []).filter(function (item) {
-      return item && normalizeHeader_(item.header) === normalizeHeader_(header);
-    })[0];
-    const value = entry && entry.value;
-    if (typeof value === 'number') {
-      return Number.isFinite(value) ? value : null;
-    }
-    if (typeof value !== 'string' || !/^\d+(?:[.,]\d+)?$/.test(value.trim())) {
-      return null;
-    }
-    const number = Number(value.trim().replace(',', '.'));
-    return Number.isFinite(number) ? number : null;
-  };
-  const rates = rateHeaders.map(numericValue);
-  const quantity = numericValue('Quantità consumi');
-  // A common selling rate is independently checkable against the current
-  // quantity and selling consumption amount. Do not impose it on multirate bills.
-  const commonRate = rates.every(function (rate) {
-    return rate !== null && rate >= 0 && Math.abs(rate - rates[0]) < 1e-9;
+  const total = details.reduce(function (sum, detail) { return sum + detail.value; }, 0);
+  if (typeof extracted.cost_non_consumption === 'number' &&
+    Number.isFinite(extracted.cost_non_consumption) &&
+    Math.abs(total - extracted.cost_non_consumption) <= CONFIG.MONEY_TOLERANCE) {
+    return { valid: true };
+  }
+  return invalidExtraction_(label + ' detailed costs do not reconcile with the non-consumption total.',
+    'Re-examine the printed, mutually exclusive detail rows and totals. Do not invent a residual, VAT, total, or balancing detail.',
+    { code: code, repairable: true, fields: fields });
+}
+
+function validateEnergygasLuceDetailedReconciliation_(extracted) {
+  const supplyAliases = getSupplierReconciliationGroups_('electricitySupply')[0]
+    .map(normalizeCellText_);
+  if (!extracted || extracted.document_type !== 'Invoice' ||
+    ['energygas italia', 'energygas'].indexOf(normalizeCellText_(extracted.supplier)) < 0 ||
+    supplyAliases.indexOf(normalizeCellText_(extracted.supply_type)) < 0) {
+    return { valid: true };
+  }
+  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
   });
-  if (commonRate && quantity !== null && quantity > 0 &&
+  const quantityField = readConfiguredReconciliationField_(extracted,
+    getSupplierReconciliationGroups_('quantity')[0]);
+  // Unit rates retain their full printed precision rather than money rounding.
+  const rates = rateFields.filter(function (field) { return field.configured; })
+    .map(function (field) { return parseUnambiguousSheetNumber_(field.rawValue); });
+  const quantity = normalizeElectricityBandConsumption_(quantityField.rawValue);
+  const commonRate = rateFields[0].configured && rates.length > 0 &&
+    rates.every(function (rate) {
+      return rate !== null && rate >= 0 && Math.abs(rate - rates[0]) < 1e-9;
+    });
+  const invalidRate = rateFields.some(function (field) {
+    return field.configured && (field.duplicate ||
+      parseUnambiguousSheetNumber_(field.rawValue) === null);
+  });
+  const invalidQuantity = quantityField.configured &&
+    (quantityField.duplicate || quantity === null);
+  if (invalidRate || invalidQuantity ||
+    commonRate && quantity !== null && quantity > 0 &&
     typeof extracted.cost_consumption === 'number' &&
     Math.abs(quantity * rates[0] - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE) {
     return invalidExtraction_(
-      'The common electricity selling rate does not reconcile with quantity and selling consumption cost.',
-      'Re-read the selling consumption summary rate, not PREZZO FISSO or a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
+      'The electricity selling rate and quantity are incomplete or do not reconcile with selling consumption cost.',
+      'Re-read the selling consumption summary rate and quantity, not a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
       {
         code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
-        fields: rateHeaders.concat(['Quantità consumi', 'Totale costi consumo',
-          'cost_consumption'])
+        fields: rateFields.filter(function (field) { return field.configured; })
+          .map(function (field) { return field.header; }).concat([
+            quantityField.header, 'cost_consumption', 'cost_non_consumption', 'vat', 'total'
+          ])
       }
     );
   }
-  const detailHeaders = [
-    'Altri costi materia energia',
-    'Trasporto e gestione contatore',
-    'Oneri di sistema',
-    'Accise',
-    'Canone TV',
-    'Ricalcoli',
-    'Rete e oneri non scorporabili'
-  ];
-  const values = detailHeaders.map(function (header) {
-    const entry = (extracted.sheet_values || []).filter(function (item) {
-      return item && normalizeHeader_(item.header) === normalizeHeader_(header);
-    })[0];
-    return entry ? parseSheetMoneyValue_(entry.value) : null;
-  });
-  if (values.some(function (value) { return value === null; }) ||
-    typeof extracted.cost_non_consumption !== 'number') {
-    return { valid: true };
-  }
-  const detailedTotal = values.reduce(function (total, value) {
-    return total + value;
-  }, 0);
-  if (Math.abs(detailedTotal - extracted.cost_non_consumption) <=
-    CONFIG.MONEY_TOLERANCE) {
-    return { valid: true };
-  }
-  return invalidExtraction_(
-    'Energygas electricity detailed costs do not reconcile with the non-consumption total.',
-    'Re-examine the printed fixed, network, tax, TV, and recalculation rows. Keep each amount in its mutually exclusive target column and do not use a residual value.',
-    {
-      code: 'energygas_luce_detail_reconciliation_mismatch',
-      repairable: true,
-      fields: detailHeaders
-    }
-  );
+  const validation = validateSupplierNonConsumptionDetails_(extracted, 'energygasDetails',
+    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity');
+  return validation.valid ? validateSupplierMonetaryOverlays_(extracted,
+    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity') : validation;
 }
 
 function parseSheetMoneyValue_(value) {
-  if (typeof value === 'number') {
-    return isFinite(value) ? Math.round(value * 100) / 100 : null;
-  }
-  const text = String(value === null || value === undefined ? '' : value)
-    .trim().replace(/[€\s]/g, '');
-  if (!text || !/^[+-]?[\d.,]+$/.test(text)) {
-    return null;
-  }
-  const lastComma = text.lastIndexOf(',');
-  const lastDot = text.lastIndexOf('.');
-  let canonical = text;
-  if (lastComma >= 0 && lastDot >= 0) {
-    canonical = lastComma > lastDot ?
-      text.replace(/\./g, '').replace(',', '.') : text.replace(/,/g, '');
-  } else if (lastComma >= 0) {
-    canonical = text.replace(',', '.');
-  }
-  const number = Number(canonical);
-  return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
+  const numeric = parseUnambiguousSheetNumber_(value);
+  return numeric === null ? null : Math.round(numeric * 100) / 100;
 }
 
 function validateOenergyGasDetailedReconciliation_(extracted) {
@@ -4508,49 +4585,38 @@ function validateOenergyGasDetailedReconciliation_(extracted) {
     normalizeCellText_(extracted.supply_type) !== 'gas') {
     return { valid: true };
   }
-  const detailHeaders = [
-    'Quota fissa',
-    'Trasporto e oneri',
-    'Accise',
-    'Ricalcoli'
-  ];
-  const values = detailHeaders.map(function (header) {
-    const entry = (extracted.sheet_values || []).filter(function (item) {
-      return item && normalizeHeader_(item.header) === normalizeHeader_(header);
-    })[0];
-    return entry ? parseSheetMoneyValue_(entry.value) : null;
-  });
-  if (values.some(function (value) { return value === null; }) ||
-    typeof extracted.cost_non_consumption !== 'number') {
-    return { valid: true };
+  const validation = validateSupplierNonConsumptionDetails_(extracted, 'oenergyDetails',
+    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
+  if (!validation.valid) {
+    return validation;
   }
-  const detailedNonConsumption = values.reduce(function (total, value) {
-    return total + value;
-  }, 0);
-  const consumptionEntry = (extracted.sheet_values || []).filter(function (item) {
-    return item && normalizeHeader_(item.header) ===
-      normalizeHeader_('Totale costi consumo');
-  })[0];
-  const sheetConsumption = consumptionEntry ?
-    parseSheetMoneyValue_(consumptionEntry.value) : null;
-  const consumptionMismatch = sheetConsumption !== null &&
-    typeof extracted.cost_consumption === 'number' &&
-    Math.abs(sheetConsumption - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE;
-  if (!consumptionMismatch && Math.abs(detailedNonConsumption -
-    extracted.cost_non_consumption) <= CONFIG.MONEY_TOLERANCE) {
-    return { valid: true };
-  }
-  return invalidExtraction_(
-    'OENERGY gas detailed costs do not reconcile with the extracted totals.',
-    'Re-examine the printed selling-consumption, fixed-selling, network/oneri, excise, and recalculation rows. Keep selling consumption and fixed selling separate, sum network/oneri once in Trasporto e oneri, and do not use a residual value.',
-    {
-      code: 'oenergy_gas_detail_reconciliation_mismatch',
-      repairable: true,
-      fields: ['Costo unitario', 'Totale costi consumo'].concat(detailHeaders).concat([
-        'cost_consumption', 'cost_non_consumption', 'vat', 'total'
-      ])
+  return validateSupplierMonetaryOverlays_(extracted,
+    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
+}
+
+function validateSupplierMonetaryOverlays_(extracted, code, label) {
+  const registry = getLocalizationRegistry_();
+  const canonicalFields = {
+    consumptionCost: 'cost_consumption', nonConsumptionCosts: 'cost_non_consumption', vat: 'vat'
+  };
+  for (const key of Object.keys(canonicalFields)) {
+    const aliases = Object.keys(registry).reduce(function (all, locale) {
+      return all.concat(registry[locale].headerAliases[key]);
+    }, []);
+    const field = readConfiguredReconciliationField_(extracted, aliases);
+    // Omission uses the canonical amount. A supplied null would suppress its
+    // write, so it must fail just like a mismatched numerical overlay.
+    if (field.configured && (field.duplicate || field.present &&
+      (field.value === null || typeof extracted[canonicalFields[key]] !== 'number' ||
+        !Number.isFinite(extracted[canonicalFields[key]]) ||
+        Math.abs(field.value - extracted[canonicalFields[key]]) > CONFIG.MONEY_TOLERANCE))) {
+      return invalidExtraction_(label + ' supplementary costs do not reconcile with the extracted totals.',
+        'Re-read the printed consumption, non-consumption, VAT, and total amounts without inventing balancing values.',
+        { code: code, repairable: true,
+          fields: [field.header, 'cost_consumption', 'cost_non_consumption', 'vat', 'total'] });
     }
-  );
+  }
+  return { valid: true };
 }
 
 function getConfiguredSecondaryInvoiceHeaders_(headers) {

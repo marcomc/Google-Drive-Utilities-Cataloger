@@ -238,9 +238,9 @@ spreadsheet-state errors stop without spending another model call. A repair is
 also deferred when the shared Apps Script runtime budget is nearly exhausted,
 so the file can retain a retryable outcome. The model can revise extracted data
 and evidence but cannot change validation or import policy.
-Repairs preserve unaffected identity and monetary fields. Unreconciled totals
-remain eligible for correction even when an earlier absence diagnostic is
-reported first; a conflicting inferred frequency reopens the printed period
+Repairs preserve monetary fields only after their relevant validators pass and
+the next failure leaves that group unaffected. Identity, period, and disputed
+amounts remain eligible for correction; a conflicting inferred frequency reopens the printed period
 and reference-date fields for re-examination. Neither condition relaxes the
 final reconciliation or historical-frequency checks.
 Structured logs record each validation outcome, targeted repair request,
@@ -259,9 +259,9 @@ each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
 headers, and business rules before any Drive or Sheet mutation. Recognized
 unit-rate and consumption strings normalize to numbers during extraction.
-Other supplementary numeric strings convert only for recognized quantitative
-headers with a numeric cell format. Identifier and unknown-header text remains literal even
-in numeric-formatted cells; ambiguous consumption grouping is rejected.
+Other supplementary numeric strings convert for recognized quantitative
+headers independently of cell formatting. Identifier and unknown-header text
+remains literal; ambiguous monetary and consumption grouping is rejected.
 Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
 handoff from the installed Cloud project and validates the new key against the
 configured model. It changes only the key, preserving the backend, model,
@@ -492,8 +492,9 @@ unprovenanced row.
 `gemini-generation-request` is emitted once for each outbound model request.
 Count this event by file ID to detect retries or redundant processing; a normal
 file has one request and one `gemini-generation-response` event. A successful
-response also records the provider `finishReason`; values other than `STOP`
-fail before parsing or mutating Drive and Sheets.
+response also records the provider `finishReason`: Vertex requires `STOP`, and
+Interactions requires root status `completed` (logged as `COMPLETED`). Other
+statuses fail before parsing or mutating Drive and Sheets.
 
 Each successful response also emits `gemini-generation-usage`. It records the
 provider-reported `promptTokenCount`, `candidatesTokenCount`,
@@ -511,6 +512,12 @@ for aggregate and subordinate invoice cost rows. Vertex receives the shared
 extraction contract converted to its OpenAPI-style `responseSchema`. The alias
 may resolve to a newer Flash release without a source or Script Properties
 update.
+The Interactions parser follows Google's current
+[REST steps schema](https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026),
+which replaced legacy `outputs`; a completed response can omit per-step status.
+Vertex schema conversion preserves nullable enums, mixed primitive value types,
+and reference-month patterns using the supported
+[Schema fields](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/Schema).
 Until a verified Vertex price is added to `Config.gs`, usage events for the
 alias and other unpriced models retain provider token counts but intentionally
 omit cost-estimate fields; Cloud Billing remains authoritative.

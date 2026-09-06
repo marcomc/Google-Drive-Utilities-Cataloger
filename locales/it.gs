@@ -199,6 +199,15 @@ function getItalianLocalization_() {
       }),
       emailSubject: '[Utenze] {count} PDF elaborato/i'
     }),
+    supplierReconciliation: Object.freeze({
+      electricitySupply: 'Luce',
+      energygasDetails: ['Altri costi materia energia', 'Trasporto e gestione contatore',
+        'Oneri di sistema', 'Accise', 'Canone TV', 'Ricalcoli',
+        'Rete e oneri non scorporabili'],
+      oenergyDetails: ['Quota fissa', 'Trasporto e oneri', 'Accise', 'Ricalcoli'],
+      quantity: 'Quantità consumi',
+      rates: ['Costo unitario', 'Costo unitario F1', 'Costo unitario F2', 'Costo unitario F3']
+    }),
     numericSupplementaryHeaders: Object.freeze([
       'Quantità consumi',
       'Quota fissa',

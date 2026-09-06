@@ -178,6 +178,45 @@ function testServiceIdentityPreservesSubstantiveQualifiers() {
 }
 testServiceIdentityPreservesSubstantiveQualifiers();
 
+function testServiceIdentityPreservesPostalShapedIdentityTokens() {
+  const context = loadCataloger();
+  const validate = (configured, street, civic, city, evidence = configured) =>
+    context.validateServiceIdentity_({
+      account_holder: 'Avery North', address_evidence: evidence,
+      service_street: street, service_civic_number: civic, service_city: city
+    }, { account_holder: 'Avery North', service_address: configured }).valid;
+  for (const [configured, street, civic, city] of [
+    ['Via 12345 Po 1 Rivermouth', 'Via 12345 Po', '1', 'Rivermouth'],
+    ['Via Po 12345 Rivermouth', 'Via Po', '12345', 'Rivermouth'],
+    ['Via Po 1 Rivermouth 12345', 'Via Po', '1', 'Rivermouth 12345'],
+    ['Via Po 1 12345 Rivermouth', 'Via Po', '1', '12345 Rivermouth'],
+    ['Via 12345 Po 12345 99991 Rivermouth FC', 'Via 12345 Po', '12345', 'Rivermouth'],
+    ['Via Po 12345 12345 Rivermouth FC', 'Via Po', '12345', 'Rivermouth'],
+    ['C.so 12345 Po 1 99991 Rivermouth FC', 'Corso 12345 Po', '1', 'Rivermouth']
+  ]) {
+    assert.equal(validate(configured, street, civic, city), true, configured);
+  }
+  for (const [configured, street, civic, city] of [
+    ['Via 12345 Po 1 Rivermouth', 'Via Po', '1', 'Rivermouth'],
+    ['12345 Via Po 1 Rivermouth', 'Via Po', '1', 'Rivermouth'],
+    ['Via Po 12345 1 Rivermouth', 'Via Po', '1', 'Rivermouth'],
+    ['Via Po 1 Rivermouth 12345', 'Via Po', '1', 'Rivermouth'],
+    ['Via Po 12345 Rivermouth', 'Via Po', '54321', 'Rivermouth'],
+    ['Via Po 1 99991 99992 Rivermouth', 'Via Po', '1', 'Rivermouth'],
+    ['Via Po 1 9999 Rivermouth', 'Via Po', '1', 'Rivermouth'],
+    ['Via Po 1 999991 Rivermouth', 'Via Po', '1', 'Rivermouth']
+  ]) {
+    assert.equal(validate(configured, street, civic, city), false, configured);
+  }
+  assert.equal(validate('Via 12345 Po 1 99991 Rivermouth FC',
+    'Via 12345 Po', '1', 'Rivermouth', 'Via Po 1 99991 Rivermouth FC'), false);
+  assert.equal(validate('Via Po 12345 99991 Rivermouth FC',
+    'Via Po', '12345', 'Rivermouth', 'Via Po 54321 99991 Rivermouth FC'), false);
+  assert.equal(validate('Via Po 1 99991 Rivermouth 12345 FC',
+    'Via Po', '1', 'Rivermouth 12345', 'Via Po 1 99991 Rivermouth FC'), false);
+}
+testServiceIdentityPreservesPostalShapedIdentityTokens();
+
 function testRepeatedCareOfHolderIdentity() {
   const context = loadCataloger();
   const expected = {account_holder: 'Avery North', service_address: 'Cedar Boulevard 125, Rivermouth'};
@@ -396,8 +435,8 @@ function testLegacyHeaderRowWithoutControlsRemainsFailClosed() {
 function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
   const context = loadCataloger();
   const expectedAddresses = [
-    'Rivermouth 125 Corso Cedar Meridian Boulevard 99991',
-    '99991 125 Rivermouth Corso Cedar Meridian Boulevard',
+    '99991 Rivermouth 125 Corso Cedar Meridian Boulevard',
+    '125 99991 Rivermouth Corso Cedar Meridian Boulevard',
     'Corso Cedar Meridian Boulevard Rivermouth 125'
   ];
   const evidenceAddresses = [
@@ -421,6 +460,18 @@ function testServiceIdentityAcceptsComponentAndEvidencePermutations() {
 
     assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
   });
+  for (const serviceAddress of [
+    'Rivermouth 125 Corso Cedar Meridian Boulevard 99991',
+    '99991 125 Rivermouth Corso Cedar Meridian Boulevard'
+  ]) {
+    assert.equal(context.validateServiceIdentity_({
+      account_holder: 'Avery North', address_evidence: serviceAddress,
+      service_street: 'C.so Cedar Meridian Boulevard',
+      service_civic_number: '125', service_city: 'Rivermouth',
+      service_postal_code: '99991'
+    }, { account_holder: 'Avery North', service_address: serviceAddress }).valid,
+    false, serviceAddress);
+  }
 }
 
 function testServiceIdentityRejectsExtractedStreetPrefix() {
@@ -1233,7 +1284,7 @@ function testExtractionSchemaAndCalendarValidation() {
     feedback: { issues: [{ fields: ['Rete e oneri non scorporabili'] }] }
   });
   assert.deepEqual(repairCandidate, {
-    cost_consumption: 51.68, cost_non_consumption: 53.81, vat: 9.65, total: 115.14
+    cost_consumption: 50, vat: 9, total: 110
   });
   const unreconciledRepair = {
     ...energygasDetailedReconciliation, cost_consumption: 55.23,
@@ -2812,6 +2863,244 @@ function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepai
   assert.equal(repairContexts[2].previousExtraction.identifier, 'INV-LAST-VALID');
 }
 
+function testLocalizedConfiguredReconciliationPipeline() {
+  for (const locale of ['en', 'it']) {
+    for (const supplier of ['Energygas Italia', 'OENERGY']) {
+      const context = loadCataloger();
+      const localization = context.getLocalizationRegistry_()[locale];
+      const contract = localization.supplierReconciliation;
+      const electricity = supplier === 'Energygas Italia';
+      const supply = electricity ? contract.electricitySupply : 'Gas';
+      const detailHeaders = Array.from(electricity ? contract.energygasDetails : contract.oenergyDetails);
+      let headers = detailHeaders.slice();
+      context.getAutomationConfig_ = () => ({
+        locale, canonical_suppliers: ['Energygas Italia', 'OENERGY'],
+        canonical_supplies: [supply], supplier_aliases: { eg: 'Energygas Italia' },
+        supply_aliases: { utility: supply }, frequency_overrides: [], address_rules: []
+      });
+      context.getSheetHeadersBySupply_ = () => ({ [supply]: headers });
+      context.validateRawExtractionShape_ = () => {};
+      context.classifyAddress_ = () => 'import';
+      context.inferInvoiceFrequency_ = () => {};
+      context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+      context.validateTargetSheetValues_ = () => ({ valid: true });
+      context.logCatalogEvent_ = () => {};
+      const file = { getBlob: () => ({}), getId: () => 'invoice-id', getName: () => 'invoice.pdf' };
+      const total = detailHeaders.reduce((sum, _, index) => sum + index + 1, 0);
+      const invoice = {
+        ...validInvoice(), supplier: electricity ? 'eg' : supplier, supply_type: 'utility',
+        cost_consumption: 25, cost_non_consumption: total, vat: 1, total: total + 26,
+        sheet_values: detailHeaders.map((header, index) => ({ header, value: index + 1 }))
+      };
+      const extract = (raw, repairContext) => {
+        context.callGeminiForPdf_ = () => JSON.stringify(raw);
+        return context.extractUtilityData_(file, 'policy', repairContext);
+      };
+      const validate = (raw) => context.validateExtractedUtilityDataForImport_(extract(raw));
+      assert.equal(validate(invoice).valid, true, `${locale} ${supplier}: valid`);
+      const normalized = extract(invoice);
+      assert.equal(Object.keys(normalized).includes('configured_writable_headers'), false);
+      assert.equal(JSON.stringify(context.buildExtractionRepairSnapshot_(normalized))
+        .includes('configured_writable_headers'), false);
+      for (const header of detailHeaders) {
+        for (const value of [undefined, null, '', 'unreadable', '1,234', '-1.234']) {
+          const raw = { ...invoice, configured_writable_headers: [], sheet_values:
+            invoice.sheet_values.filter(entry => entry.header !== header).concat(
+              value === undefined ? [] : [{ header, value }]) };
+          if (typeof value === 'string') {
+            assert.throws(() => extract(raw), error => error.invalidExtractionOutput === true &&
+              error.extractionIssueCode === 'invalid_extraction_normalization',
+            `${locale} ${supplier}: ${header} ${value}`);
+          } else {
+            assert.equal(validate(raw).valid, false, `${locale} ${supplier}: omitted ${header}`);
+          }
+        }
+      }
+      const recalculation = detailHeaders.find(header => /^(Recalculations|Ricalcoli)$/.test(header));
+      const absentProblem = locale === 'it' ? `${recalculation} non presente nel documento.` :
+        `${recalculation} is not present in the document.`;
+      const recalculationValue = invoice.sheet_values.find(entry => entry.header === recalculation).value;
+      const defaulted = { ...invoice, cost_non_consumption: total - recalculationValue,
+        total: invoice.total - recalculationValue, problems: [absentProblem],
+        sheet_values: invoice.sheet_values.filter(entry => entry.header !== recalculation) };
+      assert.equal(validate(defaulted).valid, true, `${locale} ${supplier}: reviewed default`);
+      assert.equal(extract(defaulted).sheet_values.find(entry => entry.header === recalculation).value, 0);
+      assert.equal(validate({ ...defaulted, problems: [absentProblem + ' The amount is ambiguous.'] }).valid,
+        false, `${locale} ${supplier}: conflicting absence`);
+      const optionalHeader = detailHeaders[0];
+      const optional = { ...invoice, problems: [locale === 'it' ?
+        `${optionalHeader} non applicabile.` : `${optionalHeader} is not applicable.`],
+      sheet_values: invoice.sheet_values.filter(entry => entry.header !== optionalHeader) };
+      assert.equal(validate(optional).valid, true, `${locale} ${supplier}: explicit optional absence`);
+      assert.equal(validate({ ...optional, total: optional.total + 1 }).valid, false);
+      const mismatched = { ...invoice, cost_non_consumption: total + 3, total: invoice.total + 3,
+        monetary_validated_: true };
+      const failed = extract(mismatched);
+      assert.equal(context.validateExtractedUtilityDataForImport_(failed).valid, false);
+      assert.equal(failed.monetary_validated_, false, 'Model cannot forge validation provenance');
+      assert.equal(context.validateExtractedUtilityDataForImport_(normalized).valid, true);
+      normalized.cost_non_consumption += 3;
+      normalized.total += 3;
+      assert.equal(context.validateExtractedUtilityDataForImport_(normalized).valid, false);
+      assert.equal(normalized.monetary_validated_, false, 'Repeated validation resets provenance');
+      let calls = 0;
+      context.callGeminiForPdf_ = () => JSON.stringify(calls++ === 0 ? mismatched : invoice);
+      const repaired = context.extractUtilityDataWithRepair_(file, 'policy');
+      assert.equal(repaired.aiCallCount, 2);
+      assert.equal(repaired.validation.valid, true);
+      assert.equal(repaired.extracted.cost_non_consumption, total);
+      let mutations = 0;
+      context.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify(mismatched); };
+      context.sha256ForFile_ = () => 'hash';
+      context.findDuplicate_ = () => { mutations += 1; throw new Error('Admission must block this'); };
+      context.saveMutationJournal_ = () => { mutations += 1; };
+      context.buildVerifyResult_ = () => ({ status: 'VERIFY' });
+      const beforeExhaustion = calls;
+      assert.equal(context.processIntakeFile_({ ...file, getSize: () => 100 }, {}, 'policy').status,
+        'VERIFY');
+      assert.equal(calls - beforeExhaustion,
+        vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+      assert.equal(mutations, 0, 'Detail repair exhaustion cannot journal, write, move, or rename');
+      headers = [detailHeaders[0]];
+      assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.slice(0, 1) }).valid, true,
+        'Partial writable partition does not fabricate missing formula details');
+      headers = [];
+      assert.equal(validate({ ...invoice, sheet_values: [] }).valid, true, 'Simple installer sheet');
+      headers = detailHeaders.slice();
+      if (electricity) {
+        headers = headers.concat(Array.from(contract.rates), contract.quantity);
+        const withRates = { ...invoice, sheet_values: invoice.sheet_values.concat(
+          Array.from(contract.rates).map(header => ({ header, value: '0.25' })),
+          [{ header: contract.quantity, value: '100' }]) };
+        assert.equal(validate(withRates).valid, true);
+        assert.equal(validate({ ...withRates, sheet_values: withRates.sheet_values.map(entry =>
+          contract.rates.includes(entry.header) ? { ...entry, value: '0.20' } : entry) }).valid, false);
+        assert.equal(validate({ ...withRates, sheet_values: withRates.sheet_values.map(entry =>
+          entry.header === contract.rates[1] ? { ...entry, value: '0.20' } : entry) }).valid, true,
+        'Genuine multirate bills are excluded from common-rate arithmetic');
+        assert.equal(validate({ ...withRates, sheet_values: withRates.sheet_values.filter(entry =>
+          entry.header !== contract.rates[3]) }).valid, false);
+      }
+      const overlayFields = {
+        consumptionCost: 'cost_consumption', nonConsumptionCosts: 'cost_non_consumption', vat: 'vat'
+      };
+      for (const [key, canonicalField] of Object.entries(overlayFields)) {
+        for (const header of localization.headerAliases[key]) {
+          headers = detailHeaders.concat(header);
+          assert.equal(validate(invoice).valid, true, 'Canonical amount supplies omitted overlay');
+          assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.concat([
+            { header, value: invoice[canonicalField] }
+          ]) }).valid, true, 'Equal numerical overlay preserves validated amount');
+          for (const value of [invoice[canonicalField] + 1, null]) {
+            const overlay = { ...invoice, sheet_values: invoice.sheet_values.concat([{ header, value }]) };
+            assert.equal(validate(overlay).valid, false,
+              `${locale} ${supplier}: supplied overlay ${header} ${value}`);
+            context.callGeminiForPdf_ = () => JSON.stringify(overlay);
+            assert.equal(context.processIntakeFile_({ ...file, getSize: () => 100 }, {}, 'policy').status,
+              'VERIFY');
+            assert.equal(mutations, 0, 'Invalid overlay cannot reach row write or verification');
+          }
+        }
+      }
+    }
+  }
+}
+
+function testNumericInvoiceBoundaryAndRepairProvenance() {
+  const context = loadCataloger();
+  const formats = ['General', '@', '0.00', 'yyyy-mm-dd'];
+  for (const header of ['Fixed charge', 'Quota fissa', 'VAT', 'IVA', 'Excise duties']) {
+    for (const value of ['1,234', '1.234', '+12,345', '-12.345', '1.23.456,78', 'unreadable']) {
+      assert.equal(context.parseSheetMoneyValue_(value), null);
+      assert.throws(() => context.normalizeSheetValues_([{ header, value }]), /nonnumeric monetary/);
+      for (const format of formats) {
+        assert.throws(() => context.normalizeSheetValueForCell_(
+          { getNumberFormat: () => format }, value, header), /nonnumeric monetary/);
+      }
+    }
+    for (const [value, expected] of [['1,234.56', 1234.56], ['-1.234,56 €', -1234.56],
+      ['+1234,56', 1234.56], ['1,234,567', 1234567], ['0.123', 0.123]]) {
+      assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, expected);
+      for (const format of formats) {
+        assert.equal(context.normalizeSheetValueForCell_(
+          { getNumberFormat: () => format }, value, header), expected);
+      }
+    }
+  }
+  for (const field of ['cost_non_consumption', 'Other energy costs', 'Altri costi materia energia',
+    'Consumption quantity', 'Costo unitario F2', 'VAT']) {
+    const corrected = { ...validInvoice(), cost_non_consumption: 3, total: 15.64 };
+    context.preserveUnimplicatedRepairFields_(corrected, {
+      monetaryValidated: true, previousExtraction: validInvoice(),
+      feedback: { issues: [{ stage: 'extraction', fields: [field] }] }
+    });
+    assert.equal(corrected.cost_non_consumption, 3, `${field}: reopens linked amounts`);
+  }
+  for (const monetaryValidated of [false, true]) {
+    const corrected = { ...validInvoice(), cost_non_consumption: 3, total: 15.64 };
+    context.preserveUnimplicatedRepairFields_(corrected, {
+      monetaryValidated, previousExtraction: validInvoice(),
+      feedback: { issues: [{ stage: 'service-identity', fields: ['service_street'] }] }
+    });
+    assert.equal(corrected.cost_non_consumption, monetaryValidated ? 2 : 3);
+  }
+  for (const format of formats) {
+    testDetailedCostSheetValuesOverrideBroadReconciliationValues(format);
+  }
+}
+
+testLocalizedConfiguredReconciliationPipeline();
+testNumericInvoiceBoundaryAndRepairProvenance();
+
+function testQuantityGroupingWriteAndVerificationContract() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = key => key === 'sourceFile' ? ['Source file'] : [];
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const registry = context.getLocalizationRegistry_();
+  const headers = ['Consumption quantity', 'Quantità consumi'].concat(
+    ...Object.values(registry).map(locale => Array.from(locale.electricityBandHeaders)
+      .filter((_, index) => index % 2 === 0)),
+    ['consumption f1 quantity', 'quantity consumption f2']);
+  for (const header of headers) {
+    for (const value of ['1,234.567', '1.234,567', '1,234.567 kWh', '1.234,567 kWh']) {
+      assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, 1234.567);
+      for (const format of ['General', '@', '0.00', 'yyyy-mm-dd']) {
+        const values = ['', '', ''];
+        const formulas = ['', '', ''];
+        const layout = { headerRow: 1, headers: [header, 'PDR', 'Source file'],
+          lookup: { [context.normalizeHeader_(header)]: 1, pdr: 2, 'source file': 3 } };
+        const sheet = {
+          getLastRow: () => 3,
+          getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
+          getRange: (_row, column, _rows, width) => width === 3 ?
+            { getFormulas: () => [formulas] } : {
+              setValue: v => { values[column - 1] = v; },
+              setRichTextValue: v => { values[column - 1] = v.text; },
+              setFormula: v => { formulas[column - 1] = v; },
+              getValue: () => values[column - 1],
+              getDisplayValue: () => String(values[column - 1]),
+              getFormula: () => formulas[column - 1],
+              getRichTextValue: () => null,
+              getNumberFormat: () => format
+            }
+        };
+        const extracted = { ...validInvoice(), sheet_values: [
+          { header, value }, { header: 'PDR', value: '001234' }
+        ] };
+        const file = { getUrl: () => 'https://drive.test/file' };
+        context.writeInvoiceRow_(sheet, 3, layout, file, extracted);
+        assert.equal(values[0], 1234.567);
+        assert.equal(typeof values[0], 'number');
+        assert.equal(values[1], '001234');
+        assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 3, layout, file, extracted));
+        values[0] = 1234567;
+        assert.throws(() => context.verifyImportedRow_(sheet, 3, layout, file, extracted), /verification failed/);
+      }
+    }
+  }
+}
+testQuantityGroupingWriteAndVerificationContract();
+
 function testQuantityGroupingCannotBeSilentlyScaled() {
   const context = loadCataloger();
   context.getHeaderAliases_ = () => [];
@@ -3143,7 +3432,6 @@ function testDeveloperApiKeyUsesHeader() {
             status: 'completed',
             steps: [{
               type: 'model_output',
-              status: 'done',
               content: [{ type: 'text', text: '{}' }]
             }],
             usage: {
@@ -3165,7 +3453,7 @@ function testDeveloperApiKeyUsesHeader() {
   const file = { getId: () => 'file-id' };
   const blob = { getBytes: () => [1, 2, 3] };
 
-  context.callGeminiForPdfWithBackend_(
+  const output = context.callGeminiForPdfWithBackend_(
     blob,
     [],
     'policy',
@@ -3174,6 +3462,9 @@ function testDeveloperApiKeyUsesHeader() {
     ''
   );
 
+  // Current REST responses use steps and may omit per-step status.
+  // https://ai.google.dev/api/interactions-api#creating-an-interaction
+  assert.equal(output, '{}');
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url.includes('?key='), false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
@@ -3250,6 +3541,28 @@ function testDeveloperApiKeyUsesHeader() {
   });
 }
 
+function testProviderFinishReasonsStayBackendSpecific() {
+  for (const [backend, body, reason] of [
+    ['gemini_api', { status: 'STOP', steps: [{ type: 'model_output',
+      content: [{ type: 'text', text: '{}' }] }] }, 'STOP'],
+    ['vertex_ai', { candidates: [{ finishReason: 'COMPLETED',
+      content: { parts: [{ text: '{}' }] } }] }, 'COMPLETED']
+  ]) {
+    const context = loadCataloger({ UrlFetchApp: { fetch: () => ({
+      getResponseCode: () => 200, getContentText: () => JSON.stringify(body)
+    }) } });
+    context.getGeminiModel_ = () => 'gemini-flash-latest';
+    context.getScriptProperty_ = () => 'test-project';
+    context.buildExtractionPrompt_ = () => 'prompt';
+    context.logCatalogEvent_ = () => {};
+    context.logGeminiUsage_ = () => {};
+    assert.throws(() => context.callGeminiForPdfWithBackend_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, backend, ''
+    ), new RegExp('incomplete \\(finish reason: ' + reason + '\\)'));
+  }
+}
+testProviderFinishReasonsStayBackendSpecific();
+
 function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
   const requests = [];
   const context = loadCataloger({
@@ -3302,6 +3615,24 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
   assert.equal(payload.generationConfig.responseSchema.type, 'OBJECT');
   assert.equal(payload.generationConfig.responseSchema.properties.supplier.type, 'STRING');
   assert.equal(payload.generationConfig.responseSchema.properties.supplier.nullable, true);
+  const schema = payload.generationConfig.responseSchema;
+  assert.deepEqual(schema.properties.frequency_source_evidence, {
+    type: 'STRING', nullable: true, enum: ['printed']
+  });
+  assert.deepEqual(schema.properties.sheet_values.items.properties.value, {
+    anyOf: [{ type: 'STRING' }, { type: 'NUMBER' }, { type: 'BOOLEAN' }],
+    nullable: true
+  });
+  assert.equal(schema.properties.reference_month.pattern, '^(0[1-9]|1[0-2])$');
+  function assertVertexEnums(node) {
+    if (node && typeof node === 'object') {
+      if (Array.isArray(node.enum)) {
+        assert.ok(node.enum.every((value) => typeof value === 'string'));
+      }
+      Object.values(node).forEach(assertVertexEnums);
+    }
+  }
+  assertVertexEnums(schema);
   assert.deepEqual(
     payload.generationConfig.responseSchema.propertyOrdering,
     Object.keys(payload.generationConfig.responseSchema.properties)
@@ -3583,6 +3914,15 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   assert.equal(requests.length, 2);
   assert.match(requests[0].url, /generativelanguage\.googleapis\.com/);
   assert.match(requests[1].url, /aiplatform\.googleapis\.com/);
+  const fallbackSchema = JSON.parse(requests[1].options.payload)
+    .generationConfig.responseSchema;
+  assert.deepEqual(fallbackSchema.properties.frequency_source_evidence, {
+    type: 'STRING', nullable: true, enum: ['printed']
+  });
+  assert.deepEqual(fallbackSchema.properties.sheet_values.items.properties.value, {
+    anyOf: [{ type: 'STRING' }, { type: 'NUMBER' }, { type: 'BOOLEAN' }],
+    nullable: true
+  });
   assert.ok(Number(properties.GEMINI_VERTEX_FALLBACK_UNTIL) > Date.now());
   assert.equal(
     events.find((entry) => entry.event === 'gemini-vertex-fallback-activated')
@@ -5271,7 +5611,7 @@ function testExistingFormulaCellsAreNotOverwrittenDuringReimport() {
     true);
 }
 
-function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
+function testDetailedCostSheetValuesOverrideBroadReconciliationValues(numberFormat = '€ #,##0.00') {
   const writes = [];
   const context = loadCataloger();
   context.getHeaderAliases_ = (key) => ({
@@ -5320,7 +5660,7 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
         setFormula: (value) => writes.push([row, column, 'formula', value]),
         setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
         setValue: (value) => writes.push([row, column, 'value', value]),
-        getNumberFormat: () => '€ #,##0.00'
+        getNumberFormat: () => numberFormat
       };
     }
   };
@@ -5363,7 +5703,7 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
       }
       return {
         getValue: () => actualValues[column - 1],
-        getNumberFormat: () => '€ #,##0.00',
+        getNumberFormat: () => numberFormat,
         getRichTextValue: () => null,
         getFormula: () => column === 8 ?
           '=HYPERLINK("https://drive.test/file";"invoice")' : formulas[column - 1],

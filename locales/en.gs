@@ -202,6 +202,16 @@ function getEnglishLocalization_() {
       }),
       emailSubject: '[Utilities] {count} PDF(s) processed'
     }),
+    supplierReconciliation: Object.freeze({
+      electricitySupply: 'Electricity',
+      energygasDetails: ['Other energy costs', 'Transport and meter management',
+        'System charges', 'Excise duties', 'TV licence fee', 'Recalculations',
+        'Non-separable network and charges'],
+      oenergyDetails: ['Fixed charge', 'Transport and charges', 'Excise duties',
+        'Recalculations'],
+      quantity: 'Consumption quantity',
+      rates: ['Unit cost', 'Unit cost F1', 'Unit cost F2', 'Unit cost F3']
+    }),
     numericSupplementaryHeaders: Object.freeze([
       'Consumption quantity',
       'Fixed charge',

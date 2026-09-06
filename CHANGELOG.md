@@ -73,6 +73,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   accepted supplier-default or electricity-band mapping explanations.
 - Bind credential rotation to the installed Cloud project and preserve the
   configured model, backend, paid-fallback opt-in, and cooldown.
+- Preserve nullable enums and mixed primitive values in Vertex extraction
+  schemas, including the reference-month constraint.
+- Validate configured supplier details in both locales, reject unresolved
+  omissions, and keep conflicting aggregates eligible for model repair.
+- Reject ambiguous monetary grouping before import and apply numeric field
+  contracts independently of cell formatting.
+- Preserve substantive five-digit address tokens when recognizing optional
+  postal codes.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 
