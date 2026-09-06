@@ -29,6 +29,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Require explicit provider error codes or structured daily-quota violations
+  before automatic paid fallback. Preserve transient retries when quota or
+  credit terminology appears only in messages or documentation, and recognize
+  the Interactions API's daily-quota code.
 - Normalize imported reference years and months as literal text, including an
   idempotent migration for existing rows, so chart labels remain stable.
   Checkpoint the migration's pending row before format or value changes and

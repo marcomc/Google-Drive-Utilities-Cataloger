@@ -5049,9 +5049,8 @@ function testRepairContextSurvivesAutomaticVertexFallback() {
       getResponseCode: () => 429,
       getContentText: () => JSON.stringify({
         error: {
-          code: 429,
-          status: 'RESOURCE_EXHAUSTED',
-          message: 'GenerateRequestsPerDay quota exhausted.'
+          code: 'quota_exceeded',
+          message: 'Quota exhausted.'
         }
       })
     },
@@ -5079,7 +5078,6 @@ function testRepairContextSurvivesAutomaticVertexFallback() {
   context.getScriptProperty_ = (key) => key === 'GEMINI_API_KEY' ?
     'developer-secret' : 'cataloger-project';
   context.isAutomaticVertexFallbackEnabled_ = () => true;
-  context.classifyGeminiApiAvailabilityLimit_ = () => 'daily-quota-exhausted';
   context.activateTemporaryVertexFallback_ = () => {};
   context.buildExtractionPrompt_ = (_headers, _policy, repairContext) =>
     'repair-attempt:' + repairContext.attempt;
@@ -5460,105 +5458,139 @@ function testDestinationFolderCreationCheckpointsEachCreatedPath() {
   assert.equal(JSON.parse(store[journalKey]).createdFolderPath, 'Water');
 }
 
-function testGenericRateLimitStaysOnDeveloperApi() {
-  const requests = [];
-  const responses = [
-    {
-      getResponseCode: () => 429,
-      getContentText: () => JSON.stringify({
-        error: {
-          code: 429,
-          status: 'RESOURCE_EXHAUSTED',
-          message: 'Requests per minute limit exceeded. Retry in 1 second. ' +
-            'Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay.'
-        }
-      })
-    },
-    mockedInteractionsResponse()
+function testTerminalQuotaClassificationAndPaidRouting() {
+  const violation = (quotaId, metric = 'generativelanguage.googleapis.com/generate_content_free_tier_requests') =>
+    ({ quotaMetric: metric, quotaId });
+  const daily = violation('GenerateRequestsPerDayPerProjectPerModel-FreeTier');
+  const minute = violation('GenerateRequestsPerMinutePerProjectPerModel-FreeTier');
+  const legacy = (violations, extra = {}) => ({ error: { code: 429, status: 'RESOURCE_EXHAUSTED',
+    message: 'Quota exceeded.', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations }], ...extra } });
+  const credit = { error: { code: 429, status: 'RESOURCE_EXHAUSTED',
+    message: 'Your prepayment credits are depleted. Please go to AI Studio to manage billing.' } };
+  const positive = [
+    ['Interactions daily', { error: { code: 'quota_exceeded', message: 'Quota exceeded.' } }, 'daily-quota-exhausted'],
+    ['Legacy free daily', legacy([daily]), 'daily-quota-exhausted'],
+    ['Legacy paid daily', legacy([violation('GenerateRequestsPerDayPerProjectPerModel',
+      'generativelanguage.googleapis.com/generate_requests_per_model_per_day')]), 'daily-quota-exhausted'],
+    ['Legacy mixed periods', legacy([minute, daily], { message: 'Retry after 1 second.',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [minute, daily] },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1s' }] }), 'daily-quota-exhausted'],
+    ['Observed prepayment', credit, 'prepayment-credits-depleted']
   ];
-  const context = loadCataloger({
-    UrlFetchApp: {
-      fetch: (url) => {
-        requests.push(url);
-        return responses.shift();
-      }
-    }
-  });
-  context.getGeminiModel_ = () => 'gemini-2.5-flash';
-  context.getScriptProperty_ = () => 'developer-secret';
-  context.isAutomaticVertexFallbackEnabled_ = () => true;
-  context.buildExtractionPrompt_ = () => 'prompt';
-  context.logCatalogEvent_ = () => {};
-  context.logGeminiUsage_ = () => {};
-
-  context.callGeminiForPdfWithBackend_(
-    { getBytes: () => [1, 2, 3] },
-    {},
-    'policy',
-    { getId: () => 'file-id' },
-    'gemini_api',
-    ''
-  );
-
-  assert.equal(requests.length, 2);
-  assert.equal(
-    requests.every((url) => url.includes('generativelanguage.googleapis.com')),
-    true
-  );
-}
-
-function testVertexRateLimitRetriesWithoutReclassifyingProviderQuota() {
-  const requests = [];
-  const responses = [
-    {
-      getResponseCode: () => 429,
-      getContentText: () => JSON.stringify({
-        error: {
-          code: 429,
-          status: 'RESOURCE_EXHAUSTED',
-          message: 'GenerateRequestsPerDay quota exceeded temporarily.'
-        }
-      })
-    },
-    {
-      getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({
-        candidates: [{
-          finishReason: 'STOP',
-          content: { parts: [{ text: '{}' }] }
-        }]
-      })
-    }
+  const negative = [
+    ['RPM RPD docs', legacy([minute], { message: 'Requests per minute exceeded. RPD means requests per day; see https://ai.google.dev/limits#RPD.' })],
+    ['RPM shared metric', legacy([minute])],
+    ['RPM billing docs', legacy([minute], { message: 'Requests per minute limit exceeded. Retry in 1 second. ' +
+      'Learn more at https://ai.google.dev/gemini-api/docs/billing#prepay.' })],
+    ['String rate code', { error: { code: 'rate_limit_exceeded', message: credit.error.message, details: legacy([daily]).error.details } }],
+    ['String burst code', { error: { code: 'too_many_requests', message: 'GenerateRequestsPerDay quota exhausted.' } }],
+    ['Unknown string code', { error: { code: 'unknown', message: credit.error.message } }],
+    ['Bare daily prose', legacy([], { message: 'GenerateRequestsPerDay quota exhausted.' })],
+    ['No daily ID', legacy([{ quotaMetric: daily.quotaMetric }])],
+    ['No metric', legacy([{ quotaId: daily.quotaId }])],
+    ['Wrong provider', legacy([violation(daily.quotaId, 'aiplatform.googleapis.com/generate_content_free_tier_requests')])],
+    ['Provider substring', legacy([violation(daily.quotaId, 'other/generativelanguage.googleapis.com/requests')])],
+    ['Metric URL', legacy([violation(daily.quotaId, 'https://generativelanguage.googleapis.com/requests')])],
+    ['Daily ID substring', legacy([violation('docs-' + daily.quotaId)])],
+    ['Quota ID array', legacy([violation([daily.quotaId])])],
+    ['Metric array', legacy([violation(daily.quotaId, [daily.quotaMetric])])],
+    ['Malformed violations', legacy({ quotaId: daily.quotaId, quotaMetric: daily.quotaMetric })],
+    ['Null violations', legacy([null, false, 3])],
+    ['Malformed details', legacy([], { details: { violations: [daily] } })],
+    ['Help metadata', legacy([], { details: [{ '@type': 'type.googleapis.com/google.rpc.Help',
+      violations: [daily], links: [{ description: credit.error.message, url: 'https://ai.google.dev/limits#RPD' }] }] })],
+    ['Conditional credits', legacy([], { message: 'If your prepayment credits are depleted, top up.' })],
+    ['Negated credits', legacy([], { message: 'Your prepayment credits are not depleted.' })],
+    ['Quoted credits', legacy([], { message: 'Documentation says "Your prepayment credits are depleted."' })],
+    ['Question credits', legacy([], { message: 'Your prepayment credits are depleted? Consult billing.' })],
+    ['Credit metadata', legacy([], { metadata: { note: credit.error.message } })],
+    ['Missing status', { error: { code: 429, message: credit.error.message } }],
+    ['Wrong legacy code', { error: { code: 403, status: 'RESOURCE_EXHAUSTED', message: credit.error.message } }],
+    ['Missing message', { error: { code: 'quota_exceeded' } }],
+    ['Array error', { error: ['quota_exceeded'] }], ['Null error', { error: null }],
+    ['Invalid JSON', '{'], ['Non-JSON quota text', 'RPD requests per day exhausted']
   ];
-  const context = loadCataloger({
-    UrlFetchApp: {
-      fetch: (url) => {
-        requests.push(url);
+  const response = (body, status = 429) => ({ getResponseCode: () => status,
+    getContentText: () => typeof body === 'string' ? body : JSON.stringify(body) });
+  const success = backend => backend === 'gemini_api' ? mockedInteractionsResponse() : response({
+    candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }]
+  }, 200);
+  const fixture = (responses, optIn = true, backend = 'gemini_api') => {
+    const properties = { GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-3.7-flash',
+      GEMINI_BACKEND: backend, GEMINI_AUTO_VERTEX_FALLBACK: String(optIn),
+      GOOGLE_CLOUD_PROJECT_ID: 'test-project' };
+    const requests = [], waits = [], writes = [], events = [];
+    const context = loadCataloger({ console: { ...console, warn: () => {} },
+      PropertiesService: { getScriptProperties: () => ({
+        getProperty: key => properties[key] || '',
+        setProperty: (key, value) => { writes.push(key); properties[key] = value; }
+      }) },
+      UrlFetchApp: { fetch: (url, options) => {
+        requests.push({ url, payload: JSON.parse(options.payload) });
+        assert.ok(responses.length, 'No unexpected provider requests');
         return responses.shift();
-      }
-    }
-  });
-  context.getGeminiModel_ = () => 'gemini-2.5-flash';
-  context.getVertexAiLocation_ = () => 'global';
-  context.getScriptProperty_ = () => 'cataloger-project';
-  context.buildExtractionPrompt_ = () => 'prompt';
-  context.logCatalogEvent_ = () => {};
-  context.logGeminiUsage_ = () => {};
-
-  context.callGeminiForPdfWithBackend_(
-    { getBytes: () => [1, 2, 3] },
-    {},
-    'policy',
-    { getId: () => 'file-id' },
-    'vertex_ai',
-    'gemini-api-daily-quota-exhausted'
-  );
-
-  assert.equal(requests.length, 2);
-  assert.equal(
-    requests.every((url) => url.includes('aiplatform.googleapis.com')),
-    true
-  );
+      } }
+    });
+    context.Utilities.sleep = ms => waits.push(ms);
+    context.buildExtractionPrompt_ = () => 'test-prompt';
+    context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+    const call = () => context.callGeminiForPdf_({ getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' });
+    return { context, properties, requests, waits, writes, events, call };
+  };
+  for (const [label, body] of negative) {
+    const f = fixture([response(body), success('gemini_api')]);
+    assert.equal(f.context.getGeminiVertexFallbackReason_(response(body)), '', label);
+    assert.equal(f.call(), '{}', label);
+    assert.equal(f.requests.length, 2, label);
+    assert.ok(f.requests.every(request => request.url.includes('generativelanguage.googleapis.com')), label);
+    assert.deepEqual(f.waits, [vm.runInContext('CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS', f.context)], label);
+    assert.equal(f.writes.length, 0, label);
+    assert.ok(!f.events.some(event => event.event === 'gemini-vertex-fallback-activated'), label);
+    const attempts = vm.runInContext('CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS', f.context);
+    const exhausted = fixture(Array.from({ length: attempts }, () => response(body)));
+    assert.throws(exhausted.call, /Gemini Developer API HTTP 429/, label);
+    assert.equal(exhausted.requests.length, attempts, label);
+    assert.deepEqual(exhausted.waits, Array.from({ length: attempts - 1 }, (_, index) =>
+      vm.runInContext('CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS', f.context) * 2 ** index), label);
+    assert.equal(exhausted.writes.length, 0, label);
+  }
+  for (const [label, body, reason] of positive) {
+    const f = fixture([response(body), success('vertex_ai'), success('vertex_ai'), success('gemini_api')]);
+    assert.equal(f.context.getGeminiVertexFallbackReason_(response(body)), 'gemini-api-' + reason, label);
+    for (const code of [400, 403, 500]) assert.equal(f.context.getGeminiVertexFallbackReason_(response(body, code)), '', label);
+    assert.equal(f.call(), '{}', label);
+    assert.equal(f.requests.length, 2, label);
+    assert.match(f.requests[0].url, /generativelanguage\.googleapis\.com/);
+    assert.match(f.requests[1].url, /aiplatform\.googleapis\.com/);
+    assert.deepEqual(f.writes, ['GEMINI_VERTEX_FALLBACK_UNTIL'], label);
+    assert.equal(f.waits.length, 0, label);
+    assert.equal(f.events.find(event => event.event === 'gemini-vertex-fallback-activated').details.reason,
+      'gemini-api-' + reason, label);
+    assert.equal(f.call(), '{}');
+    assert.match(f.requests[2].url, /aiplatform\.googleapis\.com/);
+    f.properties.GEMINI_VERTEX_FALLBACK_UNTIL = String(Date.now() - 1);
+    assert.equal(f.call(), '{}');
+    assert.match(f.requests[3].url, /generativelanguage\.googleapis\.com/);
+    assert.equal(f.properties.GEMINI_MODEL, 'gemini-3.7-flash');
+    assert.equal(f.requests[3].payload.model, 'gemini-3.7-flash');
+    assert.equal(f.writes.length, 1);
+    const disabled = fixture([response(body)], false);
+    assert.throws(disabled.call, reason === 'daily-quota-exhausted' ? /daily request quota/ : /prepayment credits/);
+    assert.equal(disabled.requests.length, 1);
+    assert.equal(disabled.waits.length, 0);
+    assert.equal(disabled.writes.length, 0);
+    const vertex = fixture([response(body), success('vertex_ai')], true, 'vertex_ai');
+    assert.equal(vertex.call(), '{}');
+    assert.ok(vertex.requests.every(request => request.url.includes('aiplatform.googleapis.com')));
+    assert.equal(vertex.waits.length, 1);
+    assert.equal(vertex.writes.length, 0);
+    const attempts = vm.runInContext('CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS', vertex.context);
+    const vertexFailure = fixture(Array.from({ length: attempts }, () => response(body)), true, 'vertex_ai');
+    assert.throws(vertexFailure.call, /Vertex AI HTTP 429/);
+    assert.equal(vertexFailure.requests.length, attempts);
+    assert.equal(vertexFailure.waits.length, attempts - 1);
+    assert.equal(vertexFailure.writes.length, 0);
+  }
 }
 
 function testStructuredFileLogsContainOnlyOpaqueId() {
@@ -8782,8 +8814,7 @@ testFailedFirstImportRestoresServiceIdentityControls();
 testPreExtractionErrorReportKeepsDataUnavailable();
 testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testDestinationFolderCreationCheckpointsEachCreatedPath();
-testGenericRateLimitStaysOnDeveloperApi();
-testVertexRateLimitRetriesWithoutReclassifyingProviderQuota();
+testTerminalQuotaClassificationAndPaidRouting();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();
 testDashboardRefreshWarningIsReported();

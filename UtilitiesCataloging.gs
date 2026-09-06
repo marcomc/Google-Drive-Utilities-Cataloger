@@ -1704,13 +1704,45 @@ function getGeminiVertexFallbackReason_(response) {
   if (response.getResponseCode() !== 429) {
     return '';
   }
-  const responseText = response.getContentText();
-  if (/GenerateRequestsPerDay|generate_content_free_tier_requests|requests?\s+per\s+day|\bRPD\b/i
-    .test(responseText)) {
+  let error;
+  try {
+    const body = JSON.parse(response.getContentText());
+    error = body && body.error;
+  } catch (parseError) {
+    return '';
+  }
+  if (!error || typeof error !== 'object' || Array.isArray(error) ||
+    typeof error.message !== 'string') {
+    return '';
+  }
+  // Interactions documents this code as daily exhaustion. Its other string
+  // codes (including short-window throttling) cannot be overridden by prose.
+  // https://ai.google.dev/gemini-api/docs/api-errors
+  if (error.code === 'quota_exceeded') {
     return 'gemini-api-daily-quota-exhausted';
   }
-  if (/prepayment credits?\s+(?:are\s+)?(?:depleted|exhausted)|(?:prepay(?:ment)?\s+)?(?:credits?|credit balance).{0,40}(?:depleted|exhausted|empty)/i
-    .test(responseText)) {
+  if (error.code !== 429 || error.status !== 'RESOURCE_EXHAUSTED') {
+    return '';
+  }
+  const dailyViolation = Array.isArray(error.details) && error.details.some(function (detail) {
+    return detail && detail['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure' &&
+      Array.isArray(detail.violations) && detail.violations.some(function (violation) {
+        return violation &&
+          typeof violation.quotaMetric === 'string' && typeof violation.quotaId === 'string' &&
+          /^generativelanguage\.googleapis\.com\/[a-z][a-z0-9_]*$/
+            .test(violation.quotaMetric) &&
+          /^GenerateRequestsPerDayPerProjectPerModel(?:-(?:FreeTier|PaidTier))?$/
+            .test(violation.quotaId);
+      });
+  });
+  // The requests metric is shared by minute/day limits. Only the violated
+  // quota ID establishes its period; Help links and RetryInfo do not.
+  if (dailyViolation) {
+    return 'gemini-api-daily-quota-exhausted';
+  }
+  // Preserve the observed legacy billing response's terminal first sentence.
+  // Conditional statements and Help metadata cannot authorize paid routing.
+  if (/^Your prepayment credits are depleted\.(?:\s|$)/.test(error.message)) {
     return 'gemini-api-prepayment-credits-depleted';
   }
   return '';

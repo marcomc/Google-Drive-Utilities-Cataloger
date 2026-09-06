@@ -35,6 +35,11 @@ Gemini API prepayment credits triggers one Vertex retry and a one-hour
 temporary Vertex route. Other transient network, `408`, generic `429`, and
 selected `5xx` failures receive one bounded retry on the current backend;
 short-lived rate limits do not cause Vertex usage.
+The Interactions API's `quota_exceeded` code identifies daily exhaustion;
+`rate_limit_exceeded` and `too_many_requests` keep the transient retry path.
+Legacy responses require a structured daily-quota violation or the explicit
+prepayment-depletion message. Quota names, shared metrics and documentation
+links alone never activate paid fallback.
 
 ## Script Properties
 
