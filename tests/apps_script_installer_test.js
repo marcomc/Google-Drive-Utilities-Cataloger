@@ -959,6 +959,90 @@ function createMutableInstallerChartFixture() {
   return { chart, state };
 }
 
+function testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas() {
+  const context = loadInstaller(() => {
+    throw new Error('network must not run');
+  });
+  const cells = [
+    ['Issue date', 'Supplier', 'Reference year', 'Reference month'],
+    ['2026-08-10', 'OENERGY', 2026, 7],
+    ['2026-07-08', 'OENERGY', '2026', '06'],
+    ['2026-06-09', 'OENERGY', 2026, 5]
+  ];
+  const formulas = [
+    ['', '', '', ''],
+    ['', '', '', ''],
+    ['', '', '', ''],
+    ['', '', '=YEAR(A4)', '']
+  ];
+  const formats = [
+    ['@', '@', '@', '@'],
+    ['@', '@', '0', '0'],
+    ['@', '@', '@', '@'],
+    ['@', '@', '0', '@']
+  ];
+  const writes = [];
+  const sheet = {
+    getName: () => 'Gas',
+    getLastRow: () => cells.length,
+    getRange: (row, column, rows = 1, columns = 1) => {
+      if (rows === 1 && columns === 4) {
+        return {
+          getValues: () => [cells[row - 1].slice(0, 4)],
+          getFormulas: () => [formulas[row - 1].slice(0, 4)]
+        };
+      }
+      return {
+        getNumberFormat: () => formats[row - 1][column - 1]
+      };
+    }
+  };
+  const layout = {
+    headerRow: 1,
+    headers: cells[0],
+    lookup: {
+      'issue date': 1,
+      supplier: 2,
+      'reference year': 3,
+      'reference month': 4
+    }
+  };
+  context.CONFIG = { PROPERTY_KEYS: {
+    SPREADSHEET_ID: 'SPREADSHEET_ID'
+  } };
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.getAutomationConfig_ = () => ({
+    canonical_supplies: ['Gas', 'Electricity'],
+    sheet_by_supply: { Gas: 'Gas', Electricity: 'Gas' }
+  });
+  context.SpreadsheetApp = {
+    openById: () => ({ getSheetByName: () => sheet })
+  };
+  context.getSheetLayout_ = () => layout;
+  context.getHeaderAliases_ = (key) => ({
+    issueDate: ['Issue date'], supplier: ['Supplier'],
+    year: ['Reference year'], month: ['Reference month']
+  })[key] || [];
+  context.findHeaderIndex_ = (lookup, aliases) => aliases.reduce(
+    (column, alias) => column || lookup[String(alias).toLowerCase()] || 0, 0
+  );
+  context.setTextValueForHeaders_ = (_sheet, row, _layout, _formulas,
+    aliases, value) => writes.push({ row, header: aliases[0], value });
+
+  const result = context.migrateCatalogerReferencePeriodText();
+
+  assert.equal(result.migrated, true);
+  assert.equal(result.sheets.length, 1);
+  assert.equal(result.sheets[0].changedRows, 2);
+  assert.deepEqual(writes, [
+    { row: 2, header: 'Reference year', value: '2026' },
+    { row: 2, header: 'Reference month', value: '07' },
+    { row: 4, header: 'Reference month', value: '05' }
+  ]);
+}
+
 function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   const context = loadInstaller(() => {
     throw new Error('network must not run');
@@ -1970,6 +2054,41 @@ function testFallbackValidatesBothBackends() {
   );
 }
 
+function testConfiguredGeminiAccessValidationIsRedacted() {
+  let validatedOptions;
+  const context = loadInstaller(() => {
+    throw new Error('network must be delegated to the validation helper');
+  });
+  context.CONFIG = {
+    APP_VERSION: '0.6.0',
+    PROPERTY_KEYS: {
+      GOOGLE_CLOUD_PROJECT_ID: 'GOOGLE_CLOUD_PROJECT_ID',
+      GEMINI_API_KEY: 'GEMINI_API_KEY'
+    }
+  };
+  context.getGeminiBackend_ = () => 'gemini_api';
+  context.isAutomaticVertexFallbackEnabled_ = () => true;
+  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getVertexAiLocation_ = () => 'global';
+  context.getScriptProperty_ = (key) => key === 'GEMINI_API_KEY' ?
+    'developer-secret' : 'cataloger-project';
+  context.validateInstallerGeminiAccess_ = (options) => {
+    validatedOptions = options;
+  };
+
+  const result = context.validateConfiguredGeminiAccess();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    applicationVersion: '0.6.0',
+    geminiBackend: 'gemini_api',
+    geminiModel: 'gemini-flash-latest',
+    geminiApiValidated: true,
+    vertexAiValidated: true
+  });
+  assert.equal(validatedOptions.geminiApiKey, 'developer-secret');
+  assert.equal(JSON.stringify(result).includes('developer-secret'), false);
+}
+
 function testCredentialFailureIsRedacted() {
   const context = loadInstaller(() => response(403, {
     error: {
@@ -2232,6 +2351,7 @@ testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testSpreadsheetValidationUsesDetectedHeaderRow();
+testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas();
 testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
 testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
@@ -2252,6 +2372,7 @@ testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
+testConfiguredGeminiAccessValidationIsRedacted();
 testCredentialFailureIsRedacted();
 testTimeZoneReconfigurationPreservesCredentialsAndTriggers();
 testTimeZoneReconfigurationRollsBackRemoteState();

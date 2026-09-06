@@ -103,6 +103,7 @@ function testCommittedJsonAndRuntimeConfig() {
   );
   assert.equal(manifest.runtimeVersion, 'V8');
   assert.match(installerSource, /getSheetHeadersBySupply_\(\)/);
+  assert.match(installerSource, /function validateConfiguredGeminiAccess\(\)/);
   assert.match(installerSource, /initializeElectricityDashboard_\(spreadsheet, automationConfig\)/);
   assert.match(utilitiesSource,
     /refreshElectricityDashboardAfterInvoiceImport_\(spreadsheet, automationConfig,/);
@@ -130,6 +131,10 @@ function testCommittedJsonAndRuntimeConfig() {
 
   const context = loadConfigContext();
   const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
+  assert.equal(
+    vm.runInContext('CONFIG.DEFAULT_MODEL', context),
+    'gemini-flash-latest'
+  );
   assert.match(applicationVersion, /^\d+\.\d+\.\d+$/);
   const latestReleaseMatch = changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m);
   assert.ok(latestReleaseMatch, 'CHANGELOG.md must start with a release heading.');

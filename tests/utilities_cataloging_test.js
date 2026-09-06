@@ -121,6 +121,40 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
   );
 }
 
+function testServiceIdentityAcceptsConfiguredProvinceQualifier() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'FORTUNA LAURA',
+    address_evidence: 'Corso Camillo Benso Conte Di Cavour 125 - 47521 Cesena (FC)',
+    service_street: 'Corso Camillo Benso Conte Di Cavour',
+    service_civic_number: '125',
+    service_city: 'Cesena',
+    service_postal_code: '47521'
+  }, {
+    account_holder: 'FORTUNA LAURA',
+    service_address: 'CORSO CAMILLO BENSO CONTE DI CAVOUR 125 47521 CESENA FC'
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+}
+
+function testServiceIdentityIgnoresHonorificPrefix() {
+  const context = loadCataloger();
+  const result = context.validateServiceIdentity_({
+    account_holder: 'Sig.ra FORTUNA LAURA',
+    address_evidence: 'Corso Camillo Benso Cavour 125 - FC 47521 Cesena',
+    service_street: 'Corso Camillo Benso Cavour',
+    service_civic_number: '125',
+    service_city: 'Cesena',
+    service_postal_code: '47521'
+  }, {
+    account_holder: 'FORTUNA LAURA',
+    service_address: 'CORSO CAMILLO BENSO CONTE DI CAVOUR 125 47521 CESENA FC'
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
+}
+
 function testFirstInvoiceCanEstablishMissingServiceIdentity() {
   const context = loadCataloger();
   const cells = [
@@ -792,7 +826,7 @@ function testExtractionSchemaAndCalendarValidation() {
     locale: 'it',
     canonical_suppliers: ['SUPPLIER', 'ILIAD', 'Energygas Italia'],
     supplier_aliases: {},
-    canonical_supplies: ['Water', 'Internet'],
+    canonical_supplies: ['Water', 'Internet', 'Gas', 'Luce', 'Electricity'],
     supply_aliases: {},
     address_rules: [],
     address_missing_type: 'import',
@@ -823,6 +857,13 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(typeof digitOnlyIdentifiers.identifier, 'string');
   assert.equal(typeof digitOnlyIdentifiers.contract_number, 'string');
   assert.equal(typeof digitOnlyIdentifiers.customer_code, 'string');
+
+  const energygasAlias = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ENERGYGAS',
+    supply_type: 'Electricity'
+  });
+  assert.equal(energygasAlias.supplier, 'Energygas Italia');
 
   const iliadDefault = context.normalizeExtraction_({
     ...raw,
@@ -892,6 +933,164 @@ function testExtractionSchemaAndCalendarValidation() {
   context.applySupplierFieldDefaults_(iliadUnreadableCharge, ["Spese d'incasso"]);
   assert.equal(iliadUnreadableCharge.sheet_values[0].value, null);
   assert.equal(context.validateExtraction_(iliadUnreadableCharge).valid, false);
+
+  const oenergyAbsentRecalculation = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'OENERGY',
+    supply_type: 'Gas',
+    problems: ['Ricalcoli non presente nel documento.'],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(oenergyAbsentRecalculation, [
+    'Ricalcoli'
+  ]);
+  assert.equal(JSON.stringify(oenergyAbsentRecalculation.sheet_values), JSON.stringify([{
+    header: 'Ricalcoli',
+    value: 0
+  }]));
+  assert.deepEqual(oenergyAbsentRecalculation.problems, []);
+
+  const oenergyVerboseAbsentRecalculation = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'OENERGY',
+    supply_type: 'Gas',
+    problems: [
+      'Header Ricalcoli non trovato nel documento; applicato zero di default come assenza esplicita.'
+    ],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(oenergyVerboseAbsentRecalculation, [
+    'Ricalcoli'
+  ]);
+  assert.equal(JSON.stringify(oenergyVerboseAbsentRecalculation.sheet_values),
+    JSON.stringify([{ header: 'Ricalcoli', value: 0 }]));
+  assert.deepEqual(oenergyVerboseAbsentRecalculation.problems, []);
+
+  const energygasAbsentCharges = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'ENERGYGAS',
+    supply_type: 'Luce',
+    problems: [
+      'Trasporto e gestione contatore non è presente nel documento.',
+      'Oneri di sistema non presente nel documento.',
+      'Ricalcoli non presente nel documento.'
+    ],
+    sheet_values: []
+  });
+  context.applySupplierFieldDefaults_(energygasAbsentCharges, [
+    'Trasporto e gestione contatore',
+    'Oneri di sistema',
+    'Ricalcoli'
+  ]);
+  assert.equal(JSON.stringify(energygasAbsentCharges.sheet_values), JSON.stringify([
+    { header: 'Trasporto e gestione contatore', value: 0 },
+    { header: 'Oneri di sistema', value: 0 },
+    { header: 'Ricalcoli', value: 0 }
+  ]));
+  assert.deepEqual(energygasAbsentCharges.problems, []);
+
+  const energygasBandMappingExplanation = context.normalizeExtraction_({
+    ...raw,
+    supplier: 'Energygas Italia',
+    supply_type: 'Luce',
+    cost_consumption: 51.68,
+    cost_non_consumption: 53.81,
+    vat: 9.65,
+    total: 115.14,
+    sheet_values: [
+      { header: 'Costo unitario', value: 0.135338 },
+      { header: 'Costo unitario F1', value: 0.135338 },
+      { header: 'Costo unitario F2', value: 0.135338 },
+      { header: 'Costo unitario F3', value: 0.135338 }
+    ]
+  });
+  assert.equal(context.isInformationalElectricityBandMappingProblem_(
+    'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.',
+    energygasBandMappingExplanation
+  ), true);
+
+  const energygasDetailedReconciliation = {
+    ...energygasBandMappingExplanation,
+    sheet_values: [
+      { header: 'Altri costi materia energia', value: '10,00' },
+      { header: 'Trasporto e gestione contatore', value: 0 },
+      { header: 'Oneri di sistema', value: 0 },
+      { header: 'Accise', value: '8,67' },
+      { header: 'Canone TV', value: '9,00' },
+      { header: 'Ricalcoli', value: 0 },
+      { header: 'Rete e oneri non scorporabili', value: '26,14' }
+    ]
+  };
+  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(
+    energygasDetailedReconciliation).valid, true);
+  assert.equal(context.validateEnergygasLuceDetailedReconciliation_({
+    ...energygasDetailedReconciliation,
+    sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
+      entry.header === 'Rete e oneri non scorporabili' ?
+        { ...entry, value: '36,14' } : entry)
+  }).valid, false);
+  assert.equal(context.parseSheetMoneyValue_('1.234,56 €'), 1234.56);
+  const repairCandidate = { cost_consumption: 50, vat: 9, total: 110 };
+  context.preserveUnimplicatedRepairFields_(repairCandidate, {
+    previousExtraction: { cost_consumption: 51.68, vat: 9.65, total: 115.14 },
+    feedback: { issues: [{ fields: ['Rete e oneri non scorporabili'] }] }
+  });
+  assert.deepEqual(repairCandidate, {
+    cost_consumption: 51.68, vat: 9.65, total: 115.14
+  });
+  const oenergyGasDetailedReconciliation = {
+    ...validInvoice(),
+    supplier: 'OENERGY',
+    supply_type: 'Gas',
+    cost_consumption: 2.48,
+    cost_non_consumption: 15.62,
+    vat: 3.39,
+    total: 21.49,
+    sheet_values: [
+      { header: 'Totale costi consumo', value: '2,48' },
+      { header: 'Quota fissa', value: '9,00' },
+      { header: 'Trasporto e oneri', value: '5,59' },
+      { header: 'Accise', value: '1,03' },
+      { header: 'Ricalcoli', value: 0 }
+    ]
+  };
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(
+    oenergyGasDetailedReconciliation).valid, true);
+  assert.equal(context.validateOenergyGasDetailedReconciliation_({
+    ...oenergyGasDetailedReconciliation,
+    sheet_values: oenergyGasDetailedReconciliation.sheet_values.map((entry) =>
+      entry.header === 'Accise' ? { ...entry, value: '0,88' } : entry)
+  }).valid, false);
+  const gasWithDetailMismatchAndFrequencyProblem = {
+    ...oenergyGasDetailedReconciliation,
+    frequency: '',
+    problems: ['Frequenza non trovata in fattura.'],
+    cost_non_consumption: 14.59,
+    vat: 4.42,
+    sheet_values: oenergyGasDetailedReconciliation.sheet_values.map((entry) =>
+      entry.header === 'Trasporto e oneri' ? { ...entry, value: '4,19' } : entry)
+  };
+  const gasDetailValidation = context.validateExtractedUtilityDataForImport_(
+    gasWithDetailMismatchAndFrequencyProblem
+  );
+  assert.equal(gasDetailValidation.valid, false);
+  assert.equal(gasDetailValidation.code,
+    'oenergy_gas_detail_reconciliation_mismatch');
+  assert.throws(
+    () => context.parseVerifiedExtraction_('invoice-id', '{}'),
+    /operator_verified=true/
+  );
+  assert.throws(
+    () => context.parseVerifiedExtraction_('invoice-id', JSON.stringify({
+      operator_verified: true,
+      original_file_id: 'other-id'
+    })),
+    /does not match the requested file/
+  );
+  assert.equal(context.parseVerifiedExtraction_('invoice-id', JSON.stringify({
+    operator_verified: true,
+    original_file_id: 'invoice-id'
+  })).operator_verified, true);
 
   const iliadWithoutConfiguredChargeColumn = context.normalizeExtraction_({
     ...raw,
@@ -1006,6 +1205,13 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_(onlyCustomerCode).valid, true);
   assert.equal(context.validateExtraction_({
     ...onlyCustomerCode,
+    supplier: 'Energygas Italia',
+    problems: [
+      'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL317598 è codice cliente).'
+    ]
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...onlyCustomerCode,
     problems: ['Numero contratto non presente nel documento.']
   }).valid, true);
 
@@ -1082,6 +1288,34 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.isMissingFrequencyProblem_(
     'La frequenza di fatturazione non è stampata esplicitamente sul documento.'
   ), true);
+  assert.equal(context.isMissingFrequencyProblem_(
+    'Il documento non riporta una frequenza esplicita. La frequenza è stata dedotta a "mensile" dal periodo fatturato completo.'
+  ), true);
+  assert.equal(context.isMissingFrequencyProblem_(
+    'La frequenza di fatturazione è dedotta dal periodo fatturato, non è stampata esplicitamente.'
+  ), true);
+  assert.equal(context.isMissingFrequencyProblem_(
+    'Frequenza di fatturazione non trovata o non esplicita nel documento, dedotta come mensile dal periodo di riferimento.'
+  ), true);
+  const inferredFrequencyWithProvenanceDiagnostic = {
+    ...raw,
+    frequency: '',
+    frequency_source_evidence: null,
+    problems: ['Billing frequency value is unsupported or lacks printed provenance.']
+  };
+  Object.defineProperty(inferredFrequencyWithProvenanceDiagnostic,
+    'frequency_inferred_', { value: true, configurable: true });
+  Object.defineProperty(inferredFrequencyWithProvenanceDiagnostic,
+    'frequency_provenance_missing_', { value: true, configurable: true });
+  inferredFrequencyWithProvenanceDiagnostic.frequency = 'monthly';
+  assert.equal(context.isInformationalMissingFrequencyProvenanceProblem_(
+    'Billing frequency value is unsupported or lacks printed provenance.',
+    inferredFrequencyWithProvenanceDiagnostic
+  ), true);
+  inferredFrequencyWithProvenanceDiagnostic.frequency = '';
+  context.inferInvoiceFrequency_(inferredFrequencyWithProvenanceDiagnostic);
+  assert.equal(inferredFrequencyWithProvenanceDiagnostic.frequency, 'monthly');
+  assert.deepEqual(inferredFrequencyWithProvenanceDiagnostic.problems, []);
   assert.equal(context.validateExtraction_({
     ...missingFrequency,
     problems: [
@@ -2632,7 +2866,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-3.7-flash';
+  context.getGeminiModel_ = () => 'gemini-flash-latest';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -2712,6 +2946,66 @@ function testDeveloperApiKeyUsesHeader() {
   );
 }
 
+function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
+  const requests = [];
+  const context = loadCataloger({
+    UrlFetchApp: {
+      fetch: (url, options) => {
+        requests.push({ url, options });
+        return {
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            candidates: [{
+              finishReason: 'STOP',
+              content: { parts: [{ text: '{}' }] }
+            }]
+          })
+        };
+      }
+    }
+  });
+  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getScriptProperty_ = (key) => key === 'GOOGLE_CLOUD_PROJECT_ID' ?
+    'vertex-project' : '';
+  context.buildExtractionPrompt_ = () => 'prompt';
+  context.logCatalogEvent_ = () => {};
+  context.logGeminiUsage_ = () => {};
+  const file = { getId: () => 'file-id' };
+  const blob = { getBytes: () => [1, 2, 3] };
+
+  context.callGeminiForPdfWithBackend_(
+    blob,
+    [],
+    'policy',
+    file,
+    'vertex_ai',
+    ''
+  );
+
+  const payload = JSON.parse(requests[0].options.payload);
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer oauth-token');
+  assert.equal(payload.generationConfig.thinkingConfig.thinkingBudget, 0);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      payload.generationConfig.thinkingConfig, 'thinkingLevel'
+    ),
+    false
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(payload.generationConfig, 'responseJsonSchema'),
+    false
+  );
+  assert.equal(payload.generationConfig.responseSchema.type, 'OBJECT');
+  assert.equal(payload.generationConfig.responseSchema.properties.supplier.type, 'STRING');
+  assert.equal(payload.generationConfig.responseSchema.properties.supplier.nullable, true);
+  assert.deepEqual(
+    payload.generationConfig.responseSchema.propertyOrdering,
+    Object.keys(payload.generationConfig.responseSchema.properties)
+  );
+  assert.equal(payload.generationConfig.maxOutputTokens,
+    vm.runInContext('CONFIG.GEMINI_MAX_OUTPUT_TOKENS', context));
+}
+
 function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   const properties = {};
   const context = loadCataloger({
@@ -2726,21 +3020,72 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   });
   context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
 
-  assert.equal(context.getGeminiModel_(), 'gemini-3.7-flash');
+  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
   properties.GEMINI_MODEL = 'gemini-3.6-flash';
-  assert.equal(context.getGeminiModel_(), 'gemini-3.7-flash');
+  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
+  properties.GEMINI_MODEL = 'gemini-3.7-flash';
+  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
 
   const result = context.configureGeminiModel('gemini-3.6-flash');
 
-  assert.equal(properties.GEMINI_MODEL, 'gemini-3.7-flash');
-  assert.equal(result.geminiModel, 'gemini-3.7-flash');
+  assert.equal(properties.GEMINI_MODEL, 'gemini-flash-latest');
+  assert.equal(result.geminiModel, 'gemini-flash-latest');
   assert.throws(
     () => context.configureGeminiModel('models/gemini-3.7-flash'),
     /must be a Gemini model identifier/
   );
+
+  const backendResult = context.configureGeminiBackend('vertex_ai');
+  assert.equal(properties.GEMINI_BACKEND, 'vertex_ai');
+  assert.equal(backendResult.geminiModel, 'gemini-flash-latest');
+  assert.throws(
+    () => context.configureGeminiBackend('paid_backend'),
+    /must be gemini_api or vertex_ai/
+  );
 }
 
-function testVertexCostEstimateDoesNotReusePricingForGemini37() {
+function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
+  const properties = {};
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        setProperty: (key, value) => { properties[key] = value; }
+      })
+    }
+  });
+  const config = {
+    canonical_supplies: ['Electricity'],
+    canonical_suppliers: ['ENERGYGAS', 'OENERGY'],
+    supplier_aliases: { 'ENERGYGAS ITALIA SRL': 'ENERGYGAS' },
+    destination_templates: {
+      'Electricity|ENERGYGAS': 'Energia Elettrica/ENERGYGAS/{year}',
+      'Gas|OENERGY': 'Gas/OENERGY/{year}'
+    },
+    frequency_overrides: [{
+      supplier: 'ENERGYGAS', supply_type: 'Electricity', frequency: 'monthly'
+    }]
+  };
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
+  context.getAutomationConfig_ = () => config;
+  context.validateAutomationConfig_ = (value) => {
+    assert.ok(value.canonical_suppliers.includes('Energygas Italia'));
+  };
+
+  const result = context.migrateCatalogerEnergygasCanonicalSpelling();
+
+  assert.equal(result.updated, true);
+  assert.deepEqual(config.canonical_suppliers, ['Energygas Italia', 'OENERGY']);
+  assert.equal(config.supplier_aliases['ENERGYGAS ITALIA SRL'],
+    'Energygas Italia');
+  assert.equal(config.destination_templates[
+    'Electricity|Energygas Italia'
+  ], 'Energia Elettrica/ENERGYGAS/{year}');
+  assert.equal(config.frequency_overrides[0].supplier, 'Energygas Italia');
+  assert.ok(properties.AUTOMATION_CONFIG_JSON);
+}
+
+function testVertexCostEstimateDoesNotReusePricingForGeminiLatest() {
   const context = loadCataloger();
   const usage = {
     promptTokenCount: 1000000,
@@ -2749,7 +3094,7 @@ function testVertexCostEstimateDoesNotReusePricingForGemini37() {
   };
 
   assert.equal(
-    context.estimateGeminiUsageCostUsd_('vertex_ai', 'gemini-3.7-flash', usage),
+    context.estimateGeminiUsageCostUsd_('vertex_ai', 'gemini-flash-latest', usage),
     null
   );
   assert.equal(
@@ -2765,10 +3110,10 @@ function testVertexCostEstimateDoesNotReusePricingForGemini37() {
   );
 }
 
-function testGemini37UsageTelemetryOmitsUnpricedEstimate() {
+function testGeminiLatestUsageTelemetryOmitsUnpricedEstimate() {
   const events = [];
   const context = loadCataloger();
-  context.getGeminiModel_ = () => 'gemini-3.7-flash';
+  context.getGeminiModel_ = () => 'gemini-flash-latest';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
   context.logGeminiUsage_({
     promptTokenCount: 1,
@@ -2779,7 +3124,7 @@ function testGemini37UsageTelemetryOmitsUnpricedEstimate() {
 
   const payload = events[0].details;
   assert.equal(events[0].event, 'gemini-generation-usage');
-  assert.equal(payload.model, 'gemini-3.7-flash');
+  assert.equal(payload.model, 'gemini-flash-latest');
   assert.equal(payload.promptTokenCount, 1);
   assert.equal(Object.prototype.hasOwnProperty.call(payload, 'estimatedCostUsd'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(payload, 'pricingSource'), false);
@@ -3162,7 +3507,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.5.0',
+      applicationVersion: '0.6.0',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -3173,7 +3518,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.5.0',
+      applicationVersion: '0.6.0',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -3583,6 +3928,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /one of contract_number or customer_code is sufficient/);
   assert.match(prompt, /Preserve every character and leading zero/);
   assert.match(prompt, /two-character text value in the exact format mm/);
+  assert.match(prompt, /reference year is also literal text/);
+  assert.match(prompt, /Do not uppercase the canonical supplier spelling/);
   assert.match(prompt, /measurements, and reference year\./);
   assert.doesNotMatch(prompt, /reference year\/month/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
@@ -3607,6 +3954,24 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /recurring Iliad Internet charges/);
   assert.match(prompt, /localized supplier field defaults/);
   assert.match(prompt, /numeric value 0/);
+  assert.match(prompt, /final payable total, that printed total is authoritative/);
+  assert.match(prompt, /never recalculate a different total/);
+  assert.match(prompt, /verify the arithmetic directly/);
+  assert.match(prompt, /must equal cost_non_consumption within rounding/);
+  assert.match(prompt, /For OENERGY Gas, verify Quota fissa/);
+  assert.match(prompt, /verify Totale costi consumo equals cost_consumption/);
+  assert.match(prompt, /Both printed amounts belong in Trasporto e oneri/);
+  assert.match(prompt, /sum every printed amount in the ACCISE e ADDIZIONALI section/);
+  assert.match(prompt, /selling portion in Costo unitario/);
+  assert.match(prompt, /repeat that common selling rate in Costo unitario F1\/F2\/F3/);
+  assert.match(prompt, /rate printed in the summary row/);
+  assert.match(prompt, /Do not use PREZZO FISSO, DISPACCIAMENTO/);
+  assert.match(prompt, /sum the printed network\/oneri summary amounts/);
+  assert.match(prompt, /do not map subordinate ASOS\/ARIM detail rows/);
+  assert.match(prompt, /Totale da pagare includes the printed Canone TV/);
+  assert.match(prompt, /Totale costi consumo and cost_consumption are the printed selling consumption amount only/);
+  assert.match(prompt, /Accise and Canone TV remain separate/);
+  assert.match(prompt, /never solve a mismatch by changing another field/);
   assert.match(prompt, /Infer each table role from its headings and units, not its title/);
   assert.match(prompt, /Energy-mix, offer, marketing, and explanatory tables are not required/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
@@ -4670,7 +5035,8 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
       return {
         setFormula: (value) => writes.push([row, column, 'formula', value]),
         setRichTextValue: (value) => writes.push([row, column, 'rich', value]),
-        setValue: (value) => writes.push([row, column, 'value', value])
+        setValue: (value) => writes.push([row, column, 'value', value]),
+        getNumberFormat: () => '€ #,##0.00'
       };
     }
   };
@@ -4681,11 +5047,11 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
     vat: 4.68,
     total: 25.97,
     sheet_values: [
-      { header: 'Total consumption costs', value: 25.99 },
-      { header: 'Collection charges', value: 0 },
-      { header: 'Discounts', value: -4 },
-      { header: 'Wi-Fi extender', value: 3.98 },
-      { header: 'VAT', value: 0 }
+      { header: 'Total consumption costs', value: '25.99' },
+      { header: 'Collection charges', value: '0.00' },
+      { header: 'Discounts', value: '-4.00' },
+      { header: 'Wi-Fi extender', value: '3.98' },
+      { header: 'VAT', value: '0.00' }
     ]
   };
 
@@ -4711,6 +5077,7 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
       }
       return {
         getValue: () => actualValues[column - 1],
+        getNumberFormat: () => '€ #,##0.00',
         getRichTextValue: () => null,
         getFormula: () => column === 8 ?
           '=HYPERLINK("https://drive.test/file";"invoice")' : formulas[column - 1],
@@ -4729,6 +5096,7 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
     identifier: ['Invoice number'],
     contractNumber: ['Contract number'],
     customerCode: ['Customer code'],
+    year: ['Reference year'],
     month: ['Reference month'],
     sourceFile: ['Source file']
   })[key] || [];
@@ -4736,21 +5104,22 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
   const layout = {
     headerRow: 1,
     headers: ['Invoice number', 'Contract number', 'Customer code',
-      'Reference month', 'Source file'],
+      'Reference year', 'Reference month', 'Source file'],
     lookup: {
       'invoice number': 1,
       'contract number': 2,
       'customer code': 3,
-      'reference month': 4,
-      'source file': 5
+      'reference year': 4,
+      'reference month': 5,
+      'source file': 6
     }
   };
   const sheet = {
     getLastRow: () => 3,
     getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
     getRange: (row, column, _rows, width) => {
-      if (column === 1 && width === 5) {
-        return { getFormulas: () => [['', '', '', '', '']] };
+      if (column === 1 && width === 6) {
+        return { getFormulas: () => [['', '', '', '', '', '']] };
       }
       return {
         setFormula: (value) => writes.push([row, column, 'formula', value]),
@@ -4764,9 +5133,11 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
     identifier: 'INV-01',
     contract_number: 'CON-01',
     customer_code: '00053009296',
+    reference_year: 2026,
     reference_month: '09',
     sheet_values: [
       { header: 'Customer code', value: 53009296 },
+      { header: 'Reference year', value: 2025 },
       { header: 'Reference month', value: 9 }
     ]
   };
@@ -4776,8 +5147,9 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
 
   assert.deepEqual(writes.filter((entry) => entry[2] === 'rich').map(
     (entry) => [entry[1], entry[3].text]
-  ).slice(-4), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'], [4, '09']]);
-  assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 4),
+  ).slice(-5), [[1, 'INV-01'], [2, 'CON-01'], [3, '00053009296'],
+    [4, '2026'], [5, '09']]);
+  assert.equal(writes.some((entry) => entry[2] === 'value' && entry[1] <= 5),
     false);
 }
 
@@ -6437,7 +6809,9 @@ testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
-testVertexCostEstimateDoesNotReusePricingForGemini37();
+testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences();
+testVertexCostEstimateDoesNotReusePricingForGeminiLatest();
+testGeminiLatestUsageTelemetryOmitsUnpricedEstimate();
 testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();

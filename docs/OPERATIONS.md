@@ -252,7 +252,13 @@ three logical extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
-headers, and business rules before any Drive or Sheet mutation.
+headers, and business rules before any Drive or Sheet mutation. Supplementary
+numeric values are written as numbers only when the destination cell has a
+numeric format; untrusted nonnumeric text remains literal rich text.
+Reference years and months are written as literal text. Run the idempotent
+owner-only `migrateCatalogerReferencePeriodText` function after this release
+to normalize existing imported rows; it skips formula-backed cells and does
+not change other columns.
 Post-write verification treats `6`, `06`, and the numeric value `6` as the same
 reference month. When a verification comparison fails, the recipient report
 includes the affected field and the expected and observed values (plus a money
@@ -266,8 +272,9 @@ applied to invoice, contract, or customer identifiers.
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
-| `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
+| `processSingleIntakeFile(fileId)` | Controlled single-file test. An owner may optionally pass a complete JSON extraction with `operator_verified=true` and the exact `original_file_id` for a manually reanalysed PDF. | May process that intake PDF; the optional verified path reuses the journaled import, rollback, and verification pipeline. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
+| `migrateCatalogerReferencePeriodText` | One-time or repeatable post-release maintenance. | Converts existing non-formula reference year/month cells to literal text without changing other fields. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
@@ -444,12 +451,23 @@ Vertex model has a price table encoded in `Config.gs`, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
-The default `gemini-3.7-flash` runtime uses explicit `medium` thinking and an
-8,192-token JSON response budget. The same model and generation settings are
-sent to the Gemini Developer API and the temporary Vertex AI fallback. Until a
-verified Vertex price is added to `Config.gs`, usage events for Gemini 3.7 and
-other unpriced models retain provider token counts but intentionally omit cost
-estimate fields; Cloud Billing remains authoritative.
+The default `gemini-flash-latest` Developer API runtime uses explicit `medium`
+thinking and an 8,192-token JSON response budget. Vertex AI uses the same alias
+and response budget with explicit `thinkingBudget: 0`, reserving the budget for
+the bounded JSON response even when the alias resolves to a thinking-capable
+Flash variant. Vertex also receives the shared extraction contract converted to
+its OpenAPI-style `responseSchema`; the
+Developer API receives the JSON Schema `responseJsonSchema` form. The alias may
+resolve to a newer Flash release without a source or Script Properties update.
+Until a verified Vertex price is added to `Config.gs`, usage events for the
+alias and other unpriced models retain provider token counts but intentionally
+omit cost-estimate fields; Cloud Billing remains authoritative.
+
+If the Developer API returns a transient outage such as HTTP 503 and imports
+must be recovered immediately, an owner may use `configureGeminiBackend` to
+select the configured Vertex AI backend, run the controlled retry, and restore
+`gemini_api`. Do not turn a status code alone into automatic paid-backend
+fallback.
 
 ```bash
 gcloud logging read \

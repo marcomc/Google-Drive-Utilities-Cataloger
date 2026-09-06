@@ -106,6 +106,8 @@ test_input_validation() {
 
   assert_success "accept a Gemini model identifier" \
     is_valid_gemini_model "gemini-2.5-flash"
+  assert_success "accept the Gemini latest Flash alias" \
+    is_valid_gemini_model "gemini-flash-latest"
   assert_failure "reject a Gemini model resource path" \
     is_valid_gemini_model "models/gemini-2.5-flash"
 

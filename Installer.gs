@@ -126,6 +126,102 @@ function migrateCatalogerServiceIdentityFields() {
 }
 
 /**
+ * Normalize imported reference years and months as literal text. This keeps
+ * chart category labels stable for existing rows and is safe to rerun.
+ */
+function migrateCatalogerReferencePeriodText() {
+  assertCatalogConfiguration_();
+  return withCatalogLifecycleLock_('reference-period-text-migration', function () {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const seenSheets = Object.create(null);
+    const migrated = [];
+    automationConfig.canonical_supplies.forEach(function (supply) {
+      const sheetName = automationConfig.sheet_by_supply[supply];
+      if (seenSheets[sheetName]) {
+        return;
+      }
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) {
+        throw new Error('Configured spreadsheet tab is missing: ' + sheetName);
+      }
+      const layout = getSheetLayout_(sheet);
+      const yearColumn = findHeaderIndex_(layout.lookup,
+        getHeaderAliases_('year'));
+      const monthColumn = findHeaderIndex_(layout.lookup,
+        getHeaderAliases_('month'));
+      const issueDateColumn = findHeaderIndex_(layout.lookup,
+        getHeaderAliases_('issueDate'));
+      const supplierColumn = findHeaderIndex_(layout.lookup,
+        getHeaderAliases_('supplier'));
+      if (!yearColumn || !monthColumn || !issueDateColumn || !supplierColumn) {
+        throw new Error('Reference period migration requires issue date, supplier, year, and month headers in ' + sheetName + '.');
+      }
+      const firstDataRow = layout.headerRow + 1;
+      const lastRow = sheet.getLastRow();
+      let changedRows = 0;
+      for (let row = firstDataRow; row <= lastRow; row += 1) {
+        const range = sheet.getRange(row, 1, 1, layout.headers.length);
+        const values = range.getValues()[0];
+        const formulas = range.getFormulas()[0];
+        const hasImportedRecord = Boolean(
+          values[issueDateColumn - 1] || values[supplierColumn - 1]
+        );
+        if (!hasImportedRecord) {
+          continue;
+        }
+        const formulaColumns = formulas.map(function (formula) {
+          return Boolean(formula);
+        });
+        let rowChanged = false;
+        [
+          { column: yearColumn, aliases: getHeaderAliases_('year'), width: 4 },
+          { column: monthColumn, aliases: getHeaderAliases_('month'), width: 2 }
+        ].forEach(function (field) {
+          const index = field.column - 1;
+          const normalized = normalizeReferencePeriodText_(values[index],
+            field.width);
+          if (!normalized || formulaColumns[index]) {
+            return;
+          }
+          const cell = sheet.getRange(row, field.column);
+          const currentFormat = typeof cell.getNumberFormat === 'function' ?
+            String(cell.getNumberFormat() || '') : '';
+          if (typeof values[index] === 'string' && values[index] === normalized &&
+            currentFormat === '@') {
+            return;
+          }
+          setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+            field.aliases, normalized);
+          rowChanged = true;
+        });
+        if (rowChanged) {
+          changedRows += 1;
+        }
+      }
+      migrated.push({
+        supply: supply,
+        sheet: sheetName,
+        changedRows: changedRows
+      });
+      seenSheets[sheetName] = true;
+    });
+    return { migrated: true, sheets: migrated };
+  });
+}
+
+function normalizeReferencePeriodText_(value, width) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return '';
+  }
+  return width === 2 && /^\d{1,2}$/.test(text) ? text.padStart(2, '0') : text;
+}
+
+/**
  * Reconfigure only the installed time zone without reading the deleted
  * installer handoff or changing triggers and event transport.
  */
@@ -405,6 +501,32 @@ function validateCatalogerInstallation() {
     geminiBackend: setup.geminiBackend,
     geminiApiKeyConfigured: setup.geminiApiKeyConfigured,
     pubSubConfigured: setup.pubSubConfigured
+  };
+}
+
+/**
+ * Validate the configured Gemini model against every enabled backend without
+ * exposing the stored API key or performing a document-generation request.
+ * This is owner-controlled operational validation for model migrations.
+ */
+function validateConfiguredGeminiAccess() {
+  const backend = getGeminiBackend_();
+  const autoVertexFallback = isAutomaticVertexFallbackEnabled_();
+  const model = getGeminiModel_();
+  validateInstallerGeminiAccess_({
+    projectId: getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID),
+    geminiBackend: backend,
+    geminiApiKey: getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY),
+    geminiModel: model,
+    autoVertexFallback: autoVertexFallback,
+    vertexLocation: getVertexAiLocation_()
+  });
+  return {
+    applicationVersion: CONFIG.APP_VERSION,
+    geminiBackend: backend,
+    geminiModel: model,
+    geminiApiValidated: backend === 'gemini_api',
+    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback
   };
 }
 

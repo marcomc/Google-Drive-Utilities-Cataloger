@@ -64,7 +64,7 @@ function getItalianLocalization_() {
       serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
     }),
     subscriberIdentifierProblemPatterns: Object.freeze({
-      missing: '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
+      missing: '\\b(?:assente|mancante|non\\s+presente|non\\s+(?:(?:e|è)\\s+)?(?:stampat[oa]|indicat[oa]|present[ea]|riportat[oa])|missing|absent|not\\s+(?:present|printed|indicated|reported))\\b',
       contractNumber: '(?:numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|contract(?:\\s+(?:number|code))?)',
       customerCode: '(?:id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     }),
@@ -75,7 +75,39 @@ function getItalianLocalization_() {
         header: "Spese d'incasso",
         value: 0,
         fieldPattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b",
-        explicitAbsencePattern: "\\b(?:non\\s+presente|non\\s+stampat[oa]e?|assente)\\b"
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+      }),
+      Object.freeze({
+        supplier: 'OENERGY',
+        supply_type: 'Gas',
+        header: 'Ricalcoli',
+        value: 0,
+        fieldPattern: '\\bricalcol[io]\\b',
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Luce',
+        header: 'Trasporto e gestione contatore',
+        value: 0,
+        fieldPattern: '\\btrasporto\\s+e\\s+gestione\\s+contatore\\b',
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Luce',
+        header: 'Oneri di sistema',
+        value: 0,
+        fieldPattern: '\\boneri\\s+di\\s+sistema\\b',
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Luce',
+        header: 'Ricalcoli',
+        value: 0,
+        fieldPattern: '\\bricalcol[io]\\b',
+        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b"
       })
     ]),
     supplierProfiles: Object.freeze({
@@ -179,6 +211,7 @@ function getItalianLocalization_() {
         'mese di riferimento'
       ],
       frequency: ['frequenza'],
+      unitCost: ['costo unitario'],
       consumptionCost: ['totale costi consumo', 'costo consumi', 'costi consumo'],
       nonConsumptionCosts: ['totale costi non consumo', 'costi non consumo'],
       vat: ['iva'],

@@ -1,6 +1,12 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.5.0',
-  DEFAULT_MODEL: 'gemini-3.7-flash',
+  APP_VERSION: '0.6.0',
+  // Google hot-swaps this alias to the newest Flash release for the model
+  // variation. Keep the default moving without a Script Properties update.
+  DEFAULT_MODEL: 'gemini-flash-latest',
+  LEGACY_DEFAULT_MODELS: Object.freeze([
+    'gemini-3.6-flash',
+    'gemini-3.7-flash'
+  ]),
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -25,8 +31,8 @@ const CONFIG = Object.freeze({
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
   // Keep invoice extraction below the model's response ceiling.
   GEMINI_MAX_OUTPUT_TOKENS: 8192,
-  // Gemini 3.7 Flash defaults to medium thinking. Make it explicit so
-  // the Developer API and Vertex AI fallback use the same runtime behavior.
+  // The current Flash-latest alias supports medium thinking. Make it explicit
+  // so the Developer API and Vertex AI fallback use the same runtime behavior.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
@@ -163,7 +169,7 @@ function getGeminiModel_() {
 
 function normalizeGeminiModel_(model) {
   const normalizedModel = String(model || '').trim();
-  return normalizedModel === 'gemini-3.6-flash' ?
+  return CONFIG.LEGACY_DEFAULT_MODELS.indexOf(normalizedModel) >= 0 ?
     CONFIG.DEFAULT_MODEL : normalizedModel || CONFIG.DEFAULT_MODEL;
 }
 
@@ -181,6 +187,90 @@ function configureGeminiModel(model) {
     normalizeGeminiModel_(normalizedModel)
   );
   return getSetupStatus();
+}
+
+/**
+ * Select the configured Gemini runtime backend for owner-controlled maintenance.
+ * This does not change the model, credentials, fallback setting, or triggers.
+ */
+function configureGeminiBackend(backend) {
+  const normalizedBackend = String(backend || '').trim();
+  if (['gemini_api', 'vertex_ai'].indexOf(normalizedBackend) < 0) {
+    throw new Error('GEMINI_BACKEND must be gemini_api or vertex_ai.');
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.GEMINI_BACKEND,
+    normalizedBackend
+  );
+  return getSetupStatus();
+}
+
+/**
+ * Migrate the installed Energygas supplier identity to the canonical casing
+ * used by the imported spreadsheet history and the extraction prompt.
+ */
+function migrateCatalogerEnergygasCanonicalSpelling() {
+  assertCatalogConfiguration_();
+  return withCatalogLifecycleLock_('energygas-canonical-spelling-migration',
+    function () {
+      const properties = PropertiesService.getScriptProperties();
+      const automationConfig = getAutomationConfig_();
+      const target = 'Energygas Italia';
+      const current = automationConfig.canonical_suppliers.filter(function (item) {
+        return normalizeConfigIdentity_(item) === 'energygas' ||
+          normalizeConfigIdentity_(item) === 'energygas italia';
+      })[0] || '';
+      if (!current) {
+        return { updated: false, reason: 'energygas-not-configured' };
+      }
+      const existingTarget = automationConfig.canonical_suppliers.filter(
+        function (item) { return item === target; }
+      )[0];
+      if (existingTarget && current !== target) {
+        throw new Error('Energygas canonical supplier values are ambiguous.');
+      }
+      if (current === target) {
+        return { updated: false, canonicalSupplier: target };
+      }
+      automationConfig.canonical_suppliers =
+        automationConfig.canonical_suppliers.map(function (item) {
+          return item === current ? target : item;
+        });
+      Object.keys(automationConfig.supplier_aliases).forEach(function (alias) {
+        if (automationConfig.supplier_aliases[alias] === current) {
+          automationConfig.supplier_aliases[alias] = target;
+        }
+        if (normalizeConfigIdentity_(alias) === normalizeConfigIdentity_(target)) {
+          delete automationConfig.supplier_aliases[alias];
+        }
+      });
+      const destinationTemplates = Object.create(null);
+      Object.keys(automationConfig.destination_templates).forEach(function (key) {
+        const parts = key.split('|');
+        const migratedKey = parts[1] === current ? parts[0] + '|' + target : key;
+        if (destinationTemplates[migratedKey] &&
+          destinationTemplates[migratedKey] !== automationConfig.destination_templates[key]) {
+          throw new Error('Energygas destination templates are ambiguous.');
+        }
+        destinationTemplates[migratedKey] = automationConfig.destination_templates[key];
+      });
+      automationConfig.destination_templates = destinationTemplates;
+      (automationConfig.frequency_overrides || []).forEach(function (override) {
+        if (override.supplier === current) {
+          override.supplier = target;
+        }
+      });
+      validateAutomationConfig_(automationConfig);
+      properties.setProperty(
+        CONFIG.PROPERTY_KEYS.AUTOMATION_CONFIG_JSON,
+        JSON.stringify(automationConfig)
+      );
+      return {
+        updated: true,
+        previousCanonicalSupplier: current,
+        canonicalSupplier: target
+      };
+    });
 }
 
 /**

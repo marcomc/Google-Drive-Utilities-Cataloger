@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-03 - Gemini Flash latest alias
+
+### Changed
+
+- Use Google's `gemini-flash-latest` alias as the default model for the Gemini
+  Developer API and Vertex AI fallback; at release time it resolves to Gemini
+  3.8 Flash and follows future Flash releases automatically.
+- Migrate persisted 3.6 and 3.7 default model values to the latest alias while
+  preserving explicitly configured model identifiers as intentional pins.
+
+### Added
+
+- Add the owner-only `validateConfiguredGeminiAccess` operational check for
+  validating the configured alias against every enabled Gemini backend without
+  exposing the stored API key or processing a document.
+- Add the owner-only `configureGeminiBackend` maintenance switch for an
+  operator-approved temporary move to the configured Vertex AI backend during a
+  Developer API outage.
+- Add an owner-verified extraction repair path that reuses the journaled import
+  pipeline when deterministic PDF reanalysis is required.
+
+### Fixed
+
+- Normalize imported reference years and months as literal text, including an
+  idempotent migration for existing rows, so chart labels remain stable.
+- Normalize the `ENERGYGAS` supplier abbreviation to the configured
+  `Energygas Italia` spelling and preserve canonical supplier case.
+- Apply supplier-specific gas and electricity extraction guidance: separate
+  OENERGY selling/network charges, record absent recalculations as zero, and
+  reuse a monoraria electricity selling rate for the printed F1/F2/F3 bands.
+- Validate OENERGY Gas and Energygas Luce detail totals before import, preserving
+  fail-closed behavior when model output confuses aggregate and `di cui` rows.
+- Omit unsupported `thinking_level` from Vertex AI requests using the latest
+  Flash alias while preserving explicit medium thinking on the Developer API.
+- Convert the shared extraction contract to Vertex AI's `responseSchema` format
+  so structured PDF extraction remains bounded and schema-constrained.
+- Accept reviewed Italian honorifics, street-name connectors, and province
+  codes when corroborating the configured supply identity, while keeping the
+  substantive street, civic number, and city mandatory.
+- Coerce numeric-looking supplementary sheet values according to the target
+  cell's numeric format before writing and verifying, preventing locale-based
+  date/time coercion in currency columns.
+
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 
 ### Changed

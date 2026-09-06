@@ -8,8 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
 # shellcheck source=scripts/lib/install-common.sh
+# shellcheck disable=SC1091 # SCRIPT_DIR is resolved at runtime for relocatable installs.
 source "${SCRIPT_DIR}/lib/install-common.sh"
 # shellcheck source=scripts/lib/apps-script-deployment.sh
+# shellcheck disable=SC1091 # SCRIPT_DIR is resolved at runtime for relocatable installs.
 source "${SCRIPT_DIR}/lib/apps-script-deployment.sh"
 
 INSTALLER_VERSION=1
@@ -966,7 +968,7 @@ collect_installation_inputs() {
     "${project_name} - Utilities" \
     "${GDUC_SPREADSHEET_TITLE:-}"
   gemini_mode="$(select_gemini_mode)"
-  gemini_model="${GDUC_GEMINI_MODEL:-gemini-3.7-flash}"
+  gemini_model="${GDUC_GEMINI_MODEL:-gemini-flash-latest}"
   vertex_ai_location="${GDUC_VERTEX_AI_LOCATION:-global}"
   evaluate_predicate is_valid_gemini_model "${gemini_model}"
   if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then

@@ -67,7 +67,7 @@ function getEnglishLocalization_() {
       serviceAddressPlaceholder: 'Enter service address here'
     }),
     subscriberIdentifierProblemPatterns: Object.freeze({
-      missing: '\\b(?:assente|mancante|non\\s+presente|missing|absent|not\\s+present)\\b',
+      missing: '\\b(?:assente|mancante|non\\s+presente|non\\s+(?:e\\s+)?(?:stampat[oa]|indicat[oa]|present[ea]|riportat[oa])|missing|absent|not\\s+(?:present|printed|indicated|reported))\\b',
       contractNumber: '(?:contract(?:\\s+(?:number|code))?|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto)',
       customerCode: '(?:user\\s*id|id\\s*utente|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     }),
@@ -78,7 +78,39 @@ function getEnglishLocalization_() {
         header: 'Collection charges',
         value: 0,
         fieldPattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present)|absent)\\b'
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+      }),
+      Object.freeze({
+        supplier: 'OENERGY',
+        supply_type: 'Gas',
+        header: 'Recalculations',
+        value: 0,
+        fieldPattern: '\\brecalculations?\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Electricity',
+        header: 'Transport and meter management',
+        value: 0,
+        fieldPattern: '\\btransport\\s+and\\s+meter\\s+management\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Electricity',
+        header: 'System charges',
+        value: 0,
+        fieldPattern: '\\bsystem\\s+charges?\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
+      }),
+      Object.freeze({
+        supplier: 'Energygas Italia',
+        supply_type: 'Electricity',
+        header: 'Recalculations',
+        value: 0,
+        fieldPattern: '\\brecalculations?\\b',
+        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b'
       })
     ]),
     supplierProfiles: Object.freeze({
@@ -177,6 +209,7 @@ function getEnglishLocalization_() {
       year: ['year', 'reference year'],
       month: ['month', 'reference month'],
       frequency: ['frequency'],
+      unitCost: ['unit cost'],
       consumptionCost: ['total consumption costs', 'consumption cost'],
       nonConsumptionCosts: ['total non-consumption costs', 'non-consumption costs'],
       vat: ['vat'],
