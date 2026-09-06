@@ -1458,6 +1458,7 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_({
     ...onlyCustomerCode,
     supplier: 'Energygas Italia',
+    customer_code: 'CL317598',
     problems: [
       'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL317598 è codice cliente).'
     ]
@@ -2373,6 +2374,97 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
     'frequency_override_authoritative_'), false);
 }
 
+function testInformationalDiagnosticsConsumeWholeStatements() {
+  for (const locale of ['en', 'it']) {
+    const context = loadCataloger();
+    const config = { locale, canonical_suppliers: ['SUPPLIER', 'Energygas Italia', 'ILIAD', 'OENERGY'],
+      supplier_aliases: {}, canonical_supplies: ['Water', 'Electricity', 'Luce', 'Internet', 'Gas'],
+      supply_aliases: {}, address_rules: [], address_missing_type: 'import',
+      sheet_by_supply: {}, frequency_overrides: [] };
+    context.getAutomationConfig_ = () => config;
+    const electricity = { ...validInvoice(), supplier: 'Energygas Italia',
+      supply_type: locale === 'it' ? 'Luce' : 'Electricity',
+      sheet_values: context.getLocalization_().electricityBandHeaders
+        .filter((_, index) => index % 2 === 1).map((header) => ({ header, value: 0.25 })) };
+    const cases = [
+      [{ ...validInvoice(), contract_number: '', customer_code: 'CL123' },
+        'Contract number not present in the document.'],
+      [{ ...validInvoice(), contract_number: '', customer_code: 'CL123' },
+        'Numero di contratto assente nel documento.'],
+      [{ ...validInvoice(), customer_code: '' }, 'ID utente missing from the document.'],
+      [{ ...validInvoice(), supplier: 'Energygas Italia', contract_number: '', customer_code: 'CL123' },
+        'Contract number not present; customer code CL123'],
+      [{ ...validInvoice(), supplier: 'Energygas Italia', contract_number: '', customer_code: 'CL123' },
+        'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL123 è codice cliente).'],
+      [electricity, 'Unit cost F1/F2/F3 populated from selling unit cost for monorate.'],
+      [electricity, 'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.'],
+      [validInvoice(), 'The amounts are shown including VAT.'],
+      [validInvoice(), 'Gli importi delle singole voci nel dettaglio servizi sono riportati nel documento comprensivi di IVA al 22%.'],
+      [validInvoice(), 'VAT is already included in the total.'],
+      [{ ...validInvoice(), configured_secondary_headers: ['Custom fee'] }, 'Custom fee is not printed in the invoice.']
+    ];
+    const contradictory = (statement) => {
+      const base = statement.replace(/[.]$/, '');
+      return ['; VAT is missing', '. Invoice number is missing', ' IVA mancante',
+        ' VAT is missing', ' but the total is unreadable', ' il totale non corrisponde']
+        .map((suffix) => base + suffix).concat([
+          'VAT is missing ' + base, 'Invoice number is missing; ' + base
+        ]);
+    };
+    for (const [invoice, statement] of cases) {
+      assert.equal(context.validateExtraction_({ ...invoice, problems: [statement] }).valid,
+        true, locale + ': ' + statement);
+      for (const problem of contradictory(statement)) {
+        assert.equal(context.validateExtraction_({ ...invoice, problems: [problem] }).valid,
+          false, locale + ': ' + problem);
+      }
+    }
+    for (const statement of [
+      'Contract number not present; customer code CL123',
+      'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL123 è codice cliente).'
+    ]) {
+      assert.equal(context.validateExtraction_({ ...validInvoice(), supplier: 'Energygas Italia',
+        contract_number: '', customer_code: 'CL999', problems: [statement] }).valid,
+      false, 'Conflicting diagnostic customer code: ' + statement);
+    }
+    for (const problem of [
+      'The amounts VAT is missing are shown including VAT.',
+      'Gli importi totale mancante sono riportati comprensivi di IVA.',
+      'Unit cost F1 F2 F3 VAT is missing populated from selling unit cost for monorate.'
+    ]) {
+      assert.equal(context.validateExtraction_({ ...electricity, problems: [problem] }).valid,
+        false, problem);
+    }
+    for (const rule of context.getLocalization_().supplierFieldDefaults) {
+      const statement = rule.header + (locale === 'it' ? ' non presente nel documento.' :
+        ' not present in the document.');
+      const invoice = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
+        sheet_values: [], problems: [statement] };
+      context.applySupplierFieldDefaults_(invoice, [rule.header]);
+      assert.equal(invoice.sheet_values[0].value, 0, statement);
+      assert.equal(invoice.problems.length, 0, statement);
+      for (const problem of contradictory(statement)) {
+        const blocked = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
+          sheet_values: [], problems: [problem] };
+        context.applySupplierFieldDefaults_(blocked, [rule.header]);
+        assert.equal(blocked.sheet_values.length, 0, problem);
+        assert.equal(blocked.problems.includes(problem), true, problem);
+        assert.equal(context.validateExtraction_(blocked).valid, false, problem);
+      }
+    }
+    config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'annual' }];
+    const missingFrequency = 'Billing frequency is not printed on the invoice.';
+    for (const problem of contradictory(missingFrequency)) {
+      const invoice = { ...validInvoice(), frequency: '', problems: [problem] };
+      context.applyFrequencyOverride_(invoice);
+      assert.equal(invoice.problems.includes(problem), true, problem);
+      assert.equal(context.validateExtraction_(invoice).valid, false, problem);
+    }
+  }
+}
+
+testInformationalDiagnosticsConsumeWholeStatements();
+
 function testAuthoritativeFrequencyProvenanceThroughNormalization() {
   for (const locale of ['en', 'it']) {
     const context = loadCataloger();
@@ -2929,6 +3021,106 @@ function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepai
   assert.equal(result.validation.valid, true);
   assert.equal(repairContexts[2].previousExtraction.identifier, 'INV-LAST-VALID');
 }
+
+function testRepairSnapshotPrecedenceAcrossRealNormalizationFailures() {
+  for (const failureStage of ['initial-normalization', 'post-default-normalization']) {
+    for (const mode of ['repaired', 'first-partial', 'exhausted', 'preview', 'process']) {
+      const context = loadCataloger();
+      context.getAutomationConfig_ = () => ({
+        locale: 'en', canonical_suppliers: ['SUPPLIER'], supplier_aliases: {},
+        canonical_supplies: ['Water'], supply_aliases: {}, frequency_overrides: [],
+        address_rules: [], address_missing_type: 'import', sheet_by_supply: {}
+      });
+      context.getSheetHeadersBySupply_ = () => ({ Water: ['Consumption quantity', 'Fixed charge'] });
+      context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+      context.validateTargetSheetValues_ = () => ({ valid: true });
+      const root = { getId: () => 'root' };
+      const file = {
+        getId: () => 'file-id', getName: () => 'invoice.pdf', getBlob: () => ({}),
+        getSize: () => 100, getUrl: () => 'https://drive.test/file-id',
+        getMimeType: () => 'application/pdf', isTrashed: () => false,
+        getParents: () => {
+          let available = true;
+          return { hasNext: () => available, next: () => { available = false; return root; } };
+        }
+      };
+      const predecessor = {
+        ...validInvoice(), identifier: 'INV-SANITIZED', total: 99,
+        sheet_values: [{ header: 'Consumption quantity', value: '12,5' },
+          { header: 'Fixed charge', value: '2,50' }]
+      };
+      const partial = {
+        ...validInvoice(), identifier: 'INV-REJECTED-PARTIAL', total: 88,
+        sheet_values: [{ header: failureStage === 'initial-normalization' ?
+          'Consumption quantity' : 'Fixed charge', value: 'unreadable' }]
+      };
+      const candidates = mode === 'first-partial' ? [partial, validInvoice()] :
+        [predecessor, partial, mode === 'repaired' ? validInvoice() : partial];
+      const repairContexts = [];
+      context.callGeminiForPdf_ = (_blob, _headers, _policy, _file, repairContext) => {
+        repairContexts.push(repairContext);
+        return JSON.stringify(candidates[repairContexts.length - 1]);
+      };
+      const events = [];
+      context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+      const mutations = [];
+      for (const name of ['findDuplicate_', 'saveMutationJournal_', 'getDestinationFolder_', 'writeInvoiceRow_']) {
+        context[name] = () => { mutations.push(name); throw new Error('Unexpected mutation'); };
+      }
+      context.sha256ForFile_ = () => 'hash';
+      let terminalError;
+      if (mode === 'process') {
+        const result = context.processIntakeFile_(file, root, 'policy');
+        assert.equal(result.status, 'ERROR');
+        assert.equal(result.extractionValidated, false);
+        assert.equal(Object.keys(result.extracted).length, 0);
+        assert.equal(context.getExtractionSnapshotForErrorResult_(result), '');
+        assert.equal(result.keepMutationJournal, false);
+      } else if (mode === 'exhausted' || mode === 'preview') {
+        context.DriveApp = { getFolderById: () => root, getFileById: () => file };
+        context.assertCatalogConfiguration_ = () => {};
+        context.getRootFolderId_ = () => 'root';
+        context.withCatalogProcessingLock_ = (_label, callback) => callback();
+        context.loadTrustedExtractionPolicy_ = () => 'policy';
+        assert.throws(() => mode === 'preview' ? context.previewUtilityInvoiceExtraction('file-id') :
+          context.extractUtilityDataWithRepair_(file, 'policy'), (error) => {
+          terminalError = error;
+          return error.invalidExtractionOutput === true &&
+            error.extractionIssueCode === 'invalid_extraction_normalization';
+        });
+      } else {
+        assert.equal(context.extractUtilityDataWithRepair_(file, 'policy').validation.valid, true);
+      }
+      const expectedCalls = mode === 'first-partial' ? 2 : 3;
+      assert.equal(repairContexts.length, expectedCalls, `${failureStage}: ${mode}`);
+      assert.deepEqual(mutations, []);
+      if (mode === 'first-partial') {
+        assert.equal(repairContexts[1].previousExtraction.identifier, 'INV-REJECTED-PARTIAL');
+      } else {
+        const selected = repairContexts[2].previousExtraction;
+        assert.equal(selected.identifier, 'INV-SANITIZED');
+        assert.equal(selected.total, 99);
+        assert.equal(selected.sheet_values[0].value, 12.5);
+        assert.equal(selected.sheet_values[1].value, 2.5);
+        const serialized = JSON.stringify(selected);
+        for (const excluded of ['INV-REJECTED-PARTIAL', 'unreadable',
+          'original_file_id', 'configured_writable_headers', 'monetary_validated_']) {
+          assert.equal(serialized.includes(excluded), false, excluded);
+        }
+        if (terminalError) {
+          assert.equal(JSON.stringify(terminalError.extractionSnapshot), serialized);
+        }
+      }
+      assert.equal(events.filter(item => item.event === 'extraction-repair-requested').length,
+        expectedCalls - 1);
+      assert.equal(events.filter(item => item.event === 'extraction-repair-exhausted').length,
+        ['exhausted', 'preview', 'process'].includes(mode) ? 1 : 0);
+      assert.equal(JSON.stringify(events).includes('INV-'), false);
+      assert.equal(JSON.stringify(events).includes('unreadable'), false);
+    }
+  }
+}
+testRepairSnapshotPrecedenceAcrossRealNormalizationFailures();
 
 function testLocalizedConfiguredReconciliationPipeline() {
   for (const locale of ['en', 'it']) {
@@ -6019,7 +6211,7 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues(numberForm
         getRichTextValue: () => null,
         getFormula: () => column === 8 ?
           '=HYPERLINK("https://drive.test/file";"invoice")' : formulas[column - 1],
-        getDisplayValue: () => 'invoice'
+        getDisplayValue: () => String(actualValues[column - 1])
       };
     }
   };
@@ -6942,15 +7134,214 @@ function testSpreadsheetFormulaArgumentSeparatorFollowsLocale() {
   assert.equal(separatorFor('en_GB'), ',');
 }
 
-function testReferenceMonthVerificationAcceptsSheetNumericCoercion() {
+function testReferenceMonthVerificationRequiresLiteralPaddedText() {
   const context = loadCataloger();
-
-  assert.equal(context.referenceMonthValuesMatch_(6, '06'), true);
-  assert.equal(context.referenceMonthValuesMatch_('6', '06'), true);
-  assert.equal(context.referenceMonthValuesMatch_('06', '06'), true);
-  assert.equal(context.referenceMonthValuesMatch_(7, '06'), false);
-  assert.equal(context.referenceMonthValuesMatch_('invoice-6', '06'), false);
+  const contract = { valueType: 'text', tolerance: null };
+  const matches = (actual, displayed = String(actual)) =>
+    context.sheetValuesMatch_(actual, '06', '', contract, displayed);
+  assert.equal(matches(6, '06'), false);
+  assert.equal(matches('6', '06'), false);
+  assert.equal(matches('06'), true);
+  assert.equal(matches('06', '6'), false);
+  assert.equal(matches(7), false);
+  assert.equal(matches('invoice-6'), false);
 }
+
+function createInvoiceVerificationFixture(locale) {
+  const context = loadCataloger();
+  const localization = context.getLocalizationRegistry_()[locale];
+  context.getLocalization_ = () => localization;
+  context.getHeaderAliases_ = key => localization.headerAliases[key] || [];
+  context.Utilities.formatDate = date => [date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+  context.buildDrivePathLabel_ = () => 'invoice.pdf';
+  const headers = Array.from(localization.installerSheetHeaders).concat(
+    Array.from(localization.supplierReconciliation.rates),
+    localization.supplierReconciliation.quantity,
+    Array.from(localization.electricityBandHeaders).filter((_, index) => index % 2 === 0),
+    ['PDR', 'Custom flag']);
+  const lookup = Object.fromEntries(headers.map((header, index) => [context.normalizeHeader_(header), index + 1]));
+  const layout = { headerRow: 1, headers, lookup };
+  const values = headers.map(() => '');
+  const formats = headers.map(() => 'General');
+  const formulas = headers.map(() => '');
+  const displays = new Map();
+  const sheet = {
+    getName: () => 'Water', getSheetId: () => 7, getLastRow: () => 2,
+    getParent: () => ({ getSpreadsheetLocale: () => localization.spreadsheetLocale }),
+    getRange: (_row, column, _rows, width) => width === headers.length ? {
+      getValues: () => [values.slice()], getFormulas: () => [formulas.slice()],
+      getNumberFormats: () => [formats.slice()]
+    } : {
+      getValue: () => values[column - 1],
+      getDisplayValue: () => displays.has(column - 1) ? displays.get(column - 1) :
+        typeof values[column - 1] === 'string' ? values[column - 1] : String(values[column - 1]),
+      getNumberFormat: () => formats[column - 1],
+      getFormula: () => formulas[column - 1], getRichTextValue: () => null,
+      setValue: value => { values[column - 1] = value; },
+      setRichTextValue: value => { values[column - 1] = value.text; },
+      setNumberFormat: value => { formats[column - 1] = value; },
+      setFormula: value => { formulas[column - 1] = value; values[column - 1] = ''; },
+      clearContent: () => { values[column - 1] = ''; }
+    }
+  };
+  const invoice = { ...validInvoice(), identifier: '1234', contract_number: '00567',
+    customer_code: '123456', sheet_values: [
+      ...Array.from(localization.supplierReconciliation.rates).map(header => ({ header, value: 0.135338 })),
+      ...headers.filter(header => context.isConsumptionQuantityHeader_(header)).map(header => ({ header, value: 123.456 })),
+      { header: 'PDR', value: '001234' }, { header: 'Custom flag', value: true }
+    ] };
+  const file = { getId: () => 'file-id', getUrl: () => 'https://drive.test/file-id' };
+  const indexFor = key => headers.findIndex(header => context.getHeaderAliases_(key)
+    .some(alias => context.normalizeHeader_(alias) === context.normalizeHeader_(header)));
+  const verify = () => context.verifyImportedRow_(sheet, 2, layout, file, invoice);
+  context.writeInvoiceRow_(sheet, 2, layout, file, invoice);
+  return { context, localization, layout, sheet, invoice, file, values, formats, formulas, displays, indexFor, verify };
+}
+
+function testInvoiceVerificationEnforcesNativeTypesAndPrecision() {
+  for (const locale of ['en', 'it']) {
+    const fixture = createInvoiceVerificationFixture(locale);
+    const { context, layout, values, displays, formulas, indexFor, verify } = fixture;
+    assert.doesNotThrow(verify);
+    for (const key of ['identifier', 'contractNumber', 'customerCode', 'year', 'month']) {
+      const index = indexFor(key);
+      for (const alias of context.getHeaderAliases_(key)) {
+        delete layout.lookup[context.normalizeHeader_(layout.headers[index])];
+        layout.headers[index] = alias;
+        layout.lookup[context.normalizeHeader_(alias)] = index + 1;
+        context.writeInvoiceRow_(fixture.sheet, 2, layout, fixture.file, fixture.invoice);
+        const original = values[index];
+        assert.equal(typeof original, 'string');
+        displays.set(index, original);
+        values[index] = Number(original);
+        assert.throws(verify, error => error.verificationDiscrepancies.some(item =>
+          item.field === alias && item.actual === Number(original) && item.expected === original &&
+          item.valueType === 'text' && item.tolerance === null), `${locale}: ${alias} native type`);
+        values[index] = original;
+        displays.set(index, 'wrong display');
+        assert.throws(verify, /value verification failed/, `${locale}: ${alias} display`);
+        displays.delete(index);
+      }
+    }
+    for (let index = 0; index < layout.headers.length; index += 1) {
+      const header = layout.headers[index];
+      if (!context.isUnitCostHeader_(header) && !context.isConsumptionQuantityHeader_(header)) continue;
+      const original = values[index];
+      displays.set(index, '0.14');
+      assert.doesNotThrow(verify, 'Rounded numeric display does not discard stored precision');
+      for (const bad of [original + 0.000001, String(original), Infinity, NaN]) {
+        values[index] = bad;
+        assert.throws(verify, error => error.verificationDiscrepancies.some(discrepancy =>
+          discrepancy.field === header && discrepancy.valueType === 'number' && discrepancy.tolerance === null));
+      }
+      values[index] = original;
+      displays.delete(index);
+    }
+    const monetary = indexFor('consumptionCost');
+    const amount = values[monetary];
+    values[monetary] = amount + 0.01;
+    assert.doesNotThrow(verify);
+    values[monetary] = amount + 0.03;
+    assert.throws(verify, error => error.verificationDiscrepancies.some(item =>
+      item.valueType === 'money' && item.tolerance === 0.02));
+    values[monetary] = amount;
+    const dateIndex = indexFor('issueDate');
+    const date = values[dateIndex];
+    for (const bad of ['2026-07-16', new Date('invalid'), new Date('2026-07-17T00:00:00Z')]) {
+      values[dateIndex] = bad;
+      assert.throws(verify, /value verification failed/);
+    }
+    values[dateIndex] = date;
+    const flag = layout.headers.indexOf('Custom flag');
+    for (const bad of ['true', 1, false]) {
+      values[flag] = bad;
+      assert.throws(verify, /value verification failed/);
+    }
+    values[flag] = true;
+    const optionalIndex = layout.headers.indexOf('PDR');
+    fixture.invoice.sheet_values.find(entry => entry.header === 'PDR').value = null;
+    for (const blank of ['', null, undefined]) {
+      values[optionalIndex] = blank;
+      assert.doesNotThrow(verify, 'Absent optional values retain blank semantics');
+    }
+    values[optionalIndex] = '';
+    const rateIndex = layout.headers.findIndex(header => context.isUnitCostHeader_(header));
+    formulas[rateIndex] = '=user_formula()';
+    values[rateIndex] = 'user-owned result';
+    assert.doesNotThrow(verify, 'Non-total user formulas retain their value contract');
+  }
+}
+testInvoiceVerificationEnforcesNativeTypesAndPrecision();
+
+function testTypedVerificationFailuresRollbackInsertReplacementAndJournal() {
+  for (const mode of ['insert', 'replacement']) {
+    for (const failure of ['month-type', 'rate-precision']) {
+      const fixture = createInvoiceVerificationFixture('en');
+      const { context, sheet, layout, invoice, file, values, formats, displays, indexFor } = fixture;
+      const rateIndex = layout.headers.findIndex(header => context.isUnitCostHeader_(header));
+      values[indexFor('month')] = 6;
+      values[indexFor('year')] = 2025;
+      values[rateIndex] = 0.3456789;
+      values[layout.headers.indexOf('PDR')] = '000001';
+      formats[indexFor('month')] = '00';
+      formats[indexFor('year')] = '0';
+      formats[rateIndex] = '0.0000000';
+      const original = JSON.parse(JSON.stringify(context.captureImportedRowPayload_(sheet, 2, layout)));
+      context.getAutomationConfig_ = () => ({ locale: 'en', sheet_by_supply: { Water: 'Water' } });
+      context.getSpreadsheetId_ = () => 'spreadsheet-id';
+      context.SpreadsheetApp.openById = () => ({
+        getSheetByName: () => sheet, getUrl: () => 'https://sheets.test/id'
+      });
+      context.captureElectricityDashboardLayoutsForRollback_ = () => null;
+      context.getSheetLayout_ = () => layout;
+      context.prepareInitialServiceIdentityBootstrap_ = () => null;
+      context.findSpreadsheetRowBySourceFile_ = () => mode === 'replacement' ? 2 : 0;
+      context.checkpointMutationJournal_ = () => {};
+      context.getInsertionRow_ = () => 2;
+      context.insertBlankRowAt_ = () => {};
+      context.copyRowStyleAndFormulas_ = () => {};
+      context.refreshImportedSourceLink_ = () => {};
+      context.refreshElectricityDashboardAfterRollback_ = () => {};
+      context.deleteSheetRowAndCheckpoint_ = (_file, deleteRow) => deleteRow();
+      let deleted = 0;
+      sheet.deleteRow = () => { deleted += 1; };
+      const write = context.writeInvoiceRow_;
+      context.writeInvoiceRow_ = (...args) => {
+        write(...args);
+        if (failure === 'month-type') {
+          values[indexFor('month')] = 6;
+          displays.set(indexFor('month'), '06');
+        } else {
+          values[rateIndex] += 0.000001;
+        }
+      };
+      assert.throws(() => context.importUtilityInvoiceToSheet_(file, invoice, {}),
+        error => /value verification failed/.test(error.message) && !error.mutationRollbackIncomplete,
+      `${mode}: ${failure}`);
+      assert.equal(deleted, mode === 'insert' ? 1 : 0);
+      if (mode === 'replacement') {
+        assert.deepEqual(JSON.parse(JSON.stringify(context.captureImportedRowPayload_(sheet, 2, layout))), original);
+      }
+      // Recovery must restore the exact historical native types, precision and
+      // formats from serialized snapshots, not apply fresh-import text rules.
+      const journal = JSON.parse(JSON.stringify({ sheetName: 'Water', sheetRow: 2,
+        sheetRowPreexisting: true, sheetOriginalRow: 2, sheetRowPayload: original }));
+      values.fill('changed');
+      formats.fill('@');
+      displays.clear();
+      context.getFileFromSourceCell_ = () => file;
+      context.findSpreadsheetRowBySourceFile_ = () => 2;
+      context.rollbackJournalSheetRow_(journal, file);
+      assert.deepEqual(JSON.parse(JSON.stringify(context.captureImportedRowPayload_(sheet, 2, layout))), original);
+      assert.equal(typeof values[indexFor('month')], 'number');
+      assert.equal(typeof values[indexFor('year')], 'number');
+      assert.equal(values[rateIndex], 0.3456789);
+      assert.equal(values[layout.headers.indexOf('PDR')], '000001');
+    }
+  }
+}
+testTypedVerificationFailuresRollbackInsertReplacementAndJournal();
 
 function testFormulaTotalMustReconcileWithExtraction() {
   const context = loadCataloger();
@@ -7851,7 +8242,7 @@ testMutationJournalPayloadUsesSeparateChunks();
 testBuildSpreadsheetHyperlinkFormulaEscapesValues();
 testDrivePathLabelIsRelativeToConfiguredRoot();
 testSpreadsheetFormulaArgumentSeparatorFollowsLocale();
-testReferenceMonthVerificationAcceptsSheetNumericCoercion();
+testReferenceMonthVerificationRequiresLiteralPaddedText();
 testFormulaTotalMustReconcileWithExtraction();
 testSupplementaryValuesCannotOverrideValidatedInvoiceTotal();
 testPlainSpreadsheetValueMismatchReportsExpectedAndObservedValues();

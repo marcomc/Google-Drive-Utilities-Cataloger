@@ -86,6 +86,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Apply authoritative annual and custom cadence overrides without retaining
   resolved provenance errors; preserve unrelated compound diagnostics and
   reject model-supplied runtime authority flags.
+- Verify imported text cell types and precise numeric rates and quantities;
+  reserve monetary comparison tolerance for cost fields.
+- Preserve the last sanitized extraction when a later repair fails
+  normalization, and match informational diagnostics as complete statements.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 

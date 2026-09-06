@@ -896,7 +896,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
       if (!error.invalidExtractionOutput) {
         throw error;
       }
-      extracted = error.extractionSnapshot || lastValidExtraction || {};
+      extracted = lastValidExtraction || error.extractionSnapshot || {};
       validation = withExtractionValidationStage_(invalidExtraction_(
         'Gemini returned extraction JSON that failed deterministic validation.',
         'Re-examine the PDF and return a complete object matching the required schema.',
@@ -922,6 +922,9 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
             issueStage: validation.stage
           }
         ));
+        if (lastValidExtraction) {
+          error.extractionSnapshot = lastValidExtraction;
+        }
         throw error;
       }
     }
@@ -2614,9 +2617,8 @@ function isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue) {
     new RegExp(defaultValue.explicitAbsenceDiagnosticPattern, 'i').test(rawProblem)) {
     return true;
   }
-  if (fieldPattern.test(rawProblem) &&
-    isStandaloneInformationalProblem_(rawProblem.replace(fieldPattern, 'FIELD')) &&
-    new RegExp(defaultValue.explicitAbsencePattern, 'i').test(rawProblem)) {
+  if (isExplicitFieldAbsenceStatement_(rawProblem, defaultValue.fieldPattern,
+    defaultValue.explicitAbsencePattern)) {
     return true;
   }
   // Some model responses explain the reviewed zero fallback in the same
@@ -2979,11 +2981,10 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
     return true;
   }
   const patterns = getLocalization_().subscriberIdentifierProblemPatterns;
-  if (!new RegExp(patterns.missing).test(text)) {
-    return false;
-  }
-  const contractNumberMissing = new RegExp(patterns.contractNumber).test(text);
-  const customerCodeMissing = new RegExp(patterns.customerCode).test(text);
+  const contractNumberMissing = isExplicitFieldAbsenceStatement_(text,
+    patterns.contractNumber, patterns.missing);
+  const customerCodeMissing = isExplicitFieldAbsenceStatement_(text,
+    patterns.customerCode, patterns.missing);
   if (contractNumberMissing === customerCodeMissing) {
     return false;
   }
@@ -2992,18 +2993,28 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
     !extracted.customer_code && Boolean(extracted.contract_number);
 }
 
+function isExplicitFieldAbsenceStatement_(problem, fieldPattern, absencePattern) {
+  // Consume the entire statement: a missing optional field cannot authorize
+  // dropping another problem, even when the model omits clause punctuation.
+  return new RegExp(
+    '^(?:(?:il|la|the)\\s+)?(?:' + fieldPattern + ')' +
+    '(?:\\s+(?:is|was|è|e))?\\s+(?:' + absencePattern + ')' +
+    '(?:\\s+(?:explicitly|esplicitamente))?' +
+    '(?:\\s+(?:from|on|in|nel|nella|sul|sulla)\\s+(?:the\\s+)?' +
+    '(?:supplier\\s+)?(?:invoice|document|fattura|documento))?[.]?$', 'i'
+  ).test(String(problem || '').trim());
+}
+
 function isInformationalEnergygasContractAbsenceProblem_(problem, extracted) {
   if (!extracted || extracted.contract_number || !extracted.customer_code ||
     normalizeCellText_(extracted.supplier) !== 'energygas italia') {
     return false;
   }
   const text = normalizeCellText_(problem);
-  if (!/(?:numero (?:di )?contratto|contract number)/.test(text) ||
-    !/(?:non (?:e )?(?:presente|identificabile)|not (?:present|identifiable))/.test(text) ||
-    !/(?:codice cliente|customer code|cl[0-9]+)/.test(text)) {
-    return false;
-  }
-  return !/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|non corrispond|incoerent)/.test(text);
+  const statement = /^(?:il )?numero (?:di )?contratto non (?:e )?presente o non (?:e )?identificabile per energygas italia (cl[0-9]+) e codice cliente$/.exec(text) ||
+    /^(?:the )?contract number (?:is )?not (?:present|identifiable)(?: for energygas italia)? customer code (cl[0-9]+)$/.exec(text);
+  return Boolean(statement) &&
+    statement[1] === normalizeCellText_(extracted.customer_code);
 }
 
 function isInformationalElectricityBandMappingProblem_(problem, extracted) {
@@ -3016,10 +3027,10 @@ function isInformationalElectricityBandMappingProblem_(problem, extracted) {
     /(?:ambigu|incert|unclear|unreadable|illeggibil|non leggibil|conflict|contradditt|mismatch|does not match|non corrispond|incoerent|inconsistent)/.test(text)) {
     return false;
   }
-  if (!/(?:costo unitario f1 f2 f3|unit cost f1 f2 f3)/.test(text) ||
-    !/(?:popolat|filled|populated)/.test(text) ||
-    !/(?:costo unitario di vendita|selling unit cost)/.test(text) ||
-    !/(?:monorari|monorate)/.test(text)) {
+  const supportedStatement =
+    /^(?:il )?costo unitario f1 f2 f3 e stato popolato con il costo unitario di vendita(?: del consumo come previsto per un contratto monorario| monorario)$/.test(text) ||
+    /^unit cost f1 f2 f3 (?:(?:is|was) )?(?:filled|populated) (?:from|with) (?:the )?selling unit cost for (?:a )?monorate(?: contract)?$/.test(text);
+  if (!supportedStatement) {
     return false;
   }
   const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
@@ -3058,8 +3069,8 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
 }
 
 function isAffirmativeInformationalTaxInclusionFact_(text) {
-  return /^(?:gli\s+)?(?:importi|voci|dettagli).*?(?:sono\s+)?(?:riportati|indicati|espressi).*?(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
-    /^(?:the\s+)?(?:line\s+items?|amounts?|charges?|details).*?(?:are\s+)?(?:shown|stated|listed|reported).*?(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+  return /^(?:gli\s+)?(?:importi|voci|dettagli)(?:\s+delle\s+singole\s+voci)?(?:\s+nel\s+dettaglio\s+servizi)?\s+(?:sono\s+)?(?:riportati|indicati|espressi)(?:\s+nel\s+documento)?\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:the\s+)?(?:line\s+items?|amounts?|charges?|details)\s+(?:are\s+)?(?:shown|stated|listed|reported)(?:\s+in\s+the\s+(?:invoice|document))?\s+(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
     /^(?:iva|vat)\s+(?:è|e|is|was)\s+(?:(?:già|already)\s+)?(?:inclus[ao]|included)\s+(?:nel(?:la)?\s+(?:totale|importo)|in\s+(?:the\s+)?(?:total|amount))[.!?]?$/i.test(text);
 }
 
@@ -4120,7 +4131,6 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     .getFormulas()[0];
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
-  const monthColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('month'));
   const discrepancies = [];
   let firstVerificationMessage = '';
   const recordDiscrepancy = function (message, discrepancy) {
@@ -4131,37 +4141,40 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   };
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
+    if (!column || rowFormulas[column - 1]) {
+      return;
+    }
     const cell = column ? sheet.getRange(row, column) : null;
     const actual = cell ? cell.getValue() : null;
     const expectedValue = cell ? normalizeSheetValueForCell_(
       cell, expected[normalizedHeader], normalizedHeader) : expected[normalizedHeader];
-    const matches = column === monthColumn ?
-      referenceMonthValuesMatch_(actual, expectedValue) :
-      sheetValuesMatch_(actual, expectedValue, extracted.issue_date);
-    if (column && !rowFormulas[column - 1] && !matches) {
+    const contract = getSpreadsheetVerificationContract_(expectedValue, normalizedHeader);
+    const displayValue = cell && contract.valueType === 'text' ? cell.getDisplayValue() : null;
+    const matches = sheetValuesMatch_(actual, expectedValue, extracted.issue_date,
+      contract, displayValue);
+    if (!matches) {
       recordDiscrepancy('Spreadsheet value verification failed for: ' +
         layout.headers[column - 1], {
         field: layout.headers[column - 1],
         expected: expectedValue,
         actual: actual,
-        valueType: verificationValueType_(expectedValue,
-          normalizedHeader),
-        tolerance: isReconciliationCostHeader_(normalizedHeader) ?
-          CONFIG.MONEY_TOLERANCE : null
+        valueType: contract.valueType,
+        tolerance: contract.tolerance
       });
     }
   });
 
   if (totalColumn && rowFormulas[totalColumn - 1]) {
     const actualTotal = sheet.getRange(row, totalColumn).getValue();
-    if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date)) {
+    const totalContract = { valueType: 'money', tolerance: CONFIG.MONEY_TOLERANCE };
+    if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date, totalContract)) {
       recordDiscrepancy('Spreadsheet formula total verification failed for: ' +
         layout.headers[totalColumn - 1], {
         field: layout.headers[totalColumn - 1],
         expected: extracted.total,
         actual: actualTotal,
-        valueType: 'money',
-        tolerance: CONFIG.MONEY_TOLERANCE
+        valueType: totalContract.valueType,
+        tolerance: totalContract.tolerance
       });
     }
   }
@@ -4241,33 +4254,35 @@ function verificationValueType_(value, normalizedHeader) {
   if (Object.prototype.toString.call(value) === '[object Date]') {
     return 'date';
   }
+  if (typeof value === 'boolean') {
+    return 'boolean';
+  }
   return 'text';
 }
 
-function sheetValuesMatch_(actual, expected, issueDate) {
-  if (Object.prototype.toString.call(expected) === '[object Date]') {
-    return dateMatches_(actual, issueDate);
-  }
-  if (typeof expected === 'number') {
-    return typeof actual === 'number' &&
-      Math.abs(actual - expected) <= CONFIG.MONEY_TOLERANCE;
-  }
-  if (typeof expected === 'boolean') {
-    return actual === expected;
-  }
-  return String(actual === null || actual === undefined ? '' : actual) ===
-    String(expected === null || expected === undefined ? '' : expected);
+function getSpreadsheetVerificationContract_(expected, normalizedHeader) {
+  const valueType = verificationValueType_(expected, normalizedHeader);
+  return { valueType: valueType,
+    tolerance: valueType === 'money' ? CONFIG.MONEY_TOLERANCE : null };
 }
 
-function referenceMonthValuesMatch_(actual, expected) {
-  const actualText = String(actual === null || actual === undefined ? '' : actual);
-  const expectedText = String(expected === null || expected === undefined ? '' : expected);
-  if (!/^\d{1,2}$/.test(actualText) || !/^\d{2}$/.test(expectedText)) {
-    return false;
+function sheetValuesMatch_(actual, expected, issueDate, contract, displayValue) {
+  if (expected === null || expected === undefined) {
+    return actual === null || actual === undefined || actual === '';
   }
-  const actualMonth = Number(actualText);
-  const expectedMonth = Number(expectedText);
-  return actualMonth >= 1 && actualMonth <= 12 && actualMonth === expectedMonth;
+  if (contract.valueType === 'date') {
+    return Object.prototype.toString.call(actual) === '[object Date]' &&
+      !isNaN(actual) && dateMatches_(actual, issueDate);
+  }
+  if (contract.valueType === 'number' || contract.valueType === 'money') {
+    return typeof actual === 'number' && Number.isFinite(actual) &&
+      Number.isFinite(expected) && (contract.valueType === 'money' ?
+        Math.abs(actual - expected) <= contract.tolerance : actual === expected);
+  }
+  if (contract.valueType === 'boolean') {
+    return actual === expected;
+  }
+  return typeof actual === 'string' && actual === expected && displayValue === expected;
 }
 
 function sha256ForFile_(file) {

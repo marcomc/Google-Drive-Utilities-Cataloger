@@ -264,6 +264,10 @@ headers independently of cell formatting. Identifier and unknown-header text
 remains literal; ambiguous monetary, consumption, and unit-rate grouping is
 rejected. Native numeric rates and unambiguous high-precision rate strings keep
 their precision.
+Readback verification requires literal text cells for identifiers and reference
+periods and preserves rate and quantity precision. Informational diagnostics
+must match a complete supported statement; additional blocking clauses remain
+unresolved. A malformed repair cannot replace the last sanitized extraction.
 Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
 handoff from the installed Cloud project and validates the new key against the
 configured model. It changes only the key, preserving the backend, model,
@@ -274,12 +278,12 @@ Reference years and months are written as literal text. Run the idempotent
 owner-only `migrateCatalogerReferencePeriodText` function after this release
 to normalize existing imported rows; it skips formula-backed cells and does
 not change other columns.
-Post-write verification treats `6`, `06`, and the numeric value `6` as the same
-reference month. When a verification comparison fails, the recipient report
-includes the affected field and the expected and observed values (plus a money
-tolerance where applicable). Other failures report the phase, reason, and
-recommended action rather than inventing a comparison. This equivalence is not
-applied to invoice, contract, or customer identifiers.
+Post-write verification requires the exact text month, such as `06`, in both
+the native cell value and displayed text. Rollback restores the original
+snapshot, including any historical numeric period cells. When verification
+fails, the recipient report includes the field and expected and observed values
+(plus a money tolerance where applicable). Other failures report the phase,
+reason, and recommended action rather than inventing a comparison.
 
 ## Operations
 
