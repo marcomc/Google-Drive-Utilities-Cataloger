@@ -1614,6 +1614,9 @@ ensure_api_executable_deployment() {
   local deployment_json
   local deployment_output
   local script_id
+  local version_json
+  local version_number
+  local version_content_json
 
   script_id="$(state_get '.scriptId')"
   deployment_id="$(state_get '.deploymentId')"
@@ -1667,9 +1670,51 @@ ensure_api_executable_deployment() {
     deployment_id="$(jq -er --arg description "${creation_description}" '
       .[] | select(.description == $description) | .deploymentId
     ' <<<"${deployments_json}")"
+    deployment_json=""
+    # A planned marker alone cannot admit an unverified artifact or identity.
+    # shellcheck disable=SC2310
+    if ! read_apps_script_deployment \
+      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${deployment_id}" deployment_json ||
+      ! validate_owner_only_api_deployment \
+        "${deployment_json}" "${script_id}" "${deployment_id}" ||
+      ! jq -e --arg description "${creation_description}" \
+        '.deploymentConfig.description == $description' \
+        <<<"${deployment_json}" >/dev/null; then
+      die "Could not verify the pending Apps Script API deployment." \
+        "${INSTALL_DOC}#api-executable"
+    fi
+    version_number="$(jq -er '.deploymentConfig.versionNumber' <<<"${deployment_json}")"
+    version_content_json=""
+    # shellcheck disable=SC2310
+    if ! read_apps_script_version_content \
+      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${version_number}" version_content_json ||
+      ! validate_apps_script_version_entrypoints "${version_content_json}"; then
+      die "The pending Apps Script version does not expose the required API entrypoints." \
+        "${INSTALL_DOC}#api-executable"
+    fi
     debug "Recovered pending owner-only Apps Script API deployment"
   else
     debug "Creating owner-only Apps Script API deployment"
+    version_json=""
+    # Explicitly freeze and inspect the uploaded source before admitting it.
+    # shellcheck disable=SC2310
+    if ! run_apps_script_clasp_json \
+      "${AUTH_DIR}/.clasprc.json" version_json version "${creation_description}"; then
+      die "Could not create the Apps Script source version." \
+        "${INSTALL_DOC}#api-executable"
+    fi
+    version_number="$(jq -er '
+      .versionNumber | select(type == "number" and . > 0 and . == floor)
+    ' <<<"${version_json}")" || die "Could not identify the Apps Script source version." \
+      "${INSTALL_DOC}#api-executable"
+    version_content_json=""
+    # shellcheck disable=SC2310
+    if ! read_apps_script_version_content \
+      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${version_number}" version_content_json ||
+      ! validate_apps_script_version_entrypoints "${version_content_json}"; then
+      die "The uploaded Apps Script version does not expose the required API entrypoints; no deployment was created." \
+        "${INSTALL_DOC}#api-executable"
+    fi
     deployment_output=""
     # Helpers explicitly check failures; this branch adds installer guidance.
     # shellcheck disable=SC2310
@@ -1677,6 +1722,7 @@ ensure_api_executable_deployment() {
       "${AUTH_DIR}/.clasprc.json" \
       deployment_output \
       deploy \
+      --versionNumber "${version_number}" \
       --description "${creation_description}"; then
       die "Could not create the Apps Script API deployment." \
         "${INSTALL_DOC}#api-executable"
@@ -1684,7 +1730,7 @@ ensure_api_executable_deployment() {
     deployment_id="$(printf '%s' "${deployment_output}" |
       jq -r '.deploymentId // empty' 2>/dev/null || true)"
   fi
-  if [[ -z "${deployment_id}" ]]; then
+  if [[ ! "${deployment_id}" =~ ^[A-Za-z0-9_-]+$ ]]; then
     die "Could not identify the Apps Script API deployment." \
       "${INSTALL_DOC}#api-executable"
   fi
@@ -1692,20 +1738,22 @@ ensure_api_executable_deployment() {
   # temporarily unavailable, a resume verifies this deployment instead of
   # creating a duplicate.
   state_set "deploymentId" "${deployment_id}"
-  deployment_json=""
-  # Helpers explicitly check failures; this branch adds installer guidance.
-  # shellcheck disable=SC2310
-  if ! read_apps_script_deployment \
-    "${AUTH_DIR}/.clasprc.json" \
-    "${script_id}" \
-    "${deployment_id}" \
-    deployment_json ||
-    ! validate_owner_only_api_deployment \
-      "${deployment_json}" \
+  if [[ "${deployment_count}" -eq 0 ]]; then
+    deployment_json=""
+    # Helpers explicitly check failures; this branch adds installer guidance.
+    # shellcheck disable=SC2310
+    if ! read_apps_script_deployment \
+      "${AUTH_DIR}/.clasprc.json" \
       "${script_id}" \
-      "${deployment_id}"; then
-    die "The new deployment is not an owner-only API executable; explicit operator repair is required." \
-      "${INSTALL_DOC}#api-executable"
+      "${deployment_id}" \
+      deployment_json ||
+      ! validate_owner_only_api_deployment \
+        "${deployment_json}" \
+        "${script_id}" \
+        "${deployment_id}" "${version_number}"; then
+      die "The new deployment is not an owner-only API executable; explicit operator repair is required." \
+        "${INSTALL_DOC}#api-executable"
+    fi
   fi
   state_set "deploymentCreationDescription" ""
   success "Created owner-only Apps Script API deployment"

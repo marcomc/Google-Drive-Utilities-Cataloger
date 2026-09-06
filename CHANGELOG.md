@@ -90,6 +90,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
   reserve monetary comparison tolerance for cost fields.
 - Preserve the last sanitized extraction when a later repair fails
   normalization, and match informational diagnostics as complete statements.
+- Preserve ordinary localized absence/VAT wording and strictly grouped spaces
+  in numeric input while retaining ambiguity and contradiction checks.
+- Scope supplier defaults to the current invoice and reconcile remaining
+  configured costs when an optional detail is explicitly absent.
+- Select reasoning controls supported by the configured model and API.
+- Verify the shared public API contract in each exact uploaded version before
+  CI promotion or initial installer deployment.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 

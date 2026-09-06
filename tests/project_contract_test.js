@@ -8,7 +8,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
-const { hasRequiredEntrypoint } = require(
+const { hasRequiredEntrypoint, validateSourceFiles } = require(
   path.join(projectRoot, 'scripts/validate-apps-script.js')
 );
 
@@ -143,23 +143,165 @@ function testCommittedJsonAndRuntimeConfig() {
 }
 
 function testRequiredEntrypointValidationIsTopLevelAndNegativeSafe() {
-  assert.equal(
-    hasRequiredEntrypoint('function processSingleIntakeFileByName() {}',
-      'processSingleIntakeFileByName'),
-    true
-  );
-  assert.equal(
-    hasRequiredEntrypoint('// function processSingleIntakeFileByName() {}',
-      'processSingleIntakeFileByName'),
-    false
-  );
-  assert.equal(
-    hasRequiredEntrypoint(
-      'function wrapper() { function processSingleIntakeFileByName() {} }',
-      'processSingleIntakeFileByName'
-    ),
-    false
-  );
+  const { requiredEntrypoints, missingEntrypoints, sourceSyntaxError } = require(
+    '../scripts/lib/apps-script-entrypoints.js');
+  assert.equal(requiredEntrypoints.length, 21);
+  const sources = requiredEntrypoints.map((name) => `function ${name}() {}`);
+  assert.deepEqual(missingEntrypoints(sources), [], 'cross-file declarations');
+  const temporaryDirectory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gduc-entrypoints-'));
+  try {
+    const files = sources.map((source, index) => {
+      const file = path.join(temporaryDirectory, `${index}.gs`);
+      fs.writeFileSync(file, source);
+      return file;
+    });
+    assert.deepEqual(validateSourceFiles(files), []);
+    requiredEntrypoints.forEach((entrypoint, index) => {
+      assert.deepEqual(missingEntrypoints(sources.filter((_, i) => i !== index)), [entrypoint]);
+      assert.deepEqual(validateSourceFiles(files.filter((_, i) => i !== index)),
+        [`Missing required Apps Script entrypoint: ${entrypoint}`]);
+      const declaration = `function ${entrypoint}() {}`;
+      [
+        `// ${declaration}`,
+        `function* ${entrypoint}() {}`,
+        `async function* ${entrypoint}() {}`,
+        `/*\n${declaration}\n*/`,
+        JSON.stringify(declaration),
+        '`' + declaration + '`',
+        `function wrapper() {\n${declaration}\n}`,
+        `const value =\n${declaration}`,
+        `const value = function named() {\n${declaration}\n};`,
+        `if (false)\n${declaration}`,
+        `if ((false)) /* guarded */\n${declaration}`,
+        `if (true) {} else\n${declaration}`,
+        `while (false)\n${declaration}`,
+        `for (; false;)\n${declaration}`,
+        `for (const item of [])\n${declaration}`,
+        `do\n${declaration} while (false);`,
+        `label:\n${declaration}`,
+        `const pattern = /}${declaration.replace(' {}', '')}/;`,
+        `function wrapper() { const pattern = /}/; ${declaration} }`
+      ].forEach((source) => {
+        assert.equal(hasRequiredEntrypoint(source, entrypoint), false, source);
+      });
+      [`async ${declaration}`, `/* comment */\n${declaration}`, `const value = 1;\n${declaration}`,
+        `const value = (() => 1)()\n${declaration}`, `if (false) {}\n${declaration}`,
+        `const pattern = /{/;\n${declaration}`,
+        `const pattern = /[}/]/;\n${declaration}`,
+        `const pattern = /\\/{/;\n${declaration}`,
+        `const quotient = (12) / 3;\n${declaration}`,
+        `if (false) /{/;\n${declaration}`
+      ].forEach((source) => assert.equal(hasRequiredEntrypoint(source, entrypoint), true, source));
+    });
+    assert.equal(sourceSyntaxError('throw new Error("must not execute");'), null);
+    assert.ok(sourceSyntaxError(sources.join('\n') + '('));
+    assert.ok(sourceSyntaxError('return;'));
+    assert.equal(hasRequiredEntrypoint('return; function required() {}', 'required'), false);
+    const gate = require('node:child_process').spawnSync(process.execPath,
+      [path.join(projectRoot, 'scripts/lib/apps-script-entrypoints.js')],
+      { input: JSON.stringify([...sources, '(']), encoding: 'utf8' });
+    assert.equal(gate.status, 1);
+    assert.match(gate.stderr, /source failed syntax validation/);
+    for (const [source, expectedType] of [
+      ['async function wrapper(){ await /}function required(){}/; }', 'undefined'],
+      ['const result = function () {} / 2;\nfunction required() {}', 'function'],
+      ['const value = `${`;\nfunction required() {}\n`}`;', 'undefined'],
+      ['const value = `${`{`}`;\nfunction required() {}', 'function'],
+      ['const pattern = /{/;\nfunction required() {}', 'function'],
+      ['const pattern = /}function required()/;', 'undefined'],
+      ['function wrapper() { /}/; function required() {} }', 'undefined'],
+      ['function wrapper() { const pattern = +/}/; function required() {} }', 'undefined'],
+      ['if (false) {} /{/; function required() {}', 'function'],
+      ['const ratio = {} / 2; function required() {}', 'function'],
+      ['let number = 2; const ratio = number++ / 2; function required() {}', 'function'],
+      ['function wrapper() { const pattern = /}/; function required() {} }', 'undefined']
+    ]) {
+      assert.equal(vm.runInNewContext(source + '; typeof required'), expectedType);
+      assert.equal(hasRequiredEntrypoint(source, 'required'), expectedType === 'function');
+      const artifactSources = [source.replaceAll('required', requiredEntrypoints[0]), ...sources.slice(1)];
+      const artifactGate = require('node:child_process').spawnSync(process.execPath,
+        [path.join(projectRoot, 'scripts/lib/apps-script-entrypoints.js')],
+        { input: JSON.stringify(artifactSources), encoding: 'utf8' });
+      assert.equal(artifactGate.status, expectedType === 'function' ? 0 : 1, source);
+    }
+    assert.equal(vm.runInNewContext('if (false)\nfunction required() {}\ntypeof required'), 'undefined');
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+function testEntrypointValidationIsSelfContainedAfterRelocation() {
+  const { spawnSync } = require('node:child_process');
+  const { requiredEntrypoints } = require('../scripts/lib/apps-script-entrypoints.js');
+  const fixtureRoot = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gduc-parser-copy-'));
+  try {
+    fs.cpSync(path.join(projectRoot, 'scripts'), path.join(fixtureRoot, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(fixtureRoot, 'locales'));
+    assert.equal(fs.existsSync(path.join(fixtureRoot, 'node_modules')), false);
+    assert.equal(fs.existsSync(path.join(fixtureRoot, 'scripts/node_modules')), false);
+    const guardFile = path.join(fixtureRoot, 'offline-guard.js');
+    fs.writeFileSync(guardFile, `
+      const Module = require('node:module');
+      const path = require('node:path');
+      const root = __dirname + path.sep;
+      const originalLoad = Module._load;
+      const forbidden = new Set(['net', 'http', 'https', 'http2', 'dns', 'dgram', 'tls',
+        'child_process', 'worker_threads']);
+      Module._load = function (request, parent, isMain) {
+        const name = request.replace(/^node:/, '').split('/')[0];
+        if (forbidden.has(name)) throw new Error('Network and subprocess APIs are disabled');
+        if (!Module.isBuiltin(request)) {
+          const resolved = Module._resolveFilename(request, parent, isMain);
+          if (!resolved.startsWith(root) || resolved.includes(path.sep + 'node_modules' + path.sep)) {
+            throw new Error('External package loading is disabled');
+          }
+        }
+        return originalLoad.apply(this, arguments);
+      };
+      globalThis.fetch = () => { throw new Error('Network APIs are disabled'); };
+    `);
+    const options = {
+      cwd: fixtureRoot,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }
+    };
+    const run = (args, input) => spawnSync(process.execPath,
+      ['--no-global-search-paths', '--require', guardFile, ...args], { ...options, input });
+    assert.notEqual(run(['-e', 'require("node:https")']).status, 0);
+    assert.notEqual(run(['-e', 'fetch("https://example.invalid")']).status, 0);
+    assert.notEqual(run(['-e', 'require("acorn")']).status, 0);
+
+    // These statements would fail if either admission path executed source.
+    const sources = ['throw new Error("Source must not execute");',
+      ...requiredEntrypoints.map((name) => `function ${name}() {}`)];
+    sources.forEach((source, index) => fs.writeFileSync(path.join(fixtureRoot, `${index}.gs`), source));
+    const local = run(['scripts/validate-apps-script.js']);
+    assert.equal(local.status, 0, local.stderr);
+    const artifact = run(['scripts/lib/apps-script-entrypoints.js'], JSON.stringify(sources));
+    assert.equal(artifact.status, 0, artifact.stderr);
+    const generatorSources = [...sources.slice(0, -1), `function* ${requiredEntrypoints.at(-1)}() {}`];
+    const generator = run(['scripts/lib/apps-script-entrypoints.js'], JSON.stringify(generatorSources));
+    assert.equal(generator.status, 1);
+    assert.match(generator.stderr, new RegExp(requiredEntrypoints.at(-1)));
+    const finalSourceFile = path.join(fixtureRoot, `${sources.length - 1}.gs`);
+    fs.writeFileSync(finalSourceFile, generatorSources.at(-1));
+    const generatorLocal = run(['scripts/validate-apps-script.js']);
+    assert.equal(generatorLocal.status, 1);
+    assert.match(generatorLocal.stderr, new RegExp(requiredEntrypoints.at(-1)));
+    fs.writeFileSync(finalSourceFile, sources.at(-1));
+    const missing = run(['scripts/lib/apps-script-entrypoints.js'], JSON.stringify(sources.slice(0, -1)));
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, new RegExp(requiredEntrypoints.at(-1)));
+    const invalid = run(['scripts/lib/apps-script-entrypoints.js'], JSON.stringify([...sources, 'return;']));
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stderr, /source failed syntax validation/);
+    fs.writeFileSync(path.join(fixtureRoot, 'return.gs'), 'return;');
+    const invalidLocal = run(['scripts/validate-apps-script.js']);
+    assert.equal(invalidLocal.status, 1);
+    assert.match(invalidLocal.stderr, /return.*outside of function/);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 function testNormalizedConfigurationCollisions() {
@@ -336,6 +478,7 @@ function testDeploymentContract() {
 
 testCommittedJsonAndRuntimeConfig();
 testRequiredEntrypointValidationIsTopLevelAndNegativeSafe();
+testEntrypointValidationIsSelfContainedAfterRelocation();
 testNormalizedConfigurationCollisions();
 testLocaleParity();
 testDeploymentContract();

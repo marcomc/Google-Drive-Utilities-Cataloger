@@ -2116,6 +2116,67 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
   assert.deepEqual(customOverride.problems, []);
 }
 
+function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
+  for (const locale of ['en', 'it']) {
+    const context = loadCataloger();
+    const localization = context.getLocalizationRegistry_()[locale];
+    const defaults = Array.from(localization.supplierFieldDefaults);
+    const suppliers = [...new Set(defaults.map(rule => rule.supplier).concat('OTHER'))];
+    const supplies = [...new Set(defaults.map(rule => rule.supply_type).concat('Water'))];
+    context.getAutomationConfig_ = () => ({ locale, canonical_suppliers: suppliers,
+      canonical_supplies: supplies, supplier_aliases: { reviewed: 'OENERGY' },
+      supply_aliases: { methane: 'Gas' }, frequency_overrides: [], address_rules: [] });
+    context.classifyAddress_ = () => 'import';
+    context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+    context.validateTargetSheetValues_ = () => ({ valid: true });
+    const file = { getBlob: () => ({}), getId: () => 'file-id', getName: () => 'invoice.pdf' };
+    for (const rule of defaults) {
+      for (const [supplier, supply] of [
+        [rule.supplier, rule.supply_type], ['OTHER', rule.supply_type], [rule.supplier, 'Water']
+      ]) {
+        const eligible = supplier === rule.supplier && supply === rule.supply_type;
+        const statement = rule.header + (locale === 'it' ? ' non presente nel documento.' :
+          ' is not present in the document.');
+        const raw = { ...validInvoice(), supplier, supply_type: supply,
+          sheet_values: [], problems: [statement] };
+        const headers = Array.from(localization.installerSheetHeaders).concat(rule.header);
+        context.getSheetHeadersBySupply_ = () => ({ [supply]: headers });
+        context.callGeminiForPdf_ = () => JSON.stringify(raw);
+        const extracted = context.extractUtilityData_(file, 'policy');
+        assert.equal(extracted.configured_secondary_headers.includes(rule.header), !eligible,
+          `${locale} ${supplier}/${supply}: ${rule.header}`);
+        assert.equal(context.validateExtractedUtilityDataForImport_(extracted).valid, true);
+        const entry = extracted.sheet_values.find(item => item.header === rule.header);
+        assert.equal(entry ? entry.value : undefined, eligible ? 0 : undefined);
+        assert.equal(JSON.stringify(context.buildExtractionRepairSnapshot_(extracted))
+          .includes('configured_secondary_headers'), false);
+        for (const problem of [statement + ' VAT is missing.',
+          rule.header + ' is unreadable.', rule.header + ' is inconsistent.']) {
+          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw, problems: [problem] });
+          const blocked = context.extractUtilityData_(file, 'policy');
+          assert.equal(context.validateExtractedUtilityDataForImport_(blocked).valid, false, problem);
+        }
+        if (!eligible) {
+          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw,
+            sheet_values: [{ header: rule.header, value: 7 }] });
+          assert.equal(context.validateExtractedUtilityDataForImport_(
+            context.extractUtilityData_(file, 'policy')).valid, false,
+          'Explicit absence must not erase a populated value');
+        }
+      }
+    }
+    const recalculations = defaults.find(rule => rule.supplier === 'OENERGY').header;
+    assert.equal(context.getConfiguredSecondaryInvoiceHeaders_([recalculations], {
+      ...validInvoice(), supplier: 'reviewed', supply_type: 'methane'
+    }).includes(recalculations), false);
+    assert.equal(context.getConfiguredSecondaryInvoiceHeaders_([recalculations], {
+      ...validInvoice(), document_type: 'Report', supplier: 'OENERGY', supply_type: 'Gas'
+    }).includes(recalculations), true);
+  }
+}
+
+testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice();
+
 function testConfiguredSecondaryAbsenceRequiresStructuredEligibilityAndReconciliation() {
   ['en', 'it'].forEach((locale) => {
     const context = loadCataloger();
@@ -2399,10 +2460,30 @@ function testInformationalDiagnosticsConsumeWholeStatements() {
       [electricity, 'Unit cost F1/F2/F3 populated from selling unit cost for monorate.'],
       [electricity, 'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.'],
       [validInvoice(), 'The amounts are shown including VAT.'],
+      [validInvoice(), 'Line item amounts are shown including VAT.'],
+      [validInvoice(), 'The line item amount is shown including VAT.'],
+      [validInvoice(), 'The amount is shown including VAT.'],
+      [validInvoice(), 'The amount was shown including VAT.'],
+      [validInvoice(), 'The line item amounts were shown including VAT.'],
+      [validInvoice(), 'The line item amount stated in the invoice inclusive of VAT.'],
+      [validInvoice(), 'Gli importi indicati in fattura sono comprensivi di IVA.'],
+      [validInvoice(), 'Gli importi riportati nel documento sono comprensivi di IVA.'],
       [validInvoice(), 'Gli importi delle singole voci nel dettaglio servizi sono riportati nel documento comprensivi di IVA al 22%.'],
       [validInvoice(), 'VAT is already included in the total.'],
       [{ ...validInvoice(), configured_secondary_headers: ['Custom fee'] }, 'Custom fee is not printed in the invoice.']
     ];
+    for (const separator of [': ', ' : ', ':', '  :  ']) {
+      cases.push([
+        { ...validInvoice(), contract_number: '', customer_code: 'CL123' },
+        'Numero di contratto' + separator + 'non presente nel documento.'
+      ], [
+        { ...validInvoice(), contract_number: '', customer_code: 'CL123' },
+        'Contract number' + separator + 'not present in the document.'
+      ], [
+        { ...validInvoice(), customer_code: '' },
+        'Customer code' + separator + 'not present in the document.'
+      ]);
+    }
     const contradictory = (statement) => {
       const base = statement.replace(/[.]$/, '');
       return ['; VAT is missing', '. Invoice number is missing', ' IVA mancante',
@@ -2436,20 +2517,24 @@ function testInformationalDiagnosticsConsumeWholeStatements() {
         false, problem);
     }
     for (const rule of context.getLocalization_().supplierFieldDefaults) {
-      const statement = rule.header + (locale === 'it' ? ' non presente nel documento.' :
-        ' not present in the document.');
-      const invoice = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
-        sheet_values: [], problems: [statement] };
-      context.applySupplierFieldDefaults_(invoice, [rule.header]);
-      assert.equal(invoice.sheet_values[0].value, 0, statement);
-      assert.equal(invoice.problems.length, 0, statement);
-      for (const problem of contradictory(statement)) {
-        const blocked = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
-          sheet_values: [], problems: [problem] };
-        context.applySupplierFieldDefaults_(blocked, [rule.header]);
-        assert.equal(blocked.sheet_values.length, 0, problem);
-        assert.equal(blocked.problems.includes(problem), true, problem);
-        assert.equal(context.validateExtraction_(blocked).valid, false, problem);
+      for (const separator of [' ', ': ', ' : ', ':', '  :  ']) {
+        for (const label of new Set([rule.header, rule.header.replace(/'/g, '’')])) {
+          const statement = label + separator + (locale === 'it' ? 'non presente nel documento.' :
+            'not present in the document.');
+          const invoice = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
+            sheet_values: [], problems: [statement] };
+          context.applySupplierFieldDefaults_(invoice, [rule.header]);
+          assert.equal(invoice.sheet_values[0].value, 0, statement);
+          assert.equal(invoice.problems.length, 0, statement);
+          for (const problem of contradictory(statement)) {
+            const blocked = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
+              sheet_values: [], problems: [problem] };
+            context.applySupplierFieldDefaults_(blocked, [rule.header]);
+            assert.equal(blocked.sheet_values.length, 0, problem);
+            assert.equal(blocked.problems.includes(problem), true, problem);
+            assert.equal(context.validateExtraction_(blocked).valid, false, problem);
+          }
+        }
       }
     }
     config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency: 'annual' }];
@@ -3187,11 +3272,52 @@ function testLocalizedConfiguredReconciliationPipeline() {
       assert.equal(validate({ ...defaulted, problems: [absentProblem + ' The amount is ambiguous.'] }).valid,
         false, `${locale} ${supplier}: conflicting absence`);
       const optionalHeader = detailHeaders[0];
-      const optional = { ...invoice, problems: [locale === 'it' ?
+      const optional = { ...invoice, cost_non_consumption: total - 1,
+        total: invoice.total - 1, problems: [locale === 'it' ?
         `${optionalHeader} non applicabile.` : `${optionalHeader} is not applicable.`],
       sheet_values: invoice.sheet_values.filter(entry => entry.header !== optionalHeader) };
       assert.equal(validate(optional).valid, true, `${locale} ${supplier}: explicit optional absence`);
       assert.equal(validate({ ...optional, total: optional.total + 1 }).valid, false);
+      assert.equal(validate({ ...optional, cost_non_consumption: total, total: invoice.total }).valid, false,
+        'An absent member must not hide the original inconsistent partition sum');
+      const optionalHeaders = Array.from(context.getConfiguredSecondaryInvoiceHeaders_(detailHeaders, normalized));
+      const absenceCases = [];
+      for (const absentHeaders of [optionalHeaders.slice(0, 1), optionalHeaders.slice(0, 2), detailHeaders]) {
+        for (const representation of ['omitted', 'null']) {
+          const allAbsent = absentHeaders.length === detailHeaders.length;
+          const remaining = invoice.sheet_values.filter(entry => !absentHeaders.includes(entry.header));
+          const remainingTotal = remaining.reduce((sum, entry) => sum + entry.value, 0);
+          const absent = { ...invoice, cost_non_consumption: remainingTotal, total: remainingTotal + 26,
+            problems: absentHeaders.map(header => locale === 'it' ?
+              `${header} ${allAbsent ? 'non presente nel documento' : 'non applicabile'}.` :
+              `${header} ${allAbsent ? 'is not present in the document' : 'is not applicable'}.`),
+            sheet_values: remaining.concat(representation === 'null' ?
+              absentHeaders.map(header => ({ header, value: null })) : []) };
+          assert.equal(validate(absent).valid, true,
+            `${locale} ${supplier}: ${absentHeaders.length} ${representation} members`);
+          const absentExtraction = extract(absent);
+          for (const header of absentHeaders.filter(header => optionalHeaders.includes(header))) {
+            const entry = absentExtraction.sheet_values.find(value => value.header === header);
+            assert.equal(entry ? entry.value : undefined, representation === 'null' ? null : undefined,
+              'Verified absence must not create a numerical spreadsheet value');
+          }
+          const wrongAggregate = { ...absent, cost_non_consumption: remainingTotal + 2,
+            total: absent.total + 2 };
+          assert.equal(validate(wrongAggregate).valid, false,
+            `${locale} ${supplier}: absent details cannot disable remaining-sum reconciliation`);
+          absenceCases.push({ valid: absent, invalid: wrongAggregate });
+          assert.equal(validate({ ...absent, problems: absent.problems.map((problem, index) =>
+            index === 0 ? problem + ' The amount is ambiguous.' : problem) }).valid, false);
+          if (remaining.length) {
+            assert.equal(validate({ ...absent, sheet_values: absent.sheet_values.map(entry =>
+              entry.header === remaining[0].header ? { ...entry, value: entry.value + 2 } : entry) }).valid, false,
+            'A wrong numerical sibling remains blocking beside an absent field');
+            assert.throws(() => extract({ ...absent, sheet_values: absent.sheet_values.map(entry =>
+              entry.header === remaining[0].header ? { ...entry, value: 'unreadable' } : entry) }),
+            error => error.invalidExtractionOutput === true);
+          }
+        }
+      }
       const mismatched = { ...invoice, cost_non_consumption: total + 3, total: invoice.total + 3,
         monetary_validated_: true };
       const failed = extract(mismatched);
@@ -3220,6 +3346,18 @@ function testLocalizedConfiguredReconciliationPipeline() {
       assert.equal(calls - beforeExhaustion,
         vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
       assert.equal(mutations, 0, 'Detail repair exhaustion cannot journal, write, move, or rename');
+      for (const absenceCase of absenceCases) {
+        let absenceCalls = 0;
+        context.callGeminiForPdf_ = () => JSON.stringify(absenceCalls++ === 0 ? absenceCase.invalid : absenceCase.valid);
+        const absenceRepair = context.extractUtilityDataWithRepair_(file, 'policy');
+        assert.equal(absenceRepair.aiCallCount, 2);
+        assert.equal(absenceRepair.validation.valid, true);
+        absenceCalls = 0;
+        context.callGeminiForPdf_ = () => { absenceCalls += 1; return JSON.stringify(absenceCase.invalid); };
+        assert.equal(context.processIntakeFile_({ ...file, getSize: () => 100 }, {}, 'policy').status, 'VERIFY');
+        assert.equal(absenceCalls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+        assert.equal(mutations, 0, 'Unreconciled partition with absent members cannot reach a mutation');
+      }
       headers = [detailHeaders[0]];
       assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.slice(0, 1) }).valid, true,
         'Partial writable partition does not fabricate missing formula details');
@@ -3324,7 +3462,11 @@ function testQuantityGroupingWriteAndVerificationContract() {
       .concat(Array.from(locale.electricityBandHeaders).filter((_, index) => index % 2 === 1))));
   for (const header of headers) {
     const suffix = context.isUnitCostHeader_(header) ? ' EUR/month' : ' kWh';
-    for (const value of ['1,234.567', '1.234,567', '1,234.567' + suffix, '1.234,567' + suffix]) {
+    const representations = ['1,234.567', '1.234,567', '1,234.567' + suffix, '1.234,567' + suffix]
+      .concat([' ', '\u00a0', '\u202f'].flatMap(space => [
+        '1' + space + '234.567' + suffix, '1' + space + '234,567' + suffix
+      ]));
+    for (const value of representations) {
       assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, 1234.567);
       for (const format of ['General', '@', '0.00', 'yyyy-mm-dd']) {
         const values = ['', '', ''];
@@ -3393,6 +3535,104 @@ function testUnitRateAmbiguityAcrossEveryAliasAndSuffix() {
   }
 }
 testUnitRateAmbiguityAcrossEveryAliasAndSuffix();
+
+function testStrictSpacedGroupingAcrossNumericContracts() {
+  const context = loadCataloger();
+  const registry = context.getLocalizationRegistry_();
+  const headers = [...new Set(Object.values(registry).flatMap(locale =>
+    Array.from(locale.numericSupplementaryHeaders).concat(
+      Array.from(locale.electricityBandHeaders), Array.from(locale.headerAliases.unitCost),
+      ...['consumptionCost', 'nonConsumptionCosts', 'vat', 'total'].map(key =>
+        Array.from(locale.headerAliases[key])))))];
+  for (const header of headers) {
+    const quantity = context.isConsumptionQuantityHeader_(header);
+    const suffix = quantity ? ' kWh' : context.isUnitCostHeader_(header) ? ' EUR/month' : ' EUR';
+    for (const space of [' ', '\u00a0', '\u202f']) {
+      for (const [digits, expected] of [
+        ['1' + space + '234,56', 1234.56], ['1' + space + '234.567', 1234.567],
+        ['12' + space + '345' + space + '678', 12345678],
+        ['+1' + space + '234,56', 1234.56]
+      ]) {
+        const value = digits + suffix;
+        assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, expected,
+          `${header}: ${JSON.stringify(value)}`);
+      }
+      const negative = '-1' + space + '234,56' + suffix;
+      if (quantity) {
+        assert.throws(() => context.normalizeSheetValues_([{ header, value: negative }]), /nonnumeric/);
+      } else {
+        assert.equal(context.normalizeSheetValues_([{ header, value: negative }])[0].value, -1234.56);
+      }
+    }
+    for (const digits of ['1 23,45', '12 34 567', '1  234,56', '1\t234,56', '1\n234,56',
+      '1 234,5 6', '1 234.567,89', '1,234 567', '1,234', '1.234']) {
+      assert.throws(() => context.normalizeSheetValues_([{ header, value: digits + suffix }]),
+        /nonnumeric/, `${header}: malformed ${JSON.stringify(digits)}`);
+    }
+  }
+  assert.equal(context.parseSheetMoneyValue_('€ 1\u202f234,56'), 1234.56);
+  assert.equal(context.normalizeSheetValues_([{ header: 'PDR', value: '001234' }])[0].value, '001234');
+  assert.equal(context.normalizeSheetValues_([{ header: 'PDR', value: '1 234,56' }])[0].value, '1 234,56');
+  assert.equal(context.parseUnambiguousSheetNumber_(0.135338), 0.135338);
+}
+testStrictSpacedGroupingAcrossNumericContracts();
+
+function testSpacedGroupingThroughExtractionAdmissionWriteAndRepair() {
+  for (const locale of ['en', 'it']) {
+    for (const space of [' ', '\u00a0', '\u202f']) {
+      const fixture = createInvoiceVerificationFixture(locale);
+      const { context, localization, layout, invoice, sheet, values } = fixture;
+      context.getAutomationConfig_ = () => ({ locale, canonical_suppliers: ['SUPPLIER'],
+        canonical_supplies: ['Water'], supplier_aliases: {}, supply_aliases: {},
+        frequency_overrides: [], sheet_by_supply: { Water: 'Water' }, address_rules: [] });
+      context.getSpreadsheetId_ = () => 'spreadsheet-id';
+      context.getSheetLayout_ = () => layout;
+      context.SpreadsheetApp.openById = () => ({ getSheetByName: () => sheet });
+      context.classifyAddress_ = () => 'import';
+      context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+      context.logCatalogEvent_ = () => {};
+      const quantityHeader = localization.supplierReconciliation.quantity;
+      const rateHeader = localization.supplierReconciliation.rates[0];
+      const moneyHeader = localization.headerAliases.consumptionCost[0];
+      const raw = { ...invoice, cost_consumption: 1234.56, cost_non_consumption: 2,
+        vat: 1, total: 1237.56, sheet_values: invoice.sheet_values.map(entry =>
+          entry.header === quantityHeader ? { ...entry, value: '1' + space + '234,56 kWh' } :
+            entry.header === rateHeader ? { ...entry, value: '1' + space + '234,56 EUR/month' } : entry)
+          .concat([{ header: moneyHeader, value: '1' + space + '234,56 EUR' }]) };
+      context.callGeminiForPdf_ = () => JSON.stringify(raw);
+      const file = { ...fixture.file, getBlob: () => ({}), getName: () => 'invoice.pdf', getSize: () => 100 };
+      const extracted = context.extractUtilityData_(file, 'policy');
+      assert.equal(context.validateExtractedUtilityDataForImport_(extracted).valid, true);
+      context.writeInvoiceRow_(sheet, 2, layout, file, extracted);
+      assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, extracted));
+      for (const header of [quantityHeader, rateHeader, moneyHeader]) {
+        const column = layout.lookup[context.normalizeHeader_(header)];
+        assert.equal(typeof values[column - 1], 'number');
+        assert.equal(values[column - 1], 1234.56);
+      }
+      const invalid = { ...raw, sheet_values: raw.sheet_values.map(entry =>
+        entry.header === quantityHeader ? { ...entry, value: '1 23,45 kWh' } : entry) };
+      let calls = 0;
+      context.callGeminiForPdf_ = () => JSON.stringify(calls++ === 0 ? invalid : raw);
+      const repaired = context.extractUtilityDataWithRepair_(file, 'policy');
+      assert.equal(repaired.aiCallCount, 2);
+      assert.equal(repaired.validation.valid, true);
+      calls = 0;
+      context.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify(invalid); };
+      context.sha256ForFile_ = () => 'hash';
+      context.buildErrorResult_ = () => ({ status: 'ERROR' });
+      let mutations = 0;
+      context.findDuplicate_ = () => { mutations += 1; throw new Error('Unexpected admission'); };
+      context.saveMutationJournal_ = () => { mutations += 1; };
+      file.moveTo = () => { mutations += 1; };
+      file.setName = () => { mutations += 1; };
+      assert.equal(context.processIntakeFile_(file, {}, 'policy').status, 'ERROR');
+      assert.equal(calls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+      assert.equal(mutations, 0);
+    }
+  }
+}
+testSpacedGroupingThroughExtractionAdmissionWriteAndRepair();
 
 function testElectricityRateReconciliationUsesActualInstallerSchemas() {
   for (const locale of ['en', 'it']) {
@@ -4045,6 +4285,70 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
     vm.runInContext('CONFIG.GEMINI_MAX_OUTPUT_TOKENS', context));
 }
 
+function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
+  const models = [
+    ['gemini-flash-latest', 'medium', true],
+    ['gemini-2.5-pro', 'medium', true],
+    ['gemini-2.5-flash', 'medium', true],
+    ['gemini-2.5-flash-lite', 'medium', true],
+    ['gemini-3.8-flash', 'medium', false],
+    ['gemini-3.5-flash', 'medium', false],
+    ['gemini-3.5-flash-lite', 'medium', false],
+    ['gemini-3-flash-preview', 'medium', false],
+    ['gemini-3.1-pro-preview', 'medium', false],
+    ['gemini-3-pro-preview', 'high', false],
+    ['gemini-unverified-model', null, false]
+  ];
+  for (const [model, level, vertexBudget] of models) {
+    for (const backend of ['gemini_api', 'vertex_ai']) {
+      const requests = [];
+      const properties = {
+        GEMINI_MODEL: model,
+        GEMINI_API_KEY: 'developer-secret',
+        GOOGLE_CLOUD_PROJECT_ID: 'vertex-project'
+      };
+      const context = loadCataloger({ UrlFetchApp: { fetch: (url, options) => {
+        requests.push({ url, options });
+        return backend === 'gemini_api' ? mockedInteractionsResponse() : {
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ candidates: [{
+            finishReason: 'STOP', content: { parts: [{ text: '{}' }] }
+          }] })
+        };
+      } } });
+      context.getScriptProperty_ = (key) => properties[key] || '';
+      context.buildExtractionPrompt_ = () => 'prompt';
+      context.logCatalogEvent_ = () => {};
+      context.logGeminiUsage_ = () => {};
+      assert.equal(context.callGeminiForPdfWithBackend_(
+        { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, backend, ''
+      ), '{}');
+      assert.equal(requests.length, 1, model + ': ' + backend);
+      assert.equal(properties.GEMINI_MODEL, model);
+      const payload = JSON.parse(requests[0].options.payload);
+      if (backend === 'gemini_api') {
+        assert.equal(payload.model, model);
+        assert.equal(payload.store, false);
+        assert.equal(Object.hasOwn(payload, 'previous_interaction_id'), false);
+        assert.deepEqual(payload.generation_config, Object.assign(
+          { max_output_tokens: 8192 }, level ? { thinking_level: level } : {}
+        ), model);
+        assert.equal(Object.hasOwn(payload, 'generationConfig'), false);
+      } else {
+        assert.ok(requests[0].url.endsWith('/' + model + ':generateContent'));
+        assert.equal(payload.generationConfig.maxOutputTokens, 8192);
+        assert.deepEqual(payload.generationConfig.thinkingConfig,
+          vertexBudget ? { thinkingBudget: 4096 } : undefined, model);
+        assert.deepEqual(Object.keys(payload.generationConfig).sort(),
+          ['maxOutputTokens', 'responseMimeType', 'responseSchema']
+            .concat(vertexBudget ? ['thinkingConfig'] : []).sort());
+        assert.equal(Object.hasOwn(payload, 'generation_config'), false);
+        assert.equal(Object.hasOwn(payload, 'cachedContent'), false);
+      }
+    }
+  }
+}
+
 function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   const properties = {};
   const context = loadCataloger({
@@ -4344,6 +4648,7 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   const events = [];
   const properties = {
     GEMINI_API_KEY: 'developer-secret',
+    GEMINI_MODEL: 'gemini-2.5-flash',
     GEMINI_BACKEND: 'gemini_api',
     GEMINI_AUTO_VERTEX_FALLBACK: 'true',
     GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project'
@@ -4397,7 +4702,6 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-2.5-flash';
   context.getVertexAiLocation_ = () => 'global';
   context.getScriptProperty_ = (key) => properties[key] || '';
   context.buildExtractionPrompt_ = () => 'prompt';
@@ -4452,6 +4756,22 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   );
   assert.equal(thirdResult, '{}');
   assert.match(requests[3].url, /generativelanguage\.googleapis\.com/);
+  for (const index of [0, 3]) {
+    const payload = JSON.parse(requests[index].options.payload);
+    assert.equal(payload.model, 'gemini-2.5-flash');
+    assert.equal(payload.store, false);
+    assert.deepEqual(payload.generation_config, {
+      max_output_tokens: 8192, thinking_level: 'medium'
+    });
+  }
+  for (const index of [1, 2]) {
+    assert.ok(requests[index].url.endsWith('/gemini-2.5-flash:generateContent'));
+    const payload = JSON.parse(requests[index].options.payload);
+    assert.equal(payload.generationConfig.maxOutputTokens, 8192);
+    assert.deepEqual(payload.generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+    assert.equal(Object.hasOwn(payload, 'generation_config'), false);
+  }
+  assert.equal(properties.GEMINI_MODEL, 'gemini-2.5-flash');
 }
 
 function testRepairContextSurvivesAutomaticVertexFallback() {
@@ -8179,6 +8499,7 @@ testSupplierDefaultsNormalizeConfiguredIdentities();
 testAmbiguousAddressRulesFailClosed();
 testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
+testProviderReasoningPayloadPreservesExplicitModelCapabilities();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences();
 testVertexLatestAliasOmitsUnsupportedThinkingLevel();

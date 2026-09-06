@@ -1141,7 +1141,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
   });
   Object.defineProperty(normalized, 'configured_secondary_headers', {
     value: getConfiguredSecondaryInvoiceHeaders_(
-      headersBySupply[normalized.supply_type] || []
+      headersBySupply[normalized.supply_type] || [], normalized
     ),
     enumerable: false
   });
@@ -1212,6 +1212,32 @@ function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
     getEffectiveGeminiBackend_(), '', repairContext);
 }
 
+function getGeminiReasoningConfig_(model, backend) {
+  const gemini25Models = [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
+  ];
+  if (backend === 'vertex_ai') {
+    // Vertex generateContent uses token budgets for Gemini 2.5. Preserve the
+    // verified budget contract for our mutable default alias as well.
+    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
+      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
+    } : {};
+  }
+  // Interactions accepts levels even for 2.5; its controls differ from Vertex.
+  // https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking
+  if (model === 'gemini-3-pro-preview') {
+    return { thinking_level: 'high' };
+  }
+  const mediumLevelModels = gemini25Models.concat([
+    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
+  ]);
+  return mediumLevelModels.indexOf(model) !== -1 ? {
+    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
+  } : {};
+}
+
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   driveAgentsPolicy, file, backend, fallbackReason, repairContext) {
   const isVertexAi = backend === 'vertex_ai';
@@ -1241,12 +1267,9 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   if (isVertexAi) {
     generationConfig.responseSchema = buildVertexExtractionResponseSchema_();
   }
-  // Vertex exposes the token-budget control. Keep reasoning enabled for
-  // document interpretation while bounding its share of the output budget.
-  if (model === CONFIG.DEFAULT_MODEL && isVertexAi) {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET
-    };
+  const reasoningConfig = getGeminiReasoningConfig_(model, backend);
+  if (isVertexAi) {
+    Object.assign(generationConfig, reasoningConfig);
   }
   const payload = isGeminiInteractionsApi ? {
     model: model,
@@ -1259,10 +1282,9 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       mime_type: 'application/json',
       schema: buildExtractionResponseSchema_()
     }],
-    generation_config: {
-      thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL,
+    generation_config: Object.assign({
       max_output_tokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS
-    },
+    }, reasoningConfig),
     // Invoice PDFs are processed statelessly and must not be retained by the
     // Interactions API after the response is returned.
     store: false
@@ -2519,20 +2541,25 @@ function validateServiceIdentityForInvoice_(extracted) {
   return validateServiceIdentity_(extracted, configured);
 }
 
+function getApplicableSupplierFieldDefaults_(extracted) {
+  if (!extracted || extracted.document_type !== 'Invoice') {
+    return [];
+  }
+  return (getLocalization_().supplierFieldDefaults || []).filter(function (rule) {
+    return rule && rule.header &&
+      normalizeSupplier_(rule.supplier) === normalizeSupplier_(extracted.supplier) &&
+      normalizeSupplyType_(rule.supply_type) === normalizeSupplyType_(extracted.supply_type);
+  });
+}
+
 function applySupplierFieldDefaults_(extracted, availableHeaders) {
   if (!extracted || extracted.document_type !== 'Invoice' ||
     !Array.isArray(availableHeaders)) {
     return;
   }
   const normalizedAvailableHeaders = availableHeaders.map(normalizeHeader_);
-  const defaults = getLocalization_().supplierFieldDefaults || [];
+  const defaults = getApplicableSupplierFieldDefaults_(extracted);
   defaults.forEach(function (defaultValue) {
-    if (!defaultValue ||
-      normalizeSupplier_(defaultValue.supplier) !== normalizeSupplier_(extracted.supplier) ||
-      normalizeSupplyType_(defaultValue.supply_type) !==
-        normalizeSupplyType_(extracted.supply_type) || !defaultValue.header) {
-      return;
-    }
     const defaultHeader = normalizeHeader_(defaultValue.header);
     const headerIsAvailable = normalizedAvailableHeaders.indexOf(defaultHeader) >= 0;
     const explicitAbsence = hasExplicitSupplierFieldAbsence_(extracted.problems,
@@ -2717,6 +2744,11 @@ function parseUnambiguousSheetNumber_(value) {
     return null;
   }
   let text = value.trim().replace(/^(?:€|EUR)\s*|\s*(?:€|EUR)$/gi, '').trim();
+  // Only complete three-digit space groups establish an unambiguous thousands
+  // separator. Do not erase arbitrary whitespace inside an extracted number.
+  if (/^[+-]?[1-9]\d{0,2}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?$/.test(text)) {
+    text = text.replace(/[ \u00a0\u202f]/g, '');
+  }
   // A single three-digit suffix is ambiguous between grouping and decimals.
   // Leading zero cannot be a thousands group; retain rates such as 0.123.
   if (/^[+-]?[1-9]\d{0,2}[.,]\d{3}$/.test(text)) {
@@ -2998,7 +3030,7 @@ function isExplicitFieldAbsenceStatement_(problem, fieldPattern, absencePattern)
   // dropping another problem, even when the model omits clause punctuation.
   return new RegExp(
     '^(?:(?:il|la|the)\\s+)?(?:' + fieldPattern + ')' +
-    '(?:\\s+(?:is|was|è|e))?\\s+(?:' + absencePattern + ')' +
+    '(?:\\s*:\\s*|\\s+)(?:(?:is|was|è|e)\\s+)?(?:' + absencePattern + ')' +
     '(?:\\s+(?:explicitly|esplicitamente))?' +
     '(?:\\s+(?:from|on|in|nel|nella|sul|sulla)\\s+(?:the\\s+)?' +
     '(?:supplier\\s+)?(?:invoice|document|fattura|documento))?[.]?$', 'i'
@@ -3069,8 +3101,9 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
 }
 
 function isAffirmativeInformationalTaxInclusionFact_(text) {
-  return /^(?:gli\s+)?(?:importi|voci|dettagli)(?:\s+delle\s+singole\s+voci)?(?:\s+nel\s+dettaglio\s+servizi)?\s+(?:sono\s+)?(?:riportati|indicati|espressi)(?:\s+nel\s+documento)?\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
-    /^(?:the\s+)?(?:line\s+items?|amounts?|charges?|details)\s+(?:are\s+)?(?:shown|stated|listed|reported)(?:\s+in\s+the\s+(?:invoice|document))?\s+(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+  return /^(?:gli\s+)?(?:importi|voci|dettagli)(?:\s+delle\s+singole\s+voci)?(?:\s+nel\s+dettaglio\s+servizi)?\s+(?:sono\s+)?(?:riportati|indicati|espressi)(?:\s+(?:nel\s+documento|in\s+fattura))?\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:gli\s+)?(?:importi|voci|dettagli)\s+(?:riportati|indicati|espressi)\s+(?:in\s+fattura|nel\s+documento)\s+sono\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:the\s+)?(?:line\s+items?(?:\s+amounts?)?|amounts?|charges?|details)\s+(?:(?:is|are|was|were)\s+)?(?:shown|stated|listed|reported)(?:\s+in\s+the\s+(?:invoice|document))?\s+(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
     /^(?:iva|vat)\s+(?:è|e|is|was)\s+(?:(?:già|already)\s+)?(?:inclus[ao]|included)\s+(?:nel(?:la)?\s+(?:totale|importo)|in\s+(?:the\s+)?(?:total|amount))[.!?]?$/i.test(text);
 }
 
@@ -4547,13 +4580,17 @@ function validateSupplierNonConsumptionDetails_(extracted, key, code, label) {
       { code: code + '_incomplete', repairable: true, fields: fields });
   }
   // Simple sheets and formula-backed columns do not expose a complete writable
-  // partition. Explicit optional absence is not a printed numerical zero.
+  // partition. Verified absence does not disable checks on the remaining costs.
   if (!details.every(function (detail) {
-    return detail.configured && detail.value !== null;
+    return detail.configured;
   })) {
     return { valid: true };
   }
-  const total = details.reduce(function (sum, detail) { return sum + detail.value; }, 0);
+  // Sum observed/defaulted numerical members without inserting a value for an
+  // absent member into the extraction or its eventual spreadsheet cell.
+  const total = details.reduce(function (sum, detail) {
+    return detail.value === null ? sum : sum + detail.value;
+  }, 0);
   if (typeof extracted.cost_non_consumption === 'number' &&
     Number.isFinite(extracted.cost_non_consumption) &&
     Math.abs(total - extracted.cost_non_consumption) <= CONFIG.MONEY_TOLERANCE) {
@@ -4684,7 +4721,7 @@ function validateSupplierMonetaryOverlays_(extracted, code, label) {
   return { valid: true };
 }
 
-function getConfiguredSecondaryInvoiceHeaders_(headers) {
+function getConfiguredSecondaryInvoiceHeaders_(headers, extracted) {
   const localization = getLocalization_();
   const canonicalKeys = [
     'issueDate', 'supplier', 'identifier', 'contractNumber', 'accountHolder',
@@ -4694,7 +4731,7 @@ function getConfiguredSecondaryInvoiceHeaders_(headers) {
   const excluded = canonicalKeys.reduce(function (all, key) {
     return all.concat(getHeaderAliases_(key));
   }, []).concat(localization.electricityBandHeaders || []).concat(
-    (localization.supplierFieldDefaults || []).map(function (item) {
+    getApplicableSupplierFieldDefaults_(extracted).map(function (item) {
       return item.header;
     })
   ).map(normalizeHeader_);

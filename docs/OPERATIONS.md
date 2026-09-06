@@ -263,11 +263,17 @@ Other supplementary numeric strings convert for recognized quantitative
 headers independently of cell formatting. Identifier and unknown-header text
 remains literal; ambiguous monetary, consumption, and unit-rate grouping is
 rejected. Native numeric rates and unambiguous high-precision rate strings keep
-their precision.
+their precision. Three-digit groups separated by spaces, nonbreaking spaces,
+or narrow nonbreaking spaces are accepted; malformed grouping remains blocking.
 Readback verification requires literal text cells for identifiers and reference
 periods and preserves rate and quantity precision. Informational diagnostics
 must match a complete supported statement; additional blocking clauses remain
-unresolved. A malformed repair cannot replace the last sanitized extraction.
+unresolved. Ordinary field-label colons and supported affirmative VAT wording
+remain informational. Supplier defaults apply only to the matching supplier
+and supply; other invoices retain generic optional-field handling. A verified
+absent detail contributes no amount to a fully configured cost partition, whose
+remaining values must still reconcile. A malformed repair cannot replace the
+last sanitized extraction.
 Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
 handoff from the installed Cloud project and validates the new key against the
 configured model. It changes only the key, preserving the backend, model,

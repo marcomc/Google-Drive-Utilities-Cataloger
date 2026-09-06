@@ -72,6 +72,14 @@ installations without a separate Script Properties change. The owner-only
 `validateConfiguredGeminiAccess` function performs a harmless metadata/token
 count validation against every enabled backend. Any other valid model
 identifier remains an explicit pin and is not replaced automatically.
+Reasoning controls follow the selected API and documented
+[Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
+and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)
+model capabilities:
+Gemini 2.5 pins use `medium` through Interactions and a 4,096-token thinking
+budget through Vertex; `gemini-3-pro-preview` uses `high` through Interactions.
+Unclassified pins omit unsupported reasoning settings and retain the explicit
+response limit.
 
 Supplier values written to Sheets use the exact configured canonical spelling.
 The built-in `ENERGYGAS` abbreviation is accepted as `Energygas Italia` when
