@@ -1178,6 +1178,7 @@ function preserveUnimplicatedRepairFields_(extracted, repairContext) {
         !(issue.fields || []).length ||
         issue.fields.some(function (field) {
           return monetaryFields.indexOf(field) >= 0 ||
+            ['electricity_consumption_quantity', 'electricity_selling_unit_rate'].indexOf(field) >= 0 ||
             isNumericInvoiceHeader_(field);
         });
     })) {
@@ -1541,6 +1542,8 @@ function buildExtractionResponseSchema_() {
       period_start: nullableString,
       period_end: nullableString,
       consumption_description: nullableString,
+      electricity_consumption_quantity: nullableNumber,
+      electricity_selling_unit_rate: nullableNumber,
       cost_consumption: nullableNumber,
       cost_non_consumption: nullableNumber,
       vat: nullableNumber,
@@ -1792,6 +1795,8 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
     '  "consumption_description": "concise text or null",',
+    '  "electricity_consumption_quantity": null,',
+    '  "electricity_selling_unit_rate": null,',
     '  "cost_consumption": 0.00,',
     '  "cost_non_consumption": 0.00,',
     '  "vat": 0.00,',
@@ -1814,6 +1819,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     'On OENERGY Gas invoices, do not subtract an explanatory negative or credit line such as Oneri generali di sistema from the positive network/oneri summary amounts. Use the positive payable amounts printed in the consumption and fixed-quota summaries once each; an explanatory tax/detail line is not a replacement or balancing adjustment unless it is explicitly part of the payable summary.',
     'For Gas invoices with separate "di cui spesa per vendita" and "di cui spesa per rete e oneri generali di sistema" rows, put the selling portion in Costo unitario/Totale costi consumo and Quota fissa, and sum the printed network/oneri summary amounts for consumption and fixed portions once in Trasporto e oneri. Do not use the broad quota totals in both categories. If no applied ricalcolo amount is printed, omit Ricalcoli and report one concise standalone absence problem such as "Ricalcoli non presente nel documento." so the reviewed zero default can be applied; do not describe the default as printed evidence.',
     'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. For a monoraria bill with one printed selling rate, use the rate printed in the summary row "di cui spesa per vendita energia elettrica" (or its localized equivalent) for Costo unitario and repeat that common selling rate in Costo unitario F1/F2/F3 when F1/F2/F3 quantities are reported. Do not use PREZZO FISSO, DISPACCIAMENTO, a formula component, or the network-inclusive summary rate as the selling unit cost. For the Energygas Luce sheet, follow this exact mutually exclusive mapping: Totale costi consumo and cost_consumption are the printed selling consumption amount only; Altri costi materia energia is the printed fixed selling amount only; Rete e oneri non scorporabili is the single sum of the printed network/oneri consumption amount, fixed network amount, and power-quota network amount; Oneri di sistema receives zero when ASOS/ARIM are subordinate detail rows rather than a separate top-level charge; do not map subordinate ASOS/ARIM detail rows into Oneri di sistema; Trasporto e gestione contatore and Ricalcoli receive their reviewed zero defaults when absent; Accise and Canone TV remain separate and are never included in Rete e oneri non scorporabili. Do not move the fixed selling amount into Totale costi consumo, do not put accise or Canone TV into Rete e oneri non scorporabili, and do not use a balancing or residual value for any detailed field, broad cost, VAT, or total. Every detailed value must be a printed amount or a reviewed zero default; never solve a mismatch by changing another field. Recheck every printed component, including the power quota, before calculating the network/oneri sum. Preserve the printed IVA exactly; never alter IVA to force the reconciliation. If a detail sum conflicts with the printed IVA and total, re-examine the printed cost rows and total selection rather than inventing a balancing VAT value. Use the printed total payable consistently with its Canone TV detail: when Totale da pagare includes the printed Canone TV, include that amount in the reconciliation total and non-consumption total because the target Costo totale formula includes Canone TV. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
+    'For electricity invoices with a printed aggregate consumption quantity and selling unit rate, return both electricity_consumption_quantity and electricity_selling_unit_rate as native JSON numbers, independently of the available sheet headers. These are validation evidence only: do not add unconfigured sheet_values headers. Never calculate either field from a cost or invent an average rate. If the aggregate pair is not printed, omit both fields or return null. If no F1/F2/F3 quantities or rates are reported, leave their cells absent or null and add a separate standalone absence diagnostic naming each configured band header exactly. Do not omit a partially reported or ambiguous band representation; report its uncertainty. Every complete aggregate and band representation must independently reconcile with the printed selling consumption cost; for different band rates use the sum of each band quantity times its own rate.',
     'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
@@ -1934,6 +1940,14 @@ function validateRawExtractionShape_(extracted) {
       }
     }
   );
+  ['electricity_consumption_quantity', 'electricity_selling_unit_rate'].forEach(function (field) {
+    const value = extracted[field];
+    if (value !== null && value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value) ||
+        field === 'electricity_consumption_quantity' && value < 0)) {
+      throw new Error('Gemini extraction field has an invalid type: ' + field);
+    }
+  });
   if (extracted.reference_year !== null &&
     extracted.reference_year !== undefined &&
     (typeof extracted.reference_year !== 'number' ||
@@ -2871,6 +2885,7 @@ function validateExtraction_(extracted) {
     }
     const blockingProblems = extracted.problems.filter(function (problem) {
       return !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
+        !isInformationalElectricityBandAbsenceProblem_(problem, extracted) &&
         !isInformationalElectricityBandMappingProblem_(problem, extracted) &&
         !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) &&
         !isInformationalTaxInclusionProblem_(problem, extracted) &&
@@ -4601,13 +4616,13 @@ function validateSupplierNonConsumptionDetails_(extracted, key, code, label) {
     { code: code, repairable: true, fields: fields });
 }
 
-function validateEnergygasLuceDetailedReconciliation_(extracted) {
+function getEnergygasElectricityConsumptionEvidence_(extracted) {
   const supplyAliases = getSupplierReconciliationGroups_('electricitySupply')[0]
     .map(normalizeCellText_);
   if (!extracted || extracted.document_type !== 'Invoice' ||
     ['energygas italia', 'energygas'].indexOf(normalizeCellText_(extracted.supplier)) < 0 ||
     supplyAliases.indexOf(normalizeCellText_(extracted.supply_type)) < 0) {
-    return { valid: true };
+    return { valid: true, applicable: false, absentBandHeaders: [] };
   }
   const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
     return readConfiguredReconciliationField_(extracted, aliases);
@@ -4622,51 +4637,134 @@ function validateEnergygasLuceDetailedReconciliation_(extracted) {
     return readConfiguredReconciliationField_(extracted, aliases);
   });
   const quantityFields = [quantityField].concat(bandQuantityFields);
-  // Unit rates retain their full printed precision rather than money rounding.
-  const rates = rateFields.filter(function (field) { return field.configured; })
-    .map(function (field) { return parseUnambiguousSheetNumber_(field.rawValue); });
-  const quantity = normalizeElectricityBandConsumption_(quantityField.rawValue);
-  const completeRates = rateFields[0].configured ||
-    rateFields.slice(1).every(function (field) { return field.configured; });
-  const commonRate = completeRates && rates.length > 0 &&
-    rates.every(function (rate) {
-      return rate !== null && Math.abs(rate - rates[0]) < 1e-9;
+  rateFields.forEach(function (field) {
+    field.number = parseUnambiguousSheetNumber_(field.rawValue);
+  });
+  quantityFields.forEach(function (field) {
+    field.number = normalizeElectricityBandConsumption_(field.rawValue);
+  });
+  const fields = rateFields.concat(quantityFields);
+  const active = function (field) { return field.configured || field.present; };
+  const absent = function (field) {
+    return !field.duplicate && field.rawValue === null &&
+      (extracted.problems || []).some(function (problem) {
+        return isExplicitElectricityFieldAbsence_(problem, field.header);
+      });
+  };
+  const bandFields = rateFields.slice(1).concat(bandQuantityFields);
+  const wholeBandsAbsent = bandFields.every(function (field) {
+    return !active(field) || absent(field);
+  });
+  const completeBandQuantities = bandQuantityFields.every(function (field) {
+    return field.number !== null;
+  });
+  const completeBands = completeBandQuantities && rateFields.slice(1).every(function (field) {
+    return field.number !== null;
+  });
+  const aggregateQuantity = extracted.electricity_consumption_quantity;
+  const aggregateRate = extracted.electricity_selling_unit_rate;
+  const hasAggregate = aggregateQuantity !== null && aggregateQuantity !== undefined ||
+    aggregateRate !== null && aggregateRate !== undefined;
+  const completeAggregate = typeof aggregateQuantity === 'number' &&
+    Number.isFinite(aggregateQuantity) && aggregateQuantity >= 0 &&
+    typeof aggregateRate === 'number' && Number.isFinite(aggregateRate);
+  const completeSheetAggregate = quantityField.number !== null && rateFields[0].number !== null;
+  const hasAggregatePair = completeAggregate || completeSheetAggregate;
+  const costs = [];
+  const quantities = quantityField.number === null ? [] : [quantityField.number];
+  if (completeAggregate) {
+    quantities.push(aggregateQuantity);
+    costs.push(aggregateQuantity * aggregateRate);
+  }
+  if (completeSheetAggregate) {
+    costs.push(quantityField.number * rateFields[0].number);
+  }
+  if (completeBandQuantities) {
+    const bandQuantity = bandQuantityFields.reduce(function (sum, field) {
+      return sum + field.number;
+    }, 0);
+    quantities.push(bandQuantity);
+    if (rateFields[0].number !== null) {
+      costs.push(bandQuantity * rateFields[0].number);
+    }
+    if (completeBands) {
+      costs.push(bandQuantityFields.reduce(function (sum, field, index) {
+        return sum + field.number * rateFields[index + 1].number;
+      }, 0));
+    }
+  }
+  // A rates-only sheet can still corroborate an aggregate quantity when all
+  // three reported band rates are equal; partial bands never stand for a bill.
+  if (!completeBandQuantities && quantityField.number !== null &&
+    rateFields.slice(1).every(function (field) {
+      return field.number !== null && Math.abs(field.number - rateFields[1].number) < 1e-9;
+    })) {
+    costs.push(quantityField.number * rateFields[1].number);
+  }
+  const invalidFields = fields.some(function (field) {
+    if (!active(field)) {
+      return false;
+    }
+    if (field.duplicate || field.rawValue !== null && field.number === null) {
+      return true;
+    }
+    if (field.number !== null) {
+      // An absence claim cannot conceal a populated value, including zero.
+      return (extracted.problems || []).some(function (problem) {
+        return isExplicitElectricityFieldAbsence_(problem, field.header);
+      });
+    }
+    return bandFields.indexOf(field) >= 0 ? !wholeBandsAbsent || !hasAggregatePair :
+      !absent(field) || !(completeBands || completeAggregate);
+  });
+  const conflictingAggregateRate = completeAggregate && rateFields[0].number !== null &&
+    Math.abs(aggregateRate - rateFields[0].number) > 1e-9;
+  const valid = !invalidFields && (!hasAggregate || completeAggregate) &&
+    !conflictingAggregateRate && quantities.every(function (quantity) {
+      return Math.abs(quantity - quantities[0]) <= 1e-9;
+    }) && costs.every(function (cost) {
+      return Number.isFinite(cost) && typeof extracted.cost_consumption === 'number' &&
+        Number.isFinite(extracted.cost_consumption) &&
+        Math.abs(cost - extracted.cost_consumption) <= CONFIG.MONEY_TOLERANCE;
     });
-  const invalidRate = rateFields.some(function (field) {
-    return field.configured && (field.duplicate ||
-      parseUnambiguousSheetNumber_(field.rawValue) === null);
+  return { valid: valid, applicable: true, fields: fields.filter(active).map(function (field) {
+    return field.header;
+  }).concat(['electricity_consumption_quantity', 'electricity_selling_unit_rate',
+    'cost_consumption', 'cost_non_consumption', 'vat', 'total']),
+  absentBandHeaders: valid && wholeBandsAbsent && hasAggregatePair ?
+    bandFields.filter(active).map(function (field) { return field.header; }) : [] };
+}
+
+function isExplicitElectricityFieldAbsence_(problem, header) {
+  return isStandaloneInformationalProblem_(problem) && isExplicitFieldAbsenceStatement_(
+    problem, escapeRegExp_(header),
+    'not\\s+(?:printed|present|reported|indicated|applicable)|missing|absent|' +
+    'non\\s+(?:(?:è|e)\\s+)?(?:stampata|stampato|presente|riportata|riportato|indicata|indicato|applicabile)|assente|mancante'
+  );
+}
+
+function isInformationalElectricityBandAbsenceProblem_(problem, extracted) {
+  if (!isInvoiceCoreMonetaryReconciled_(extracted)) {
+    return false;
+  }
+  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+  return evidence.valid && evidence.absentBandHeaders.some(function (header) {
+    return isExplicitElectricityFieldAbsence_(problem, header);
   });
-  const invalidQuantity = quantityFields.some(function (field) {
-    return field.configured && (field.duplicate ||
-      normalizeElectricityBandConsumption_(field.rawValue) === null);
-  });
-  const completeBands = bandQuantityFields.every(function (field) {
-    return field.configured && normalizeElectricityBandConsumption_(field.rawValue) !== null;
-  });
-  const bandQuantity = completeBands ? bandQuantityFields.reduce(function (sum, field) {
-    return sum + normalizeElectricityBandConsumption_(field.rawValue);
-  }, 0) : null;
-  // Total and complete band quantities are independent representations of the
-  // same consumption. A partial band set cannot stand in for the whole bill.
-  const quantities = (quantityField.configured && quantity !== null ? [quantity] : [])
-    .concat(completeBands ? [bandQuantity] : []);
-  const inconsistentQuantities = quantityField.configured && quantity !== null &&
-    completeBands && Math.abs(quantity - bandQuantity) > 1e-9;
-  const consumptionMismatch = commonRate && quantities.some(function (value) {
-    return typeof extracted.cost_consumption !== 'number' ||
-      !Number.isFinite(extracted.cost_consumption) ||
-      Math.abs(value * rates[0] - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE;
-  });
-  if (invalidRate || invalidQuantity || inconsistentQuantities || consumptionMismatch) {
+}
+
+function validateEnergygasLuceDetailedReconciliation_(extracted) {
+  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+  if (!evidence.applicable) {
+    return { valid: true };
+  }
+  if (!evidence.valid) {
     return invalidExtraction_(
       'The electricity selling rate and quantity are incomplete or do not reconcile with selling consumption cost.',
       'Re-read the selling consumption summary rate and quantity, not a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
       {
         code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
-        fields: rateFields.concat(quantityFields).filter(function (field) { return field.configured; })
-          .map(function (field) { return field.header; }).concat([
-            'cost_consumption', 'cost_non_consumption', 'vat', 'total'
-          ])
+        fields: evidence.fields
       }
     );
   }

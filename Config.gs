@@ -211,18 +211,16 @@ function migrateCatalogerEnergygasCanonicalSpelling() {
       const properties = PropertiesService.getScriptProperties();
       const automationConfig = getAutomationConfig_();
       const target = 'Energygas Italia';
-      const current = automationConfig.canonical_suppliers.filter(function (item) {
+      const matches = automationConfig.canonical_suppliers.filter(function (item) {
         return normalizeConfigIdentity_(item) === 'energygas' ||
           normalizeConfigIdentity_(item) === 'energygas italia';
-      })[0] || '';
+      });
+      if (matches.length > 1) {
+        throw new Error('Energygas canonical supplier values are ambiguous.');
+      }
+      const current = matches[0] || '';
       if (!current) {
         return { updated: false, reason: 'energygas-not-configured' };
-      }
-      const existingTarget = automationConfig.canonical_suppliers.filter(
-        function (item) { return item === target; }
-      )[0];
-      if (existingTarget && current !== target) {
-        throw new Error('Energygas canonical supplier values are ambiguous.');
       }
       if (current === target) {
         return { updated: false, canonicalSupplier: target };

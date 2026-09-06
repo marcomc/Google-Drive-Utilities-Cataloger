@@ -85,7 +85,11 @@ response limit.
 
 Supplier values written to Sheets use the exact configured canonical spelling.
 The built-in `ENERGYGAS` abbreviation is accepted as `Energygas Italia` when
-that canonical supplier is configured. Existing reference year/month cells can
+that canonical supplier is configured. The owner-only
+`migrateCatalogerEnergygasCanonicalSpelling` function updates a single legacy
+canonical value and its references. It rejects a configuration containing both
+legacy and target identities, in either order, before changing any property.
+Existing reference year/month cells can
 be normalized with the owner-only
 `migrateCatalogerReferencePeriodText` maintenance function.
 

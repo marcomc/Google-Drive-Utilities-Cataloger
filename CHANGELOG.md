@@ -34,6 +34,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Normalize the `ENERGYGAS` supplier abbreviation to the configured
   `Energygas Italia` spelling and preserve canonical supplier case, including
   historical duplicate and cadence lookups after configuration migration.
+  Reject ambiguous legacy/target supplier sets before migration, independently
+  of their order.
 - Apply supplier-specific gas and electricity extraction guidance: separate
   OENERGY selling/network charges, record absent recalculations as zero, and
   reuse a monoraria electricity selling rate for the printed F1/F2/F3 bands.
@@ -44,9 +46,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   Italian absence diagnostics without downgrading unreadable identifiers.
 - Keep inconsistent monetary fields and conflicting billing periods eligible
   for targeted model repair instead of freezing earlier erroneous values.
-- Check a common Energygas selling rate against current quantity and selling
-  cost, including installer-created band-only sheets, rejecting tariff
-  components mistaken for the complete selling rate.
+- Reconcile Energygas electricity selling cost against printed aggregate
+  consumption/rate or weighted band quantities/rates, including different
+  tariffs per band. Accept aggregate-only invoices on installer-created
+  band-only sheets when band details are explicitly absent; retain checks for
+  incomplete, contradictory, or inconsistent evidence.
 - Leave unprinted billing cadence to deterministic period/history inference
   without requiring a model-generated absence diagnostic.
 - Normalize recognized euro-per-unit rates in unit-cost columns as numeric
@@ -98,6 +102,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Select reasoning controls supported by the configured model and API.
 - Verify the shared public API contract in each exact uploaded version before
   CI promotion or initial installer deployment.
+- Checkpoint the installer's immutable version before inspection or deployment
+  and reuse it on resume. Reconcile pending creation from complete paginated
+  version/deployment metadata, reject ambiguous candidates, and preserve the
+  source time zone while creation is pending.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 

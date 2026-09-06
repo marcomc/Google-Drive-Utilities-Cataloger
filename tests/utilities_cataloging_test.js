@@ -3713,8 +3713,13 @@ function testElectricityRateReconciliationUsesActualInstallerSchemas() {
         assert.equal(validate({ ...mappedInvoice, problems: [mappingNote + ' Invoice number is missing.'] }).valid,
           false, `${locale} ${name}: retain conflicting diagnostic suffix`);
         assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.map(entry =>
-          entry.header === bandHeaders[1] ? { ...entry, value: 0.2 } : entry) }).valid, true,
-        `${name}: genuine multirate`);
+          entry.header === bandHeaders[1] ? { ...entry, value: 0.2 } : entry) }).valid, false,
+        `${name}: distinct rates must reconcile weighted consumption cost`);
+        assert.equal(validate({ ...invoice, cost_consumption: 24, total: 27,
+          sheet_values: invoice.sheet_values.map(entry => entry.header === bandHeaders[1] ?
+            { ...entry, value: 0.2 } : entry.header === contract.rates[0] ?
+              { ...entry, value: 0.24 } : entry) }).valid, true,
+        `${name}: genuine multirate with matching weighted and aggregate costs`);
         assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.map(entry =>
           entry.header === bandHeaders[0] ? { ...entry, value: 25 } : entry) }).valid, false,
         `${name}: inconsistent linked quantities`);
@@ -3744,6 +3749,182 @@ function testElectricityRateReconciliationUsesActualInstallerSchemas() {
   }
 }
 testElectricityRateReconciliationUsesActualInstallerSchemas();
+
+function testElectricityAggregateAndWeightedRepresentations() {
+  for (const locale of ['en', 'it']) {
+    const fixture = createInvoiceVerificationFixture(locale);
+    const { context, localization, layout, sheet, values, formats, formulas } = fixture;
+    vm.runInContext(fs.readFileSync(path.join(projectRoot, 'Installer.gs'), 'utf8'), context);
+    const contract = localization.supplierReconciliation;
+    const supply = contract.electricitySupply;
+    const installer = Array.from(context.getInstallerSheetHeaders_(locale, true));
+    const bands = Array.from(localization.electricityBandHeaders);
+    const setHeaders = headers => {
+      layout.headers.splice(0, layout.headers.length, ...headers);
+      Object.keys(layout.lookup).forEach(key => delete layout.lookup[key]);
+      headers.forEach((header, index) => { layout.lookup[context.normalizeHeader_(header)] = index + 1; });
+      for (const array of [values, formulas]) array.splice(0, array.length, ...headers.map(() => ''));
+      formats.splice(0, formats.length, ...headers.map(() => 'General'));
+    };
+    setHeaders(installer);
+    context.getAutomationConfig_ = () => ({ locale, canonical_suppliers: ['Energygas Italia'],
+      canonical_supplies: [supply], supplier_aliases: { eg: 'Energygas Italia' }, supply_aliases: {},
+      frequency_overrides: [], sheet_by_supply: { [supply]: 'Water' }, address_rules: [] });
+    context.getSpreadsheetId_ = () => 'spreadsheet-id';
+    context.getSheetLayout_ = () => layout;
+    context.SpreadsheetApp.openById = () => ({ getSheetByName: () => sheet });
+    context.classifyAddress_ = () => 'import';
+    context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+    context.logCatalogEvent_ = () => {};
+    const absence = header => header + (locale === 'it' ? ': non presente nel documento.' :
+      ': not present in the document.');
+    const file = { ...fixture.file, getBlob: () => ({}), getName: () => 'invoice.pdf', getSize: () => 100 };
+    const raw = { ...validInvoice(), supplier: 'eg', supply_type: supply,
+      electricity_consumption_quantity: 100, electricity_selling_unit_rate: 0.25,
+      cost_consumption: 25, cost_non_consumption: 2, vat: 1, total: 28,
+      sheet_values: [], problems: bands.map(absence) };
+    const extract = invoice => {
+      context.callGeminiForPdf_ = () => JSON.stringify(invoice);
+      return context.extractUtilityData_(file, 'policy');
+    };
+    const validate = invoice => context.validateExtractedUtilityDataForImport_(extract(invoice));
+    const assertValid = (invoice, message) => assert.equal(validate(invoice).valid, true, locale + ': ' + message);
+    const assertInvalid = (invoice, message) => assert.equal(validate(invoice).valid, false, locale + ': ' + message);
+    for (const nullCells of [false, true]) {
+      const invoice = { ...raw, sheet_values: nullCells ? bands.map(header => ({ header, value: null })) : [] };
+      const extracted = extract(invoice);
+      assert.equal(context.validateExtractedUtilityDataForImport_(extracted).valid, true);
+      assert.deepEqual(Array.from(extracted.configured_writable_headers),
+        installer.filter((_, index) => !formulas[index]));
+      assert.equal(installer.includes(contract.quantity), false);
+      assert.equal(installer.includes(contract.rates[0]), false);
+      context.writeInvoiceRow_(sheet, 2, layout, file, extracted);
+      assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, extracted));
+      for (const header of bands) assert.ok(values[layout.lookup[context.normalizeHeader_(header)] - 1] == null ||
+        values[layout.lookup[context.normalizeHeader_(header)] - 1] === '', 'No invented band value');
+      assert.equal(values.length, installer.length, 'Aggregate evidence creates no cells');
+      assert.equal(typeof values[layout.lookup[context.normalizeHeader_(localization.headerAliases.consumptionCost[0])] - 1], 'number');
+      assert.equal(context.buildExtractionRepairSnapshot_(extracted).electricity_selling_unit_rate, 0.25);
+      assert.match(context.formatExtractionSnapshot_(extracted), /electricity_consumption_quantity/);
+    }
+    assertValid({ ...raw, electricity_consumption_quantity: 0, cost_consumption: 0, total: 3 }, 'zero quantity');
+    assertValid({ ...raw, electricity_selling_unit_rate: 0, cost_consumption: 0, total: 3 }, 'zero rate');
+    assertValid({ ...raw, electricity_selling_unit_rate: -0.25, cost_consumption: -25, total: -22 }, 'signed rate');
+    const precise = extract({ ...raw, electricity_selling_unit_rate: 0.135338,
+      cost_consumption: 13.53, total: 16.53 });
+    assert.equal(precise.electricity_selling_unit_rate, 0.135338);
+    assert.equal(context.validateExtractedUtilityDataForImport_(precise).valid, true);
+    for (const field of ['electricity_consumption_quantity', 'electricity_selling_unit_rate']) {
+      for (const value of [undefined, null]) assertInvalid({ ...raw, [field]: value }, 'partial aggregate ' + field);
+      for (const value of ['1,234', '0.25', true, {}, Infinity, NaN]) {
+        assert.throws(() => context.validateRawExtractionShape_({ ...raw, [field]: value }), /invalid type/);
+      }
+      const schema = context.buildExtractionResponseSchema_();
+      assert.deepEqual(Array.from(schema.properties[field].type), ['number', 'null']);
+      assert.equal(schema.required.includes(field), false);
+      const vertex = context.buildVertexExtractionResponseSchema_().properties[field];
+      assert.equal(vertex.type, 'NUMBER');
+      assert.equal(vertex.nullable, true);
+    }
+    assert.throws(() => context.validateRawExtractionShape_({ ...raw, electricity_consumption_quantity: -1 }), /invalid type/);
+    assertInvalid({ ...raw, electricity_consumption_quantity: null, electricity_selling_unit_rate: null }, 'no aggregate evidence');
+    assertInvalid({ ...raw, electricity_selling_unit_rate: 0.2 }, 'wrong aggregate product');
+    assertInvalid({ ...raw, problems: [] }, 'silent band omission');
+    for (const [index, header] of bands.entries()) {
+      assertInvalid({ ...raw, problems: raw.problems.filter((_, i) => i !== index) }, 'one unproven absent band');
+      for (const suffix of [' VAT is missing.', '; Invoice number is missing.', ' but the value is ambiguous.']) {
+        assertInvalid({ ...raw, problems: raw.problems.map((p, i) => i === index ? p.replace(/[.]$/, '') + suffix : p) },
+          'conflicting absence suffix');
+      }
+      assertInvalid({ ...raw, problems: raw.problems.map((p, i) => i === index ? 'VAT is missing ' + p : p) },
+        'conflicting absence prefix');
+      for (const value of [0, 1]) assertInvalid({ ...raw, sheet_values: [{ header, value }] }, 'populated absence');
+      assertInvalid({ ...raw, sheet_values: [{ header, value: null }, { header, value: null }] }, 'duplicate absent entry');
+    }
+    const bandValues = bands.map((header, index) => ({ header,
+      value: index % 2 ? [0.2, 0.3, 0.4][(index - 1) / 2] : [20, 30, 50][index / 2] }));
+    const weighted = { ...raw, electricity_consumption_quantity: null, electricity_selling_unit_rate: null,
+      cost_consumption: 33, total: 36, sheet_values: bandValues, problems: [] };
+    assertValid(weighted, 'distinct weighted band rates');
+    const weightedExtraction = extract(weighted);
+    context.writeInvoiceRow_(sheet, 2, layout, file, weightedExtraction);
+    assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, weightedExtraction));
+    for (const entry of bandValues) {
+      assert.equal(values[layout.lookup[context.normalizeHeader_(entry.header)] - 1], entry.value);
+      assert.equal(typeof values[layout.lookup[context.normalizeHeader_(entry.header)] - 1], 'number');
+    }
+    assertValid({ ...weighted, electricity_consumption_quantity: undefined, electricity_selling_unit_rate: undefined },
+      'optional aggregate omitted on band document');
+    assertInvalid({ ...weighted, cost_consumption: 25, total: 28 }, 'wrong weighted cost');
+    assertValid({ ...weighted, electricity_consumption_quantity: 100, electricity_selling_unit_rate: 0.33 }, 'matching aggregate and bands');
+    assertInvalid({ ...weighted, electricity_consumption_quantity: 110, electricity_selling_unit_rate: 0.3 },
+      'equal costs cannot conceal quantity mismatch');
+    for (const entry of bandValues) assertInvalid({ ...weighted,
+      sheet_values: bandValues.filter(item => item !== entry) }, 'partial band representation');
+    const zero = { ...weighted, cost_consumption: 0, total: 3,
+      sheet_values: bandValues.map(entry => ({ ...entry, value: 0 })) };
+    assertValid(zero, 'complete zero bands are reported values');
+    assertValid({ ...weighted, cost_consumption: -33, total: -30, sheet_values: bandValues.map(entry =>
+      context.isUnitCostHeader_(entry.header) ? { ...entry, value: -entry.value } : entry) }, 'signed weighted rates');
+    setHeaders(installer.concat(contract.quantity, contract.rates[0]));
+    assertValid({ ...weighted, problems: [contract.quantity, contract.rates[0]].map(absence) },
+      'generic secondary absence admits absent aggregate headers with complete weighted bands');
+    const otherLocale = context.getLocalizationRegistry_()[locale === 'en' ? 'it' : 'en'];
+    const rateAlias = otherLocale.supplierReconciliation.rates[1];
+    setHeaders(installer.concat(rateAlias));
+    assertInvalid({ ...weighted, sheet_values: bandValues.concat({ header: rateAlias, value: 0.2 }) },
+      'duplicate semantic band aliases');
+    for (const headers of [Array.from(localization.installerSheetHeaders),
+      installer.concat(contract.quantity, contract.rates[0]),
+      Array.from(localization.installerSheetHeaders).concat(contract.quantity, contract.rates[0], bands.slice(0, 2))]) {
+      setHeaders(headers);
+      const mixed = { ...raw, sheet_values: [{ header: contract.quantity, value: 100 },
+        { header: contract.rates[0], value: 0.25 }].filter(entry => headers.includes(entry.header)),
+      problems: bands.filter(header => headers.includes(header)).map(absence) };
+      assertValid(mixed, 'aggregate across configured topologies');
+      if (headers.includes(contract.quantity)) {
+        assertInvalid({ ...mixed, sheet_values: mixed.sheet_values.map(entry => entry.header === contract.quantity ?
+          { ...entry, value: 99 } : entry) }, 'conflicting aggregate sheet quantity');
+        assertInvalid({ ...mixed, sheet_values: mixed.sheet_values.map(entry => entry.header === contract.rates[0] ?
+          { ...entry, value: 0.2 } : entry) }, 'conflicting aggregate sheet rate');
+      }
+    }
+    setHeaders(installer);
+    formulas[layout.lookup[context.normalizeHeader_(bands[5])] - 1] = '=0.4';
+    assertValid({ ...weighted, sheet_values: bandValues.filter(entry => entry.header !== bands[5]) },
+      'formula-owned partial representation does not invent writable evidence');
+    assertInvalid(weighted, 'formula-owned band values cannot be supplied as writable evidence');
+    setHeaders(installer);
+    let calls = 0;
+    let repair;
+    const wrong = { ...raw, electricity_selling_unit_rate: 0.2 };
+    context.callGeminiForPdf_ = (_blob, _headers, _policy, _file, feedback) => {
+      repair = feedback || repair;
+      return JSON.stringify(calls++ === 0 ? wrong : raw);
+    };
+    assert.equal(context.extractUtilityDataWithRepair_(file, 'policy').aiCallCount, 2);
+    assert.equal(repair.previousExtraction.electricity_selling_unit_rate, 0.2);
+    assert.equal(repair.feedback.issues[0].fields.includes('electricity_selling_unit_rate'), true);
+    calls = 0;
+    context.callGeminiForPdf_ = () => calls++ === 0 ? JSON.stringify(wrong) : '{';
+    assert.throws(() => context.extractUtilityDataWithRepair_(file, 'policy'), error =>
+      error.extractionSnapshot.electricity_consumption_quantity === 100 &&
+      error.extractionSnapshot.electricity_selling_unit_rate === 0.2);
+    let mutations = 0;
+    context.sha256ForFile_ = () => 'hash';
+    context.buildVerifyResult_ = () => ({ status: 'VERIFY' });
+    context.findDuplicate_ = () => { mutations += 1; throw new Error('Unexpected admission'); };
+    context.saveMutationJournal_ = () => { mutations += 1; };
+    file.moveTo = () => { mutations += 1; };
+    file.setName = () => { mutations += 1; };
+    calls = 0;
+    context.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify(wrong); };
+    assert.equal(context.processIntakeFile_(file, {}, 'policy').status, 'VERIFY');
+    assert.equal(calls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+    assert.equal(mutations, 0);
+  }
+}
+testElectricityAggregateAndWeightedRepresentations();
 
 function testQuantityGroupingCannotBeSilentlyScaled() {
   const context = loadCataloger();
@@ -4411,6 +4592,57 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
     /must be gemini_api or vertex_ai/
   );
 }
+
+function testEnergygasMigrationRejectsAmbiguityBeforeOrderingOrMutation() {
+  const cases = [
+    { names: ['Energygas Italia', 'ENERGYGAS'], ambiguous: true },
+    { names: ['ENERGYGAS', 'Energygas Italia'], ambiguous: true },
+    { names: [' Energygas Italia ', 'energygas'], ambiguous: true },
+    { names: ['energygas', ' Energygas Italia '], ambiguous: true },
+    { names: ['Energygas-Italia', 'ENERGYGAS'], ambiguous: true },
+    { names: ['ENERGYGAS', 'Energygas-Italia'], ambiguous: true },
+    { names: ['ENERGYGAS', 'energygas'], duplicate: true },
+    { names: ['Energygas Italia'], updated: false },
+    { names: ['ENERGYGAS'], updated: true },
+    { names: ['ENERGYGAS ITALIA'], updated: true },
+    { names: [], updated: false }
+  ];
+  for (const entry of cases) {
+    const config = JSON.parse(fs.readFileSync(path.join(projectRoot, 'config.example.json'), 'utf8'));
+    config.canonical_suppliers.push(...entry.names);
+    const properties = {
+      AUTOMATION_CONFIG_JSON: JSON.stringify(config),
+      NOTIFICATION_RECIPIENT: 'owner@example.test', ROOT_FOLDER_ID: 'root-id',
+      SPREADSHEET_ID: 'sheet-id', GEMINI_API_KEY: 'fixture-secret'
+    };
+    const before = { ...properties };
+    let writes = 0;
+    const context = loadCataloger({ PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => properties[key] || '',
+      setProperty: (key, value) => { writes += 1; properties[key] = value; }
+    }) } });
+    context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+    if (entry.ambiguous || entry.duplicate) {
+      assert.throws(() => context.migrateCatalogerEnergygasCanonicalSpelling(),
+        entry.duplicate ? /normalized duplicates/ : /canonical supplier values are ambiguous/,
+        JSON.stringify(entry.names));
+      assert.equal(writes, 0);
+      assert.deepEqual(properties, before);
+    } else {
+      const result = context.migrateCatalogerEnergygasCanonicalSpelling();
+      assert.equal(result.updated, entry.updated);
+      assert.equal(writes, entry.updated ? 1 : 0);
+      if (!entry.updated) assert.deepEqual(properties, before);
+      if (entry.updated) {
+        const saved = JSON.parse(properties.AUTOMATION_CONFIG_JSON);
+        assert.equal(saved.canonical_suppliers.filter(name => name === 'Energygas Italia').length, 1);
+        assert.deepEqual(context.migrateCatalogerEnergygasCanonicalSpelling().updated, false);
+        assert.equal(writes, 1, 'Repeated migration must not write again');
+      }
+    }
+  }
+}
+testEnergygasMigrationRejectsAmbiguityBeforeOrderingOrMutation();
 
 function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   const properties = {};

@@ -816,13 +816,13 @@ state_set() {
   local value="$2"
   local temp_file
 
-  temp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")"
+  temp_file="$(mktemp "${STATE_FILE}.tmp.XXXXXX")" || return 1
   TEMP_PATHS+=("${temp_file}")
 
   jq --arg value "${value}" ".${key} = \$value" \
-    "${STATE_FILE}" >"${temp_file}"
-  chmod 600 "${temp_file}"
-  mv "${temp_file}" "${STATE_FILE}"
+    "${STATE_FILE}" >"${temp_file}" || return 1
+  chmod 600 "${temp_file}" || return 1
+  mv "${temp_file}" "${STATE_FILE}" || return 1
 }
 
 validate_installer_state() {
@@ -835,6 +835,7 @@ validate_installer_state() {
     die "Installer state is invalid or belongs to an unsupported version." \
       "${INSTALL_DOC}#resetting-private-installer-state"
   fi
+  validate_installer_deployment_checkpoint
 }
 
 collect_installation_inputs() {
@@ -1606,171 +1607,283 @@ authorize_installer_execution() {
   verify_clasp_owner_account "${AUTH_DIR}"
 }
 
-ensure_api_executable_deployment() {
-  local creation_description
-  local deployment_count
-  local deployment_id=""
-  local deployments_json
-  local deployment_json
-  local deployment_output
-  local script_id
-  local version_json
-  local version_number
-  local version_content_json
+# All fallible operations propagate status explicitly, including guarded helpers.
+# shellcheck disable=SC2310
+validate_installer_deployment_checkpoint() {
+  local checkpoint checkpoint_type description legacy_description script_id source_time_zone time_zone mapped_script_id phase
 
-  script_id="$(state_get '.scriptId')"
-  deployment_id="$(state_get '.deploymentId')"
+  checkpoint="$(state_get '.deploymentVersionCheckpoint')" || return 1
+  checkpoint_type="$(state_get '.deploymentVersionCheckpoint | type')" || return 1
+  description="$(state_get '.deploymentCreationDescription')" || return 1
+  if [[ "${checkpoint_type}" != null && "${checkpoint_type}" != string ]]; then
+    die "The pending Apps Script version checkpoint has an invalid type." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  if [[ -z "${checkpoint}" && -z "${description}" ]]; then
+    return 0
+  fi
+  if [[ -n "${checkpoint}" ]]; then
+    legacy_description="${description}"
+    description="$(jq -er '.description | select(type == "string")' \
+      <<<"${checkpoint}" 2>/dev/null)" || {
+      die "The pending Apps Script version checkpoint is malformed." "${INSTALL_DOC}#api-executable"
+    }
+    if [[ -n "${legacy_description}" && "${legacy_description}" != "${description}" ]]; then
+      die "The pending Apps Script version checkpoint has mismatched ownership." "${INSTALL_DOC}#api-executable"
+    fi
+  fi
+  script_id="$(state_get '.scriptId')" || return 1
+  source_time_zone="$(state_get '.sourceTimeZone')" || return 1
+  time_zone="$(state_get '.timeZone')" || return 1
+  if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
+    "${description}" != 'Owner-only installer bootstrap '?* ||
+    -z "${source_time_zone}" || "${source_time_zone}" != "${time_zone}" ]]; then
+    die "The pending Apps Script version has inconsistent installation ownership or time zone." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  phase="$(state_get '.phase')" || return 1
+  if [[ "${phase}" != browser_required && "${phase}" != complete ]]; then
+    die "The pending Apps Script version is inconsistent with the installer phase." "${INSTALL_DOC}#api-executable"
+  fi
+  evaluate_predicate is_valid_time_zone "${source_time_zone}"
+  if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
+    die "The pending Apps Script version has an invalid source time zone." "${INSTALL_DOC}#api-executable"
+  fi
+  mapped_script_id="$(jq -er '.scriptId | select(type == "string")' \
+    "${PROJECT_ROOT}/.clasp.json" 2>/dev/null)" || {
+    die "Could not verify the pending Apps Script project mapping." \
+      "${INSTALL_DOC}#api-executable"
+  }
+  if [[ "${mapped_script_id}" != "${script_id}" ]]; then
+    die "The pending Apps Script version belongs to a different project mapping." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  if [[ -n "${checkpoint}" ]] && ! jq -e \
+    --arg script_id "${script_id}" --arg description "${description}" \
+    --arg time_zone "${source_time_zone}" '
+      type == "object" and
+      (keys == ["description", "scriptId", "sourceTimeZone", "versionNumber"]) and
+      .scriptId == $script_id and .description == $description and
+      .sourceTimeZone == $time_zone and
+      (.versionNumber == null or
+        (.versionNumber | type == "number" and . > 0 and . == floor))
+    ' <<<"${checkpoint}" >/dev/null 2>&1; then
+    die "The pending Apps Script version checkpoint is malformed or mismatched." \
+      "${INSTALL_DOC}#api-executable"
+  fi
+  return 0
+}
+
+# All fallible operations propagate status explicitly, including guarded helpers.
+# shellcheck disable=SC2310
+checkpoint_apps_script_version() {
+  local script_id="$1" description="$2" version_number="$3" source_time_zone="$4"
+  local checkpoint
+  checkpoint="$(jq -cn --arg script_id "${script_id}" \
+    --arg description "${description}" --arg time_zone "${source_time_zone}" \
+    --argjson version "${version_number}" '{scriptId: $script_id,
+      description: $description, sourceTimeZone: $time_zone, versionNumber: $version}')" || return 1
+  state_set deploymentVersionCheckpoint "${checkpoint}" || return 1
+}
+
+# All fallible operations propagate status explicitly, including guarded helpers.
+# shellcheck disable=SC2310
+clear_apps_script_version_checkpoint() {
+  # The verified, durable deployment ID owns recovery after these two writes.
+  state_set deploymentVersionCheckpoint "" || return 1
+  state_set deploymentCreationDescription "" || return 1
+}
+
+# All fallible operations propagate status explicitly, including guarded helpers.
+# shellcheck disable=SC2310
+ensure_api_executable_deployment() {
+  local creation_description deployment_count deployment_id deployments_json deployment_json
+  local deployment_output script_id version_json version_number version_content_json
+  local checkpoint versions_json candidate_count source_time_zone mapped_script_id configured_time_zone
+  local fresh_creation=0
+
+  validate_installer_deployment_checkpoint || return 1
+  script_id="$(state_get '.scriptId')" || return 1
+  deployment_id="$(state_get '.deploymentId')" || return 1
+  checkpoint="$(state_get '.deploymentVersionCheckpoint')" || return 1
+  creation_description="$(state_get '.deploymentCreationDescription')" || return 1
+  source_time_zone="$(state_get '.sourceTimeZone')" || return 1
+  version_number=""
+  if [[ -n "${checkpoint}" ]]; then
+    version_number="$(jq -r '.versionNumber // empty' <<<"${checkpoint}")" || return 1
+    creation_description="$(jq -er '.description' <<<"${checkpoint}")" || return 1
+  fi
   if [[ -n "${deployment_id}" ]]; then
     deployment_json=""
-    # Helpers explicitly check failures; this branch adds installer guidance.
-    # shellcheck disable=SC2310
-    if ! read_apps_script_deployment \
-      "${AUTH_DIR}/.clasprc.json" \
-      "${script_id}" \
-      "${deployment_id}" \
-      deployment_json; then
-      die "Could not verify the stored Apps Script API deployment." \
+    if [[ -n "${checkpoint}" && -z "${version_number}" ]]; then
+      die "A stored deployment cannot be verified against a planned-only version checkpoint." \
         "${INSTALL_DOC}#api-executable"
     fi
+    # Helpers check failures explicitly; a failed read must preserve the journal.
     # shellcheck disable=SC2310
-    if ! validate_owner_only_api_deployment \
-      "${deployment_json}" \
-      "${script_id}" \
-      "${deployment_id}"; then
-      die "The stored deployment is not an owner-only API executable; explicit operator repair is required." \
+    if ! read_apps_script_deployment "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" "${deployment_id}" deployment_json ||
+      ! validate_owner_only_api_deployment "${deployment_json}" \
+        "${script_id}" "${deployment_id}" "${version_number}"; then
+      die "The stored deployment is not the expected owner-only API executable; explicit operator repair is required." \
         "${INSTALL_DOC}#api-executable"
+    fi
+    if [[ -n "${checkpoint}" || -n "${creation_description}" ]]; then
+      clear_apps_script_version_checkpoint || return 1
     fi
     success "Using installer API deployment"
     return 0
   fi
 
-  creation_description="$(state_get '.deploymentCreationDescription')"
   if [[ -z "${creation_description}" ]]; then
+    # Validate the target and frozen source settings before any state or remote
+    # creation, including direct callers that do not use the preparation wrapper.
+    mapped_script_id="$(jq -er '.scriptId | select(type == "string")' \
+      "${PROJECT_ROOT}/.clasp.json" 2>/dev/null)" || return 1
+    source_time_zone="$(state_get '.sourceTimeZone')" || return 1
+    configured_time_zone="$(state_get '.timeZone')" || return 1
+    evaluate_predicate is_valid_time_zone "${source_time_zone}"
+    if [[ "${PREDICATE_STATUS}" -ne 0 || "${source_time_zone}" != "${configured_time_zone}" ||
+      ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
+      "${mapped_script_id}" != "${script_id}" || -z "${source_time_zone}" ]]; then
+      die "Could not bind the initial Apps Script version to its uploaded source." \
+        "${INSTALL_DOC}#api-executable"
+    fi
     creation_description="Owner-only installer bootstrap $(date -u +%Y%m%dT%H%M%SZ)-$$"
-    state_set "deploymentCreationDescription" "${creation_description}"
+    fresh_creation=1
   fi
+
   deployments_json=""
-  # Helpers explicitly check failures; this branch adds installer guidance.
   # shellcheck disable=SC2310
-  if ! run_apps_script_clasp_json \
-    "${AUTH_DIR}/.clasprc.json" \
-    deployments_json \
-    deployments; then
-    die "Could not list Apps Script API deployments." \
-      "${INSTALL_DOC}#api-executable"
+  if ! list_apps_script_resources "${AUTH_DIR}/.clasprc.json" \
+    "${script_id}" deployments deployments_json; then
+    die "Could not list all Apps Script API deployments." "${INSTALL_DOC}#api-executable"
   fi
   deployment_count="$(jq -er --arg description "${creation_description}" '
-    [.[] | select(.description == $description)] | length
-  ' <<<"${deployments_json}")"
-  if [[ "${deployment_count}" -gt 1 ]]; then
+    [.[] | select(.deploymentConfig.description == $description)] | length
+  ' <<<"${deployments_json}")" || return 1
+  if [[ "${deployment_count}" -gt 1 ||
+    ( "${fresh_creation}" -eq 1 && "${deployment_count}" -ne 0 ) ]]; then
     die "Multiple Apps Script deployments match the pending creation marker; explicit operator repair is required." \
       "${INSTALL_DOC}#api-executable"
   fi
   if [[ "${deployment_count}" -eq 1 ]]; then
     deployment_id="$(jq -er --arg description "${creation_description}" '
-      .[] | select(.description == $description) | .deploymentId
-    ' <<<"${deployments_json}")"
+      .[] | select(.deploymentConfig.description == $description) | .deploymentId
+    ' <<<"${deployments_json}")" || return 1
     deployment_json=""
-    # A planned marker alone cannot admit an unverified artifact or identity.
     # shellcheck disable=SC2310
-    if ! read_apps_script_deployment \
-      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${deployment_id}" deployment_json ||
-      ! validate_owner_only_api_deployment \
-        "${deployment_json}" "${script_id}" "${deployment_id}" ||
+    if ! read_apps_script_deployment "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" "${deployment_id}" deployment_json ||
+      ! validate_owner_only_api_deployment "${deployment_json}" \
+        "${script_id}" "${deployment_id}" "${version_number}" ||
       ! jq -e --arg description "${creation_description}" \
-        '.deploymentConfig.description == $description' \
-        <<<"${deployment_json}" >/dev/null; then
-      die "Could not verify the pending Apps Script API deployment." \
-        "${INSTALL_DOC}#api-executable"
+        '.deploymentConfig.description == $description' <<<"${deployment_json}" >/dev/null; then
+      die "Could not verify the pending Apps Script API deployment." "${INSTALL_DOC}#api-executable"
     fi
-    version_number="$(jq -er '.deploymentConfig.versionNumber' <<<"${deployment_json}")"
-    version_content_json=""
+  fi
+
+  if [[ -z "${version_number}" && "${fresh_creation}" -eq 0 ]]; then
+    versions_json=""
+    # A legacy marker or planned-only checkpoint may already own a version even
+    # when creation's response or its identity checkpoint was interrupted.
     # shellcheck disable=SC2310
-    if ! read_apps_script_version_content \
-      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${version_number}" version_content_json ||
-      ! validate_apps_script_version_entrypoints "${version_content_json}"; then
-      die "The pending Apps Script version does not expose the required API entrypoints." \
+    if ! list_apps_script_resources "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" versions versions_json; then
+      die "Could not discover the pending Apps Script version." "${INSTALL_DOC}#api-executable"
+    fi
+    candidate_count="$(jq -er --arg description "${creation_description}" '
+      [.[] | select(.description == $description)] | length
+    ' <<<"${versions_json}")" || return 1
+    if [[ "${candidate_count}" -ne 1 ]]; then
+      die "The pending Apps Script version has no unique recovery candidate; explicit operator repair is required." \
         "${INSTALL_DOC}#api-executable"
     fi
-    debug "Recovered pending owner-only Apps Script API deployment"
-  else
-    debug "Creating owner-only Apps Script API deployment"
+    version_number="$(jq -er --arg description "${creation_description}" '
+      .[] | select(.description == $description) | .versionNumber
+    ' <<<"${versions_json}")" || return 1
+    checkpoint_apps_script_version "${script_id}" "${creation_description}" "${version_number}" "${source_time_zone}" || return 1
+  elif [[ -z "${version_number}" ]]; then
+    checkpoint_apps_script_version "${script_id}" "${creation_description}" null "${source_time_zone}" || return 1
     version_json=""
-    # Explicitly freeze and inspect the uploaded source before admitting it.
     # shellcheck disable=SC2310
-    if ! run_apps_script_clasp_json \
-      "${AUTH_DIR}/.clasprc.json" version_json version "${creation_description}"; then
-      die "Could not create the Apps Script source version." \
+    if ! run_apps_script_clasp_json "${AUTH_DIR}/.clasprc.json" \
+      version_json version "${creation_description}"; then
+      die "Could not create the Apps Script source version; its planned checkpoint was retained." \
         "${INSTALL_DOC}#api-executable"
     fi
-    version_number="$(jq -er '
-      .versionNumber | select(type == "number" and . > 0 and . == floor)
-    ' <<<"${version_json}")" || die "Could not identify the Apps Script source version." \
+    version_number="$(jq -er '.versionNumber |
+      select(type == "number" and . > 0 and . == floor)' <<<"${version_json}")" || {
+      die "Could not identify the Apps Script source version." "${INSTALL_DOC}#api-executable"
+    }
+    # This must be the first fallible operation after validating creation's ID.
+    checkpoint_apps_script_version "${script_id}" "${creation_description}" "${version_number}" "${source_time_zone}" || return 1
+  fi
+  if [[ "${deployment_count}" -eq 1 ]]; then
+    # shellcheck disable=SC2310
+    if ! validate_owner_only_api_deployment "${deployment_json}" \
+      "${script_id}" "${deployment_id}" "${version_number}"; then
+      die "The pending deployment does not use its recorded source version." "${INSTALL_DOC}#api-executable"
+    fi
+  fi
+  version_content_json=""
+  # shellcheck disable=SC2310
+  if ! read_apps_script_version_content "${AUTH_DIR}/.clasprc.json" \
+    "${script_id}" "${version_number}" version_content_json ||
+    ! validate_apps_script_version_entrypoints "${version_content_json}"; then
+    die "The pending Apps Script version does not expose the required API entrypoints; its checkpoint was retained." \
       "${INSTALL_DOC}#api-executable"
-    version_content_json=""
-    # shellcheck disable=SC2310
-    if ! read_apps_script_version_content \
-      "${AUTH_DIR}/.clasprc.json" "${script_id}" "${version_number}" version_content_json ||
-      ! validate_apps_script_version_entrypoints "${version_content_json}"; then
-      die "The uploaded Apps Script version does not expose the required API entrypoints; no deployment was created." \
-        "${INSTALL_DOC}#api-executable"
-    fi
+  fi
+  if [[ "${deployment_count}" -eq 0 ]]; then
     deployment_output=""
-    # Helpers explicitly check failures; this branch adds installer guidance.
     # shellcheck disable=SC2310
-    if ! run_apps_script_clasp_json \
-      "${AUTH_DIR}/.clasprc.json" \
-      deployment_output \
-      deploy \
-      --versionNumber "${version_number}" \
-      --description "${creation_description}"; then
-      die "Could not create the Apps Script API deployment." \
-        "${INSTALL_DOC}#api-executable"
+    if ! run_apps_script_clasp_json "${AUTH_DIR}/.clasprc.json" deployment_output \
+      deploy --versionNumber "${version_number}" --description "${creation_description}"; then
+      die "Could not create the Apps Script API deployment." "${INSTALL_DOC}#api-executable"
     fi
-    deployment_id="$(printf '%s' "${deployment_output}" |
-      jq -r '.deploymentId // empty' 2>/dev/null || true)"
+    deployment_id="$(jq -er '.deploymentId | select(type == "string" and
+      test("^[A-Za-z0-9_-]+$"))' <<<"${deployment_output}")" || return 1
   fi
-  if [[ ! "${deployment_id}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-    die "Could not identify the Apps Script API deployment." \
-      "${INSTALL_DOC}#api-executable"
-  fi
-  # Persist the resource identity before remote validation. If inspection is
-  # temporarily unavailable, a resume verifies this deployment instead of
-  # creating a duplicate.
-  state_set "deploymentId" "${deployment_id}"
+  state_set deploymentId "${deployment_id}" || return 1
   if [[ "${deployment_count}" -eq 0 ]]; then
     deployment_json=""
-    # Helpers explicitly check failures; this branch adds installer guidance.
     # shellcheck disable=SC2310
-    if ! read_apps_script_deployment \
-      "${AUTH_DIR}/.clasprc.json" \
-      "${script_id}" \
-      "${deployment_id}" \
-      deployment_json ||
-      ! validate_owner_only_api_deployment \
-        "${deployment_json}" \
-        "${script_id}" \
-        "${deployment_id}" "${version_number}"; then
-      die "The new deployment is not an owner-only API executable; explicit operator repair is required." \
+    if ! read_apps_script_deployment "${AUTH_DIR}/.clasprc.json" \
+      "${script_id}" "${deployment_id}" deployment_json ||
+      ! validate_owner_only_api_deployment "${deployment_json}" \
+        "${script_id}" "${deployment_id}" "${version_number}"; then
+      die "The new deployment is not the expected owner-only API executable; its checkpoint was retained." \
         "${INSTALL_DOC}#api-executable"
     fi
   fi
-  state_set "deploymentCreationDescription" ""
+  clear_apps_script_version_checkpoint || return 1
   success "Created owner-only Apps Script API deployment"
 }
 
+# All fallible operations propagate status explicitly, including guarded helpers.
+# shellcheck disable=SC2310
 prepare_apps_script_source_and_deployment() {
-  local deployment_id
+  local deployment_id creation_description checkpoint mapped_script_id script_id
 
-  deployment_id="$(state_get '.deploymentId')"
-  if [[ -n "${deployment_id}" ]]; then
-    # A stored deployment proves the initial source push and deployment
-    # creation completed. Resume verifies it without splitting project HEAD
-    # from the pinned API executable.
+  validate_installer_deployment_checkpoint || return 1
+  deployment_id="$(state_get '.deploymentId')" || return 1
+  creation_description="$(state_get '.deploymentCreationDescription')" || return 1
+  checkpoint="$(state_get '.deploymentVersionCheckpoint')" || return 1
+  if [[ -n "${deployment_id}" || -n "${creation_description}" || -n "${checkpoint}" ]]; then
+    # Recover the exact immutable artifact before any source upload, including
+    # B4 legacy descriptions created before version checkpointing existed.
     ensure_api_executable_deployment
-    return 0
+    return $?
+  fi
+  script_id="$(state_get '.scriptId')" || return 1
+  mapped_script_id="$(jq -er '.scriptId | select(type == "string")' \
+    "${PROJECT_ROOT}/.clasp.json" 2>/dev/null)" || return 1
+  if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ || "${script_id}" != "${mapped_script_id}" ]]; then
+    die "Apps Script source and installer state target different projects." "${INSTALL_DOC}#api-executable"
   fi
   push_apps_script_source "${AUTH_DIR}"
+  local push_status=$?
+  if [[ "${push_status}" -ne 0 ]]; then return "${push_status}"; fi
   ensure_api_executable_deployment
 }
 
@@ -2187,11 +2300,20 @@ apply_resume_overrides() {
   local gemini_model="${GDUC_GEMINI_MODEL:-}"
   local configured_time_zone
   local deployment_id
+  local creation_description
+  local version_checkpoint
   local phase
   local source_time_zone
   local time_zone
   local vertex_ai_location="${GDUC_VERTEX_AI_LOCATION:-}"
 
+  # The checkpoint validator explicitly propagates every failure.
+  # shellcheck disable=SC2310
+  validate_installer_deployment_checkpoint || return 1
+  # state_get contains one jq command and returns its status.
+  # shellcheck disable=SC2310
+  creation_description="$(state_get '.deploymentCreationDescription')" || return 1
+  version_checkpoint="$(state_get '.deploymentVersionCheckpoint')"
   configured_time_zone=""
   if [[ -f "${PROJECT_ROOT}/config.local.json" ]]; then
     configured_time_zone="$(jq -r '.time_zone // empty' \
@@ -2205,11 +2327,11 @@ apply_resume_overrides() {
   fi
   deployment_id="$(state_get '.deploymentId')"
   source_time_zone="$(state_get '.sourceTimeZone')"
-  if [[ -n "${deployment_id}" && -z "${source_time_zone}" ]]; then
+  if [[ ( -n "${deployment_id}" || -n "${creation_description}" || -n "${version_checkpoint}" ) && -z "${source_time_zone}" ]]; then
     die "The persisted API deployment predates source-timezone tracking; resume with the original configuration or perform explicit recovery." \
       "${INSTALL_DOC}#reconfigure-time-zone"
   fi
-  if [[ -n "${deployment_id}" &&
+  if [[ ( -n "${deployment_id}" || -n "${creation_description}" || -n "${version_checkpoint}" ) &&
     "${time_zone}" != "${source_time_zone}" ]]; then
     die "The initial API deployment already uses ${source_time_zone}; finish installation before running --reconfigure-time-zone." \
       "${INSTALL_DOC}#reconfigure-time-zone"
@@ -2257,6 +2379,9 @@ complete_installation() {
       "" \
       ""
   fi
+  # The checkpoint validator explicitly propagates every failure.
+  # shellcheck disable=SC2310
+  validate_installer_deployment_checkpoint || return 1
   validate_local_config_for_installation
   apply_resume_overrides
   validate_oauth_client "${client_file}"

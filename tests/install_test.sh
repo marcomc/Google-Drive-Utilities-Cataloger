@@ -13,6 +13,8 @@ export GDUC_STATE_DIR="${TEST_STATE_DIR}"
 # shellcheck source=scripts/install.sh
 source "${PROJECT_ROOT}/scripts/install.sh"
 TEMP_PATHS+=("${TEST_STATE_DIR}")
+TEST_SCRIPT_DIR="${PROJECT_ROOT}/scripts"
+TEST_INSTALLER_VERSION="$(sed -n 's/^INSTALLER_VERSION=//p' "${TEST_SCRIPT_DIR}/install.sh")"
 
 failures=0
 
@@ -790,8 +792,8 @@ test_owner_only_deployment_discovery_requires_unique_identity() {
   (
     # Invoked indirectly by find_owner_only_api_deployment.
     # shellcheck disable=SC2329
-    run_apps_script_clasp_json() {
-      printf -v "$2" '%s' '[
+    list_apps_script_resources() {
+      printf -v "$4" '%s' '[
         {"deploymentId":"deployment-1"},
         {"deploymentId":"deployment-2"}
       ]'
@@ -834,7 +836,7 @@ test_owner_only_deployment_discovery_rejects_list_failures() {
   (
     # Invoked indirectly by find_owner_only_api_deployment.
     # shellcheck disable=SC2329
-    run_apps_script_clasp_json() {
+    list_apps_script_resources() {
       return 91
     }
     find_owner_only_api_deployment "/tmp/auth.json" "test-script" result
@@ -855,8 +857,8 @@ test_owner_only_deployment_discovery_rejects_zero_matches() {
   (
     # Invoked indirectly by find_owner_only_api_deployment.
     # shellcheck disable=SC2329
-    run_apps_script_clasp_json() {
-      printf -v "$2" '%s' '[{"deploymentId":"deployment-1"}]'
+    list_apps_script_resources() {
+      printf -v "$4" '%s' '[{"deploymentId":"deployment-1"}]'
     }
     # Invoked indirectly by find_owner_only_api_deployment.
     # shellcheck disable=SC2329
@@ -892,8 +894,8 @@ test_owner_only_deployment_discovery_selects_unique_match() {
       result=""
       # Invoked indirectly by find_owner_only_api_deployment.
       # shellcheck disable=SC2329
-      run_apps_script_clasp_json() {
-        printf -v "$2" '%s' '[
+      list_apps_script_resources() {
+        printf -v "$4" '%s' '[
           {"deploymentId":"deployment-invalid"},
           {"deploymentId":"deployment-valid"}
         ]'
@@ -939,8 +941,8 @@ test_owner_only_deployment_discovery_aborts_on_inspection_failure() {
   (
     # Invoked indirectly by find_owner_only_api_deployment.
     # shellcheck disable=SC2329
-    run_apps_script_clasp_json() {
-      printf -v "$2" '%s' '[
+    list_apps_script_resources() {
+      printf -v "$4" '%s' '[
         {"deploymentId":"deployment-valid"},
         {"deploymentId":"deployment-unreadable"}
       ]'
@@ -977,584 +979,465 @@ test_owner_only_deployment_discovery_aborts_on_inspection_failure() {
   fi
 }
 
-test_invalid_stored_deployment_is_not_recreated() {
-  local activity_log="${TEST_STATE_DIR}/stored-deployment-activity"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    local invalid_deployment
-
-    invalid_deployment="$(deployment_fixture \
-      "test-script" "EXECUTION_API" "ANYONE")"
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '%s\n' "deployment-1" ;;
-        *) return 1 ;;
-      esac
-    }
-    read_apps_script_deployment() {
-      printf -v "$4" '%s' "${invalid_deployment}"
-    }
-    state_set() {
-      printf 'state-set %s\n' "$1" >>"${activity_log}"
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_must_not_run() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      return 99
-    }
-    CLASP=(clasp_must_not_run)
-    ensure_api_executable_deployment
-  ) >/dev/null 2>&1
-  test_status=$?
-  set -e
-
-  if [[ "${test_status}" -eq 0 || -s "${activity_log}" ]]; then
-    printf 'FAIL: invalid stored deployment was accepted or replaced\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
 version_content_fixture() {
   node -e '
     const { requiredEntrypoints } = require(process.argv[1]);
     console.log(JSON.stringify({files: requiredEntrypoints
       .filter((name) => name !== process.argv[2])
       .map((name) => ({type: "SERVER_JS", source: "function " + name + "() {}"}))}));
-  ' "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js" "${1:-}"
+  ' "${TEST_SCRIPT_DIR}/lib/apps-script-entrypoints.js" "${1:-}"
 }
 
-test_invalid_new_deployment_is_stored_for_safe_resume() {
-  local activity_log="${TEST_STATE_DIR}/new-deployment-activity"
-  local deploy_count
-  local retained_id
-  local state_set_count
-  local state_file="${TEST_STATE_DIR}/new-deployment-state"
-  local test_status
+initialize_version_recovery_fixture() {
+  local fixture_dir="$1" mode="$2" checkpoint initial_version=null
+  mkdir -p "${fixture_dir}/project" "${fixture_dir}/state/auth"
+  printf '%s\n' '{"scriptId":"test-script"}' >"${fixture_dir}/project/.clasp.json"
+  printf '%s\n' '{"tokens":{"default":{"access_token":"test-token"}}}' \
+    >"${fixture_dir}/state/auth/.clasprc.json"
+  jq -cn --argjson installerVersion "${TEST_INSTALLER_VERSION}" '{
+    installerVersion: $installerVersion, phase: "browser_required", projectId: "test-project",
+    scriptId: "test-script", timeZone: "Europe/Rome", sourceTimeZone: "Europe/Rome"
+  }' >"${fixture_dir}/state/state.json"
+  printf '%s\n' '[]' >"${fixture_dir}/versions.json"
+  printf '%s\n' '[]' >"${fixture_dir}/deployments.json"
+  : >"${fixture_dir}/activity"
+  if [[ "${mode}" != fresh && "${mode}" != stored ]]; then
+    jq '.deploymentCreationDescription = "Owner-only installer bootstrap fixture"' \
+      "${fixture_dir}/state/state.json" >"${fixture_dir}/state/initial.json"
+    mv "${fixture_dir}/state/initial.json" "${fixture_dir}/state/state.json"
+    jq -cn '[{scriptId:"test-script",versionNumber:4,
+      description:"Owner-only installer bootstrap fixture"}]' >"${fixture_dir}/versions.json"
+  fi
+  if [[ "${mode}" == created || "${mode}" == deployed ]]; then initial_version=4; fi
+  if [[ "${mode}" == created || "${mode}" == deployed || "${mode}" == planned ]]; then
+    checkpoint="$(jq -cn --argjson version "${initial_version}" '{scriptId:"test-script",
+      description:"Owner-only installer bootstrap fixture",sourceTimeZone:"Europe/Rome",versionNumber:$version}')"
+    jq --arg checkpoint "${checkpoint}" '.deploymentVersionCheckpoint = $checkpoint' \
+      "${fixture_dir}/state/state.json" >"${fixture_dir}/state/initial.json"
+    mv "${fixture_dir}/state/initial.json" "${fixture_dir}/state/state.json"
+  fi
+  if [[ "${mode}" == deployed || "${mode}" == legacy-deployment || "${mode}" == stored ]]; then
+    deployment_fixture test-script EXECUTION_API MYSELF |
+      jq '[. | .deploymentConfig.description = "Owner-only installer bootstrap fixture"]' \
+      >"${fixture_dir}/deployments.json"
+  fi
+  if [[ "${mode}" == deployed || "${mode}" == stored ]]; then
+    jq '.deploymentId = "deployment-1"' "${fixture_dir}/state/state.json" >"${fixture_dir}/state/initial.json"
+    mv "${fixture_dir}/state/initial.json" "${fixture_dir}/state/state.json"
+  fi
+}
 
-  : >"${activity_log}"
-  : >"${state_file}"
-  set +e
-  (
-    local invalid_deployment
-    local first_status
-    local second_status
-
-    invalid_deployment="$(deployment_fixture \
-      "test-script" "WEB_APP" "MYSELF")"
-    read_apps_script_version_content() {
-      [[ "$3" == "4" ]] || return 96
-      local fixture_content
-      fixture_content="$(version_content_fixture)"
-      local fixture_status=$?
-      if [[ "${fixture_status}" != 0 ]]; then return "${fixture_status}"; fi
-      printf -v "$4" '%s' "${fixture_content}"
-    }
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) cat "${state_file}" ;;
-        .deploymentCreationDescription)
-          printf '%s\n' "Owner-only installer bootstrap test-marker"
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    read_apps_script_deployment() {
-      printf -v "$4" '%s' "${invalid_deployment}"
-    }
-    state_set() {
-      if [[ "$1" != "deploymentId" || "$2" != "deployment-1" ]]; then
-        printf 'invalid-state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-        return 98
-      fi
-      printf '%s\n' "$2" >"${state_file}"
-      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_fixture() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      case "$*" in
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments")
-          printf '%s\n' '[]'
-          ;;
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json version Owner-only installer bootstrap test-marker")
-          printf '%s\n' '{"versionNumber":4}'
-          ;;
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deploy --versionNumber 4 --description Owner-only installer bootstrap test-marker")
-          printf '%s\n' '{"deploymentId":"deployment-1"}'
-          ;;
-        *) return 97 ;;
-      esac
-    }
-    CLASP=(clasp_fixture)
-    (ensure_api_executable_deployment)
-    first_status=$?
-    (ensure_api_executable_deployment)
-    second_status=$?
-    [[ "${first_status}" -ne 0 && "${second_status}" -ne 0 ]]
-  ) >/dev/null 2>&1
-  test_status=$?
+run_version_recovery_turn() (
   set -e
-  retained_id="$(<"${state_file}")"
-  deploy_count="$(awk '/^clasp .* --json deploy / {count++} END {print count + 0}' \
-    "${activity_log}")"
-  state_set_count="$(awk \
-    '/^state-set deploymentId deployment-1$/ {count++} END {print count + 0}' \
-    "${activity_log}")"
+  fixture_dir="$1"
+  fixture_scenario="$2"
+  missing_entrypoint="${3:-}"
+  # Each fixture intentionally isolates the sourced installer project in a subshell.
+  # shellcheck disable=SC2030
+  PROJECT_ROOT="${fixture_dir}/project"
+  STATE_DIR="${fixture_dir}/state"
+  STATE_FILE="${STATE_DIR}/state.json"
+  AUTH_DIR="${STATE_DIR}/auth"
+  TEMP_PATHS=()
+  INSTALL_LOCK_HELD=0
+  trap cleanup EXIT
+  CLASP=(recovery_clasp_fixture)
 
-  if [[ "${test_status}" -ne 0 ]] ||
-    [[ "${retained_id}" != "deployment-1" ]] ||
-    [[ "${deploy_count}" -ne 1 ]] ||
-    [[ "${state_set_count}" -ne 1 ]] ||
-    grep -q '^invalid-state-set' "${activity_log}"; then
-    printf 'FAIL: invalid new deployment was not retained for safe resume\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_pending_deployment_creation_is_reconciled_without_duplicate() {
-  local activity_log="${TEST_STATE_DIR}/pending-deployment-activity"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    local valid_deployment
-
-    valid_deployment="$(deployment_fixture \
-      "test-script" "EXECUTION_API" "MYSELF")"
-    read_apps_script_version_content() {
-      [[ "$3" == "4" ]] || return 96
-      local fixture_content
-      fixture_content="$(version_content_fixture)"
-      local fixture_status=$?
-      if [[ "${fixture_status}" != 0 ]]; then return "${fixture_status}"; fi
-      printf -v "$4" '%s' "${fixture_content}"
-    }
-    valid_deployment="$(jq -c '.deploymentConfig.description = "Owner-only installer bootstrap test-marker"' <<<"${valid_deployment}")"
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '\n' ;;
-        .deploymentCreationDescription)
-          printf '%s\n' "Owner-only installer bootstrap test-marker"
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    state_set() {
-      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-    }
-    read_apps_script_deployment() {
-      [[ "$3" == "deployment-1" ]] || return 96
-      printf -v "$4" '%s' "${valid_deployment}"
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_fixture() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      if [[ "$*" != \
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments" ]]; then
-        return 97
-      fi
-      jq -cn '[{
-        deploymentId: "deployment-1",
-        description: "Owner-only installer bootstrap test-marker"
-      }]'
-    }
-    CLASP=(clasp_fixture)
-    ensure_api_executable_deployment
-  ) >/dev/null 2>&1
-  test_status=$?
-  set -e
-
-  if [[ "${test_status}" -ne 0 ]] ||
-    grep -q -- '--json deploy --versionNumber 4 --description' "${activity_log}" ||
-    ! grep -qx 'state-set deploymentId deployment-1' "${activity_log}"; then
-    printf 'FAIL: pending deployment creation was not reconciled safely\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_ambiguous_pending_deployment_creation_fails_closed() {
-  local activity_log="${TEST_STATE_DIR}/ambiguous-deployment-activity"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '\n' ;;
-        .deploymentCreationDescription)
-          printf '%s\n' "Owner-only installer bootstrap test-marker"
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    state_set() {
-      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-    }
-    read_apps_script_deployment() {
-      printf '%s\n' "unexpected-read" >>"${activity_log}"
-      return 96
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_fixture() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      jq -cn '["deployment-1", "deployment-2"] | map({
-        deploymentId: .,
-        description: "Owner-only installer bootstrap test-marker"
-      })'
-    }
-    CLASP=(clasp_fixture)
-    ensure_api_executable_deployment
-  ) >/dev/null 2>&1
-  test_status=$?
-  set -e
-
-  if [[ "${test_status}" -eq 0 ]] ||
-    grep -q -- '--json deploy --description' "${activity_log}" ||
-    grep -q '^state-set deploymentId' "${activity_log}" ||
-    grep -q '^unexpected-read$' "${activity_log}"; then
-    printf 'FAIL: ambiguous pending deployments did not fail closed\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_valid_stored_deployment_skips_source_push() {
-  local activity_log="${TEST_STATE_DIR}/valid-deployment-resume-activity"
-
-  : >"${activity_log}"
-  (
-    local valid_deployment
-
-    valid_deployment="$(deployment_fixture \
-      "test-script" "EXECUTION_API" "MYSELF")"
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '%s\n' "deployment-1" ;;
-        *) return 1 ;;
-      esac
-    }
-    read_apps_script_deployment() {
-      printf -v "$4" '%s' "${valid_deployment}"
-    }
-    push_apps_script_source() {
-      printf '%s\n' "push" >>"${activity_log}"
-    }
-    prepare_apps_script_source_and_deployment
-  ) >/dev/null 2>&1
-
-  if [[ -s "${activity_log}" ]]; then
-    printf 'FAIL: valid stored deployment caused a source push on resume\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_invalid_stored_deployment_blocks_source_push() {
-  local activity_log="${TEST_STATE_DIR}/deployment-preflight-activity"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    local invalid_deployment
-
-    invalid_deployment="$(deployment_fixture \
-      "test-script" "EXECUTION_API" "ANYONE")"
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '%s\n' "deployment-1" ;;
-        *) return 1 ;;
-      esac
-    }
-    read_apps_script_deployment() {
-      printf -v "$4" '%s' "${invalid_deployment}"
-    }
-    push_apps_script_source() {
-      printf '%s\n' "push" >>"${activity_log}"
-    }
-    prepare_apps_script_source_and_deployment
-  ) >/dev/null 2>&1
-  test_status=$?
-  set -e
-
-  if [[ "${test_status}" -eq 0 || -s "${activity_log}" ]]; then
-    printf 'FAIL: invalid stored deployment did not block source push\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_invalid_authorization_blocks_pending_deployment_creation() {
-  local activity_log="${TEST_STATE_DIR}/invalid-authorization-pending-deployment-activity"
-  local output_file="${TEST_STATE_DIR}/invalid-authorization-pending-deployment-output"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '\n' ;;
-        .deploymentCreationDescription)
-          printf '%s\n' "Owner-only installer bootstrap test-marker"
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    state_set() {
-      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_fixture() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      printf '%s\n' 'invalid_grant' >&2
-      return 9
-    }
-    CLASP=(clasp_fixture)
-    ensure_api_executable_deployment
-  ) >"${output_file}" 2>&1
-  test_status=$?
-  set -e
-
-  if [[ "${test_status}" -eq 0 ]] ||
-    grep -q -- '--json deploy --description' "${activity_log}" ||
-    grep -q '^state-set deploymentId' "${activity_log}" ||
-    ! grep -q 'OAuth refresh token is invalid or expired' "${output_file}"; then
-    printf 'FAIL: invalid authorization did not block pending deployment creation\n' >&2
-    failures=$((failures + 1))
-  fi
-}
-
-test_invalid_authorization_blocks_new_deployment_creation() {
-  local activity_log="${TEST_STATE_DIR}/invalid-authorization-new-deployment-activity"
-  local output_file="${TEST_STATE_DIR}/invalid-authorization-new-deployment-output"
-  local test_status
-
-  : >"${activity_log}"
-  set +e
-  (
-    read_apps_script_version_content() {
-      [[ "$3" == "4" ]] || return 96
-      local fixture_content
-      fixture_content="$(version_content_fixture)"
-      local fixture_status=$?
-      if [[ "${fixture_status}" != 0 ]]; then return "${fixture_status}"; fi
-      printf -v "$4" '%s' "${fixture_content}"
-    }
-    state_get() {
-      case "$1" in
-        .scriptId) printf '%s\n' "test-script" ;;
-        .deploymentId) printf '\n' ;;
-        .deploymentCreationDescription)
-          printf '%s\n' "Owner-only installer bootstrap test-marker"
-          ;;
-        *) return 1 ;;
-      esac
-    }
-    state_set() {
-      printf 'state-set %s %s\n' "$1" "$2" >>"${activity_log}"
-    }
-    read_apps_script_deployment() {
-      printf '%s\n' 'unexpected-read' >>"${activity_log}"
-      return 96
-    }
-    # Invoked indirectly through the CLASP command array.
-    # shellcheck disable=SC2329
-    clasp_fixture() {
-      printf 'clasp %s\n' "$*" >>"${activity_log}"
-      case "$*" in
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deployments")
-          printf '%s\n' '[]'
-          ;;
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json version Owner-only installer bootstrap test-marker")
-          printf '%s\n' '{"versionNumber":4}'
-          ;;
-        "-A ${TEST_STATE_DIR}/clasp-auth/.clasprc.json --json deploy --versionNumber 4 --description Owner-only installer bootstrap test-marker")
-          printf '%s\n' 'invalid_grant' >&2
+  push_apps_script_source() {
+    printf '%s\n' push >>"${fixture_dir}/activity"
+    [[ "${fixture_scenario}" != push-failure ]] || return 91
+    state_set sourceTimeZone Europe/Rome
+  }
+  mv() {
+    if [[ "${fixture_scenario}" == checkpoint-failure && "$2" == "${STATE_FILE}" ]] &&
+      jq -e '.deploymentVersionCheckpoint | fromjson? | .versionNumber == 4' "$1" >/dev/null; then
+      printf '%s\n' checkpoint-failed >>"${fixture_dir}/activity"
+      return 92
+    fi
+    if [[ "${fixture_scenario}" == deployment-checkpoint-failure && "$2" == "${STATE_FILE}" ]] &&
+      jq -e '.deploymentId == "deployment-1"' "$1" >/dev/null; then
+      printf '%s\n' deployment-checkpoint-failed >>"${fixture_dir}/activity"
+      return 92
+    fi
+    command mv "$@"
+  }
+  recovery_clasp_fixture() {
+    [[ "$1" == -A && "$2" == "${AUTH_DIR}/.clasprc.json" && "$3" == --json ]] || return 93
+    shift 3
+    local description resource_json
+    description="$(jq -r '(.deploymentVersionCheckpoint | fromjson? | .description) // .deploymentCreationDescription' "${STATE_FILE}")"
+    case "$1" in
+      version)
+        [[ "$2" == "${description}" ]] || return 94
+        if [[ "${fixture_scenario}" == version-auth ]]; then
+          printf '%s\n' invalid_grant >&2
           return 9
-          ;;
-        *) return 97 ;;
-      esac
-    }
-    CLASP=(clasp_fixture)
-    ensure_api_executable_deployment
-  ) >"${output_file}" 2>&1
-  test_status=$?
-  set -e
+        fi
+        jq -e '.deploymentVersionCheckpoint | fromjson | .versionNumber == null' "${STATE_FILE}" >/dev/null
+        printf '%s\n' version-create >>"${fixture_dir}/activity"
+        jq -cn --arg description "${description}" \
+          '[{scriptId:"test-script",versionNumber:4,description:$description}]' >"${fixture_dir}/versions.json"
+        if [[ "${fixture_scenario}" == version-interruption ]]; then
+          sh -c 'kill -TERM "$PPID"'
+        fi
+        printf '%s\n' '{"versionNumber":4}'
+        ;;
+      deploy)
+        [[ "$*" == "deploy --versionNumber 4 --description ${description}" ]] || return 95
+        jq -e '.deploymentVersionCheckpoint | fromjson | .versionNumber == 4' "${STATE_FILE}" >/dev/null
+        if [[ "${fixture_scenario}" == deploy-failure || "${fixture_scenario}" == deploy-auth ]]; then
+          printf '%s\n' deploy-failed >>"${fixture_dir}/activity"
+          printf '%s\n' invalid_grant >&2
+          return 9
+        fi
+        printf '%s\n' deployment-create >>"${fixture_dir}/activity"
+        resource_json="$(deployment_fixture test-script EXECUTION_API MYSELF)"
+        jq --arg description "${description}" \
+          '[. | .deploymentConfig.description = $description]' <<<"${resource_json}" >"${fixture_dir}/deployments.json"
+        if [[ "${fixture_scenario}" == deployment-interruption ]]; then
+          sh -c 'kill -TERM "$PPID"'
+        fi
+        printf '%s\n' '{"deploymentId":"deployment-1","versionNumber":4}'
+        ;;
+      *) return 96 ;;
+    esac
+  }
+  list_apps_script_resources() {
+    [[ "$1" == "${AUTH_DIR}/.clasprc.json" && "$2" == test-script ]] || return 97
+    printf 'list-%s\n' "$3" >>"${fixture_dir}/activity"
+    [[ "${fixture_scenario}" != list-failure ]] || return 9
+    local listed
+    listed="$(cat "${fixture_dir}/$3.json")"
+    printf -v "$4" '%s' "${listed}"
+  }
+  read_apps_script_version_content() {
+    [[ "$2" == test-script && "$3" == 4 ]] || return 98
+    jq -e '.deploymentVersionCheckpoint | fromjson | .versionNumber == 4' "${STATE_FILE}" >/dev/null
+    printf '%s\n' content-4 >>"${fixture_dir}/activity"
+    [[ "${fixture_scenario}" != content-failure ]] || return 9
+    local content
+    content="$(version_content_fixture "${missing_entrypoint}")"
+    case "${fixture_scenario}" in
+      guarded) content="$(jq '.files[0].source = ("if (false)\n" + .files[0].source)' <<<"${content}")" ;;
+      malformed-source) content="$(jq '.files[0].source += "("' <<<"${content}")" ;;
+      *) ;;
+    esac
+    printf -v "$4" '%s' "${content}"
+  }
+  read_apps_script_deployment() {
+    [[ "$2" == test-script && "$3" == deployment-1 ]] || return 99
+    printf '%s\n' metadata >>"${fixture_dir}/activity"
+    if grep -q '^deployment-create$' "${fixture_dir}/activity" &&
+      [[ "${fixture_scenario}" != success ]]; then
+      jq -e '.deploymentId == "deployment-1"' "${STATE_FILE}" >/dev/null
+    fi
+    [[ "${fixture_scenario}" != metadata-failure ]] || return 9
+    local metadata
+    metadata="$(jq '.[0]' "${fixture_dir}/deployments.json")"
+    if [[ "${fixture_scenario}" == wrong-access ]]; then
+      metadata="$(jq '.entryPoints[0].executionApi.entryPointConfig.access = "ANYONE"' <<<"${metadata}")"
+    elif [[ "${fixture_scenario}" == wrong-version ]]; then
+      metadata="$(jq '.deploymentConfig.versionNumber = 5' <<<"${metadata}")"
+    elif [[ "${fixture_scenario}" == wrong-description ]]; then
+      metadata="$(jq '.deploymentConfig.description = "other-marker"' <<<"${metadata}")"
+    elif [[ "${fixture_scenario}" == wrong-script ]]; then
+      metadata="$(jq '.deploymentConfig.scriptId = "other-script"' <<<"${metadata}")"
+    fi
+    printf -v "$4" '%s' "${metadata}"
+  }
+  sleep() { printf '%s\n' unexpected-sleep >>"${fixture_dir}/activity"; return 99; }
+  if [[ "${fixture_scenario}" == timezone-override ]]; then
+    GDUC_TIME_ZONE=Pacific/Auckland
+    apply_resume_overrides
+  else
+    prepare_apps_script_source_and_deployment
+  fi
+)
 
-  if [[ "${test_status}" -eq 0 ]] ||
-    ! grep -q -- '--json deploy --versionNumber 4 --description' "${activity_log}" ||
-    grep -q '^state-set deploymentId' "${activity_log}" ||
-    grep -q '^unexpected-read$' "${activity_log}" ||
-    ! grep -q 'OAuth refresh token is invalid or expired' "${output_file}"; then
-    printf 'FAIL: invalid authorization did not block new deployment creation\n' >&2
+check_recovery_failure() {
+  local fixture_dir="$1" scenario="$2" missing_api="${3:-}" status
+  set +e
+  run_version_recovery_turn "${fixture_dir}" "${scenario}" "${missing_api}" >"${fixture_dir}/output" 2>&1
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    printf 'FAIL: version recovery accepted %s\n' "${scenario}" >&2
     failures=$((failures + 1))
   fi
 }
 
-test_installer_version_admission_matrix() {
-  local mode missing_entrypoint scenario test_status expected_status expected_content_reads selected_entrypoints
-  local activity_log="${TEST_STATE_DIR}/version-admission-activity"
-  local gate_state="${TEST_STATE_DIR}/version-admission-state.json"
-  local gate_output="${TEST_STATE_DIR}/version-admission-output"
-  local required_entrypoints
+test_installer_version_checkpoint_recovery() {
+  local mode scenario fixture_dir status version_count deployment_count push_count checkpoint
+  local required_entrypoints entrypoint mutation
   required_entrypoints="$(node -e 'console.log(require(process.argv[1]).requiredEntrypoints.join("\n"))' \
-    "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js")"
+    "${TEST_SCRIPT_DIR}/lib/apps-script-entrypoints.js")"
+  for mode in fresh created planned legacy legacy-deployment deployed stored; do
+    fixture_dir="${TEST_STATE_DIR}/recovery-${mode}"
+    initialize_version_recovery_fixture "${fixture_dir}" "${mode}"
+    set +e
+    run_version_recovery_turn "${fixture_dir}" success >"${fixture_dir}/output" 2>&1
+    status=$?
+    set -e
+    if [[ "${status}" != 0 ]]; then
+      printf 'FAIL: %s version recovery failed\n' "${mode}" >&2
+      cat "${fixture_dir}/output" >&2
+      failures=$((failures + 1))
+    fi
+    version_count="$(grep -c '^version-create$' "${fixture_dir}/activity" || true)"
+    push_count="$(grep -c '^push$' "${fixture_dir}/activity" || true)"
+    deployment_count="$(grep -c '^deployment-create$' "${fixture_dir}/activity" || true)"
+    if [[ "${mode}" == fresh ]]; then
+      assert_equal 1 "${version_count}" 'fresh version is created once'
+      assert_equal 1 "${push_count}" 'fresh source is pushed once'
+    else
+      assert_equal 0 "${version_count}" 'resume reuses its immutable version'
+      assert_equal 0 "${push_count}" 'resume never repushes local source'
+    fi
+    if [[ "${mode}" == deployed || "${mode}" == legacy-deployment || "${mode}" == stored ]]; then
+      assert_equal 0 "${deployment_count}" 'existing deployment is reused'
+    else
+      assert_equal 1 "${deployment_count}" 'missing deployment is created once'
+    fi
+    checkpoint="$(jq -r '.deploymentVersionCheckpoint // ""' "${fixture_dir}/state/state.json")"
+    assert_equal '' "${checkpoint}" 'verified deployment clears the version checkpoint'
+  done
+  for scenario in content-failure deploy-failure checkpoint-failure deployment-checkpoint-failure version-interruption deployment-interruption metadata-failure; do
+    fixture_dir="${TEST_STATE_DIR}/retry-${scenario}"
+    initialize_version_recovery_fixture "${fixture_dir}" fresh
+    check_recovery_failure "${fixture_dir}" "${scenario}"
+    # The local source can change between invocations; recovery must not upload it.
+    printf '%s\n' 'throw new Error("new local HEAD must not be pushed");' >"${fixture_dir}/project/Changed.gs"
+    set +e
+    run_version_recovery_turn "${fixture_dir}" success >>"${fixture_dir}/output" 2>&1
+    status=$?
+    set -e
+    if [[ "${status}" != 0 ]]; then
+      printf 'FAIL: %s did not recover\n' "${scenario}" >&2
+      cat "${fixture_dir}/output" >&2
+      failures=$((failures + 1))
+    fi
+    version_count="$(grep -c '^version-create$' "${fixture_dir}/activity" || true)"
+    deployment_count="$(grep -c '^deployment-create$' "${fixture_dir}/activity" || true)"
+    push_count="$(grep -c '^push$' "${fixture_dir}/activity" || true)"
+    assert_equal 1 "${version_count}" "${scenario}: no duplicate version"
+    assert_equal 1 "${deployment_count}" "${scenario}: no duplicate deployment"
+    assert_equal 1 "${push_count}" "${scenario}: no repeated HEAD push"
+  done
+  fixture_dir="${TEST_STATE_DIR}/fresh-discovery-retry"
+  initialize_version_recovery_fixture "${fixture_dir}" fresh
+  check_recovery_failure "${fixture_dir}" list-failure
+  if ! jq -e '(.deploymentVersionCheckpoint // "") == "" and
+    (.deploymentCreationDescription // "") == ""' "${fixture_dir}/state/state.json" >/dev/null; then
+    printf 'FAIL: fresh discovery failure stranded a pending creation marker\n' >&2
+    failures=$((failures + 1))
+  fi
+  set +e
+  run_version_recovery_turn "${fixture_dir}" success >>"${fixture_dir}/output" 2>&1
+  status=$?
+  set -e
+  assert_equal 0 "${status}" 'fresh discovery failure can safely resume'
+  assert_equal 1 "$(grep -c '^version-create$' "${fixture_dir}/activity" || true)" 'fresh discovery retry creates one version'
+  for mode in fresh created legacy-deployment; do
+    while IFS= read -r entrypoint; do
+      fixture_dir="${TEST_STATE_DIR}/missing-${mode}-${entrypoint}"
+      initialize_version_recovery_fixture "${fixture_dir}" "${mode}"
+      check_recovery_failure "${fixture_dir}" missing "${entrypoint}"
+      assert_equal 0 "$(grep -c '^deployment-create$' "${fixture_dir}/activity" || true)" 'missing API blocks promotion'
+      assert_equal 1 "$(grep -c '^content-4$' "${fixture_dir}/activity" || true)" 'missing API is inspected exactly once'
+    done <<<"${required_entrypoints}"
+  done
+  for scenario in guarded malformed-source push-failure list-failure version-auth deploy-auth wrong-access wrong-version wrong-description wrong-script timezone-override; do
+    fixture_dir="${TEST_STATE_DIR}/reject-${scenario}"
+    mode=created
+    if [[ "${scenario}" == version-auth || "${scenario}" == push-failure ]]; then mode=fresh; fi
+    if [[ "${scenario}" == wrong-* ]]; then mode=deployed; fi
+    if [[ "${scenario}" == wrong-description || "${scenario}" == wrong-script ]]; then mode=legacy-deployment; fi
+    initialize_version_recovery_fixture "${fixture_dir}" "${mode}"
+    check_recovery_failure "${fixture_dir}" "${scenario}"
+    assert_equal 0 "$(grep -c '^deployment-create$' "${fixture_dir}/activity" || true)" 'rejected recovery cannot create deployment'
+    if [[ "${scenario}" == *-auth ]]; then
+      if ! grep -q 'OAuth refresh token is invalid or expired' "${fixture_dir}/output"; then
+        printf 'FAIL: %s lost authorization guidance\n' "${scenario}" >&2
+        failures=$((failures + 1))
+      fi
+    fi
+  done
+  for mutation in '[]' '.[0:0]' '. + [.[0] | .versionNumber = 5]'; do
+    fixture_dir="${TEST_STATE_DIR}/uncertain-${RANDOM}"
+    initialize_version_recovery_fixture "${fixture_dir}" planned
+    jq "${mutation}" "${fixture_dir}/versions.json" >"${fixture_dir}/changed.json"
+    mv "${fixture_dir}/changed.json" "${fixture_dir}/versions.json"
+    check_recovery_failure "${fixture_dir}" success
+    assert_equal 0 "$(grep -c '^version-create$' "${fixture_dir}/activity" || true)" 'uncertain acceptance cannot create another version'
+    assert_equal 0 "$(grep -c '^push$' "${fixture_dir}/activity" || true)" 'uncertain acceptance cannot repush source'
+  done
+  for mutation in \
+    '.deploymentVersionCheckpoint = {}' \
+    '.deploymentVersionCheckpoint = "not json"' \
+    '.deploymentVersionCheckpoint |= (fromjson | .versionNumber = -1 | tojson)' \
+    '.deploymentVersionCheckpoint |= (fromjson | .scriptId = "other" | tojson)' \
+    '.deploymentVersionCheckpoint |= (fromjson | .description = "other" | tojson)' \
+    '.deploymentVersionCheckpoint |= (fromjson | del(.sourceTimeZone) | tojson)' \
+    '.timeZone = "Pacific/Auckland"' \
+    '.phase = "script_ready"'; do
+    fixture_dir="${TEST_STATE_DIR}/malformed-${RANDOM}"
+    initialize_version_recovery_fixture "${fixture_dir}" created
+    jq "${mutation}" "${fixture_dir}/state/state.json" >"${fixture_dir}/changed.json"
+    mv "${fixture_dir}/changed.json" "${fixture_dir}/state/state.json"
+    cp "${fixture_dir}/state/state.json" "${fixture_dir}/before.json"
+    check_recovery_failure "${fixture_dir}" success
+    assert_equal '' "$(<"${fixture_dir}/activity")" 'malformed checkpoint fails before external work'
+    if ! cmp -s "${fixture_dir}/before.json" "${fixture_dir}/state/state.json"; then
+      printf 'FAIL: malformed checkpoint was mutated\n' >&2
+      failures=$((failures + 1))
+    fi
+  done
+}
 
-  for mode in fresh adopt; do
-    for scenario in valid read-failure guarded malformed metadata-failure wrong-script wrong-description version-auth version-malformed deploy-auth missing; do
-      if [[ "${mode}" == adopt && "${scenario}" == version-* ]] ||
-        [[ "${mode}" == adopt && "${scenario}" == deploy-auth ]] ||
-        [[ "${mode}" == fresh && "${scenario}" == wrong-description ]]; then
-        continue
-      fi
-      selected_entrypoints=""
-      if [[ "${scenario}" == missing ]]; then
-        selected_entrypoints="${required_entrypoints}"
-      fi
-      while IFS= read -r missing_entrypoint; do
-        : >"${activity_log}"
-        printf '%s\n' '{"scriptId":"test-script","deploymentCreationDescription":"Owner-only installer bootstrap test-marker"}' >"${gate_state}"
-        set +e
-        (
-          state_get() { jq -r "$1 // empty" "${gate_state}"; }
-          state_set() {
-            jq --arg key "$1" --arg value "$2" '.[$key] = $value' \
-              "${gate_state}" >"${gate_state}.tmp" || return
-            mv "${gate_state}.tmp" "${gate_state}" || return
-            printf 'state %s\n' "$1" >>"${activity_log}"
-          }
-          clasp_gate_fixture() {
-            shift 3
-            printf 'clasp %s\n' "$1" >>"${activity_log}"
-            case "$1" in
-              deployments)
-                if [[ "${mode}" == adopt ]]; then
-                  printf '%s\n' '[{"deploymentId":"deployment-1","description":"Owner-only installer bootstrap test-marker"}]'
-                else
-                  printf '%s\n' '[]'
-                fi
-                ;;
-              version)
-                [[ "$2" == 'Owner-only installer bootstrap test-marker' ]] || return 98
-                if [[ "${scenario}" == version-auth ]]; then
-                  printf '%s\n' 'invalid_grant' >&2
-                  return 9
-                fi
-                if [[ "${scenario}" == version-malformed ]]; then
-                  printf '%s\n' '{"versionNumber":0}'
-                else
-                  printf '%s\n' '{"versionNumber":4}'
-                fi
-                ;;
-              deploy)
-                [[ "$*" == 'deploy --versionNumber 4 --description Owner-only installer bootstrap test-marker' ]] || return 98
-                if [[ "${scenario}" == deploy-auth ]]; then
-                  printf '%s\n' 'invalid_grant' >&2
-                  return 9
-                fi
-                printf '%s\n' '{"deploymentId":"deployment-1","versionNumber":4}'
-                ;;
-              *) return 98 ;;
-            esac
-          }
-          read_apps_script_version_content() {
-            printf 'content %s %s\n' "$2" "$3" >>"${activity_log}"
-            [[ "$2" == test-script && "$3" == 4 ]] || return 97
-            [[ "${scenario}" != read-failure ]] || return 9
-            local content_fixture
-            content_fixture="$(version_content_fixture "${missing_entrypoint}")"
-            if [[ "${scenario}" == guarded ]]; then
-              content_fixture="$(jq -c '.files[0].source = ("if (false)\n" + .files[0].source)' <<<"${content_fixture}")"
-            fi
-            if [[ "${scenario}" == malformed ]]; then
-              content_fixture="$(jq -c '.files[0].source += "("' <<<"${content_fixture}")"
-            fi
-            printf -v "$4" '%s' "${content_fixture}"
-          }
-          read_apps_script_deployment() {
-            printf 'metadata %s\n' "$3" >>"${activity_log}"
-            if [[ "${mode}" == fresh ]]; then
-              local checkpoint_id
-              checkpoint_id="$(state_get '.deploymentId')"
-              local checkpoint_status=$?
-              if [[ "${checkpoint_status}" != 0 ]]; then return "${checkpoint_status}"; fi
-              [[ "${checkpoint_id}" == deployment-1 ]] || return 96
-            fi
-            [[ "${scenario}" != metadata-failure ]] || return 9
-            local metadata_fixture
-            metadata_fixture="$(deployment_fixture test-script EXECUTION_API MYSELF)"
-            metadata_fixture="$(jq -c '.deploymentConfig.description = "Owner-only installer bootstrap test-marker"' <<<"${metadata_fixture}")"
-            if [[ "${scenario}" == wrong-script ]]; then
-              metadata_fixture="$(jq -c '.deploymentConfig.scriptId = "other-script"' <<<"${metadata_fixture}")"
-            elif [[ "${scenario}" == wrong-description ]]; then
-              metadata_fixture="$(jq -c '.deploymentConfig.description = "other-marker"' <<<"${metadata_fixture}")"
-            fi
-            printf -v "$4" '%s' "${metadata_fixture}"
-          }
-          sleep() { printf '%s\n' 'unexpected-sleep' >>"${activity_log}"; return 99; }
-          CLASP=(clasp_gate_fixture)
-          ensure_api_executable_deployment
-        ) >"${gate_output}" 2>&1
-        test_status=$?
-        set -e
-        expected_status=1
-        [[ "${scenario}" != valid ]] || expected_status=0
-        expected_content_reads=1
-        if [[ "${scenario}" == version-* ]] ||
-          [[ "${mode}" == adopt && "${scenario}" =~ ^(metadata-failure|wrong-script|wrong-description)$ ]]; then
-          expected_content_reads=0
-        fi
-        if [[ "${expected_status}" == 0 && "${test_status}" != 0 ]] ||
-          [[ "${expected_status}" == 1 && "${test_status}" == 0 ]] ||
-          [[ "$(grep -c '^content test-script 4$' "${activity_log}" || true)" != "${expected_content_reads}" ]] ||
-          grep -q '^unexpected-sleep$' "${activity_log}"; then
-          printf 'FAIL: installer version admission %s/%s/%s\n' "${mode}" "${scenario}" "${missing_entrypoint}" >&2
-          cat "${gate_output}" >&2
-          failures=$((failures + 1))
-        fi
-        if [[ "${scenario}" =~ ^(missing|guarded|malformed|read-failure|version-auth|version-malformed)$ ]] ||
-          [[ "${mode}" == adopt ]]; then
-          if grep -q '^clasp deploy$' "${activity_log}"; then
-            printf 'FAIL: installer promoted an unadmitted artifact %s/%s\n' "${mode}" "${scenario}" >&2
-            failures=$((failures + 1))
+
+test_complete_apps_script_discovery() {
+  local collection scenario fixture_dir status expected_reads actual_reads
+  for collection in versions deployments; do
+    for scenario in single multiple empty empty-first-page auth-failure missing-token transport http malformed scalar invalid-collection wrong-script invalid-number repeated-token duplicate-id page-limit invalid-token oauth-ambiguous; do
+      if [[ "${scenario}" == oauth-ambiguous && "${collection}" != deployments ]]; then continue; fi
+      fixture_dir="${TEST_STATE_DIR}/discovery-${collection}-${scenario}"
+      mkdir -p "${fixture_dir}"
+      printf '%s\n' '{"tokens":{"default":{"access_token":"private-test-token"}}}' >"${fixture_dir}/auth.json"
+      : >"${fixture_dir}/reads"
+      if [[ "${scenario}" == missing-token ]]; then printf '%s\n' '{}' >"${fixture_dir}/auth.json"; fi
+      set +e
+      (
+        CLASP=(discovery_clasp_fixture)
+        discovery_clasp_fixture() {
+          [[ "$*" == "-A ${fixture_dir}/auth.json --json deployments" ]] || return 97
+          if [[ "${scenario}" == auth-failure ]]; then
+            printf '%s\n' 'invalid_grant private-provider-detail' >&2
+            return 9
           fi
+          # This deliberately incomplete CLI result must never select a candidate.
+          printf '%s\n' '[{"deploymentId":"untrusted-cli-only-result"}]'
+        }
+        curl() {
+          local url="$7" page_number resource page token='' header
+          [[ "$#" == 7 && "$1" == --silent && "$2" == --show-error &&
+            "$3" == --header && "$4" == @- && "$5" == --write-out && "$6" == $'\n%{http_code}' ]] || return 97
+          IFS= read -r header
+          [[ "${header}" == 'Authorization: Bearer private-test-token' ]] || return 98
+          [[ "${url}" == "https://script.googleapis.com/v1/projects/test-script/${collection}?pageSize=100"* ]] || return 99
+          page_number="$(wc -l <"${fixture_dir}/reads" | tr -d ' ')"
+          page_number=$((page_number + 1))
+          if [[ "${page_number}" == 2 && "${scenario}" != page-limit ]]; then
+            [[ "${url}" == *'&pageToken=page%2F2%20%3F' ]] || return 96
+          fi
+          printf '%s\n' "${url}" >>"${fixture_dir}/reads"
+          case "${scenario}" in
+            transport) printf '%s\n' private-provider-detail >&2; return 28 ;;
+            http) printf '%s\n403' '{"error":"private-provider-detail"}'; return 0 ;;
+            malformed) printf '%s\n200' '{private-provider-detail'; return 0 ;;
+            empty) printf '%s\n200' '{}'; return 0 ;;
+            *) ;;
+          esac
+          if [[ "${collection}" == versions ]]; then
+            resource="$(jq -cn --argjson version "$((page_number + 3))" \
+              '{scriptId:"test-script",versionNumber:$version,description:"fixture"}')"
+          else
+            resource="$(deployment_fixture test-script EXECUTION_API MYSELF)"
+            resource="$(jq --arg id "deployment-${page_number}" '.deploymentId = $id' <<<"${resource}")"
+          fi
+          case "${scenario}" in
+            scalar) resource=7 ;;
+            invalid-number)
+              if [[ "${collection}" == versions ]]; then
+                resource="$(jq '.versionNumber = 0' <<<"${resource}")"
+              else
+                resource="$(jq '.deploymentConfig.versionNumber = 0' <<<"${resource}")"
+              fi
+              ;;
+            wrong-script)
+              if [[ "${page_number}" == 2 ]]; then
+                if [[ "${collection}" == versions ]]; then
+                  resource="$(jq '.scriptId = "other-script"' <<<"${resource}")"
+                else
+                  resource="$(jq '.deploymentConfig.scriptId = "other-script"' <<<"${resource}")"
+                fi
+              fi
+              ;;
+            duplicate-id)
+              if [[ "${collection}" == versions ]]; then
+                resource="$(jq '.versionNumber = 4' <<<"${resource}")"
+              else
+                resource="$(jq '.deploymentId = "deployment-1"' <<<"${resource}")"
+              fi
+              ;;
+            *) ;;
+          esac
+          if [[ "${page_number}" == 1 && "${scenario}" =~ ^(multiple|empty-first-page|wrong-script|duplicate-id|oauth-ambiguous|repeated-token)$ ]]; then
+            token='page/2 ?'
+          elif [[ "${scenario}" == repeated-token ]]; then
+            token='page/2 ?'
+          elif [[ "${scenario}" == page-limit ]]; then
+            token="next-${page_number}"
+          fi
+          page="$(jq -cn --arg collection "${collection}" --argjson resource "${resource}" \
+            --arg token "${token}" '{($collection):[$resource]} +
+              (if $token == "" then {} else {nextPageToken:$token} end)')"
+          if [[ "${scenario}" == empty-first-page && "${page_number}" == 1 ]]; then
+            page="$(jq --arg collection "${collection}" 'del(.[$collection])' <<<"${page}")"
+          elif [[ "${scenario}" == invalid-collection ]]; then
+            page="$(jq --arg collection "${collection}" '.[$collection] = null' <<<"${page}")"
+          elif [[ "${scenario}" == invalid-token ]]; then
+            page="$(jq '.nextPageToken = 42' <<<"${page}")"
+          fi
+          printf '%s\n200' "${page}"
+        }
+        read_apps_script_deployment() {
+          local metadata
+          printf '%s\n' "$3" >>"${fixture_dir}/metadata"
+          metadata="$(deployment_fixture test-script EXECUTION_API MYSELF)"
+          metadata="$(jq --arg id "$3" '.deploymentId = $id' <<<"${metadata}")"
+          printf -v "$4" '%s' "${metadata}"
+        }
+        result=sentinel
+        if [[ "${scenario}" == oauth-ambiguous ]]; then
+          find_owner_only_api_deployment "${fixture_dir}/auth.json" test-script result
+        else
+          list_apps_script_resources "${fixture_dir}/auth.json" test-script "${collection}" result
         fi
-        if [[ "${mode}" == adopt && "${scenario}" != valid ]] &&
-          grep -q '^state deploymentId$' "${activity_log}"; then
-          printf 'FAIL: installer adopted an unverified candidate\n' >&2
+        status=$?
+        printf '%s' "${result}" >"${fixture_dir}/result"
+        exit "${status}"
+      ) >"${fixture_dir}/output" 2>&1
+      status=$?
+      set -e
+      expected_reads=1
+      case "${scenario}" in
+        auth-failure|missing-token) expected_reads=0 ;;
+        multiple|empty-first-page|wrong-script|duplicate-id|oauth-ambiguous|repeated-token) expected_reads=2 ;;
+        page-limit) expected_reads=10 ;;
+        *) ;;
+      esac
+      actual_reads="$(wc -l <"${fixture_dir}/reads" | tr -d ' ')"
+      assert_equal "${expected_reads}" "${actual_reads}" "${collection}/${scenario}: exact page reads"
+      if [[ "${scenario}" =~ ^(single|multiple|empty|empty-first-page)$ ]]; then
+        if [[ "${status}" -ne 0 ]]; then
+          printf 'FAIL: complete %s/%s discovery failed\n' "${collection}" "${scenario}" >&2
+          cat "${fixture_dir}/output" >&2
           failures=$((failures + 1))
         fi
-        if [[ "${scenario}" == *-auth ]] &&
-          ! grep -q 'OAuth refresh token is invalid or expired' "${gate_output}"; then
-          printf 'FAIL: version admission lost authorization remediation\n' >&2
+      else
+        if [[ "${status}" -eq 0 || "$(<"${fixture_dir}/result")" != sentinel ]]; then
+          printf 'FAIL: incomplete or invalid %s/%s discovery was published\n' "${collection}" "${scenario}" >&2
           failures=$((failures + 1))
         fi
-        if [[ "${mode}" == adopt && "${scenario}" == valid ]] &&
-          [[ "$(<"${activity_log}")" != $'clasp deployments\nmetadata deployment-1\ncontent test-script 4\nstate deploymentId\nstate deploymentCreationDescription' ]]; then
-          printf 'FAIL: pending adoption inspected or persisted out of order\n' >&2
-          failures=$((failures + 1))
-        fi
-        if [[ "${mode}" == fresh && "${scenario}" == valid ]] &&
-          [[ "$(<"${activity_log}")" != $'clasp deployments\nclasp version\ncontent test-script 4\nclasp deploy\nstate deploymentId\nmetadata deployment-1\nstate deploymentCreationDescription' ]]; then
-          printf 'FAIL: initial deployment mutation/checkpoint order changed\n' >&2
-          failures=$((failures + 1))
-        fi
-      done <<<"${selected_entrypoints}"
+      fi
+      if grep -q 'private-provider-detail\|private-test-token' "${fixture_dir}/output"; then
+        printf 'FAIL: discovery leaked provider detail or authorization\n' >&2
+        failures=$((failures + 1))
+      fi
+      if [[ "${scenario}" == oauth-ambiguous ]]; then
+        assert_equal $'deployment-1\ndeployment-2' "$(<"${fixture_dir}/metadata")" \
+          'OAuth adoption inspects the later-page second owner deployment'
+      fi
     done
   done
 }
@@ -1586,28 +1469,21 @@ test_owner_only_deployment_discovery_rejects_list_failures
 test_owner_only_deployment_discovery_rejects_zero_matches
 test_owner_only_deployment_discovery_selects_unique_match
 test_owner_only_deployment_discovery_aborts_on_inspection_failure
-test_invalid_stored_deployment_is_not_recreated
-test_invalid_new_deployment_is_stored_for_safe_resume
-test_invalid_stored_deployment_blocks_source_push
-test_invalid_authorization_blocks_pending_deployment_creation
-test_invalid_authorization_blocks_new_deployment_creation
-test_pending_deployment_creation_is_reconciled_without_duplicate
-test_ambiguous_pending_deployment_creation_fails_closed
-test_valid_stored_deployment_skips_source_push
-test_installer_version_admission_matrix
+test_installer_version_checkpoint_recovery
+test_complete_apps_script_discovery
 
-if ! bash "${PROJECT_ROOT}/scripts/install.sh" --help >/dev/null; then
+if ! bash "${TEST_SCRIPT_DIR}/install.sh" --help >/dev/null; then
   printf 'FAIL: installer help is unavailable\n' >&2
   failures=$((failures + 1))
 fi
 
-if ! make -C "${PROJECT_ROOT}" --no-print-directory |
+if ! make -C "${TEST_SCRIPT_DIR}/.." --no-print-directory |
   grep -q "install-resume"; then
   printf 'FAIL: default make target does not print installer help\n' >&2
   failures=$((failures + 1))
 fi
 
-if ! make -C "${PROJECT_ROOT}" --no-print-directory |
+if ! make -C "${TEST_SCRIPT_DIR}/.." --no-print-directory |
   grep -q "install-reconfigure-time-zone"; then
   printf 'FAIL: make help omits time-zone reconfiguration\n' >&2
   failures=$((failures + 1))

@@ -265,6 +265,99 @@ validate_owner_only_api_deployment() {
   fi
 }
 
+list_apps_script_resources() {
+  local auth_file="$1"
+  local script_id="$2"
+  local collection="$3"
+  local result_variable="$4"
+  local access_token response_json http_response http_status request_url encoded_token
+  local page_number next_token="" seen_tokens='[]' resources_json='[]'
+
+  if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
+    ! "${collection}" =~ ^(versions|deployments)$ ]]; then
+    printf '%s\n' 'Invalid Apps Script discovery identity.' >&2
+    return 1
+  fi
+  # This CLI read only refreshes authorization. Its truncated output is never
+  # used to establish absence or uniqueness; REST pagination proves those.
+  if ! run_apps_script_clasp_json "${auth_file}" "" deployments; then
+    return 1
+  fi
+  access_token="$(jq -er '.tokens.default.access_token |
+    select(type == "string" and length > 0)' "${auth_file}" 2>/dev/null)" || {
+    printf '%s\n' 'The clasp authorization does not contain a usable access token.' >&2
+    return 1
+  }
+  for ((page_number = 1; page_number <= 10; page_number += 1)); do
+    request_url="https://script.googleapis.com/v1/projects/${script_id}/${collection}?pageSize=100"
+    if [[ -n "${next_token}" ]]; then
+      encoded_token="$(jq -rn --arg token "${next_token}" '$token | @uri')" || return 1
+      request_url+="&pageToken=${encoded_token}"
+    fi
+    if ! http_response="$(printf 'Authorization: Bearer %s\nAccept: application/json\n' \
+      "${access_token}" | curl --silent --show-error --header @- \
+      --write-out $'\n%{http_code}' "${request_url}" 2>/dev/null)"; then
+      printf '%s\n' 'Apps Script discovery transport failed.' >&2
+      return 1
+    fi
+    if [[ "${http_response}" != *$'\n'* ]]; then
+      printf '%s\n' 'Apps Script discovery returned no HTTP status.' >&2
+      return 1
+    fi
+    http_status="${http_response##*$'\n'}"
+    response_json="${http_response%$'\n'*}"
+    if [[ "${http_status}" != 200 ]]; then
+      printf '%s\n' 'Apps Script discovery request failed.' >&2
+      return 1
+    fi
+    if ! jq -e --arg collection "${collection}" --arg script_id "${script_id}" '
+      def positive_integer: type == "number" and . > 0 and . == floor;
+      type == "object" and
+      ((has($collection) | not) or (.[$collection] | type == "array")) and
+      ((has("nextPageToken") | not) or (.nextPageToken | type == "string")) and
+      all(.[$collection][]?;
+        if $collection == "versions" then
+          .scriptId == $script_id and (.versionNumber | positive_integer) and
+          ((has("description") | not) or (.description | type == "string"))
+        else
+          (.deploymentId | type == "string" and test("^[A-Za-z0-9_-]+$")) and
+          .deploymentConfig.scriptId == $script_id and
+          (.deploymentConfig.versionNumber == null or
+            (.deploymentConfig.versionNumber | positive_integer)) and
+          ((.deploymentConfig | has("description") | not) or
+            (.deploymentConfig.description | type == "string"))
+        end)
+    ' <<<"${response_json}" >/dev/null 2>&1; then
+      printf '%s\n' 'Apps Script discovery returned invalid resource identity or pagination.' >&2
+      return 1
+    fi
+    resources_json="$(jq -cn --argjson existing "${resources_json}" \
+      --argjson page "${response_json}" --arg collection "${collection}" \
+      '$existing + ($page[$collection] // [])')" || return 1
+    if ! jq -e --arg collection "${collection}" '
+      map(if $collection == "versions" then .versionNumber else .deploymentId end) |
+      length == (unique | length)
+    ' <<<"${resources_json}" >/dev/null; then
+      printf '%s\n' 'Apps Script discovery returned duplicate resource identities.' >&2
+      return 1
+    fi
+    next_token="$(jq -r '.nextPageToken // ""' <<<"${response_json}")" || return 1
+    if [[ -z "${next_token}" ]]; then
+      printf -v "${result_variable}" '%s' "${resources_json}"
+      return 0
+    fi
+    if jq -e --arg token "${next_token}" 'index($token) != null' \
+      <<<"${seen_tokens}" >/dev/null; then
+      printf '%s\n' 'Apps Script discovery repeated a page token.' >&2
+      return 1
+    fi
+    seen_tokens="$(jq -c --arg token "${next_token}" '. + [$token]' \
+      <<<"${seen_tokens}")" || return 1
+  done
+  printf '%s\n' 'Apps Script discovery exceeded its complete-pagination limit.' >&2
+  return 1
+}
+
 find_owner_only_api_deployment() {
   local auth_file="$1"
   local script_id="$2"
@@ -277,10 +370,8 @@ find_owner_only_api_deployment() {
   local match_count=0
 
   deployments_json=""
-  if ! run_apps_script_clasp_json \
-    "${auth_file}" \
-    deployments_json \
-    deployments; then
+  if ! list_apps_script_resources \
+    "${auth_file}" "${script_id}" deployments deployments_json; then
     return 1
   fi
   if ! jq -e 'type == "array"' <<<"${deployments_json}" >/dev/null; then

@@ -274,6 +274,18 @@ and supply; other invoices retain generic optional-field handling. A verified
 absent detail contributes no amount to a fully configured cost partition, whose
 remaining values must still reconcile. A malformed repair cannot replace the
 last sanitized extraction.
+
+For Energygas electricity, each complete printed representation must reconcile
+to the selling consumption cost: aggregate quantity multiplied by its selling
+rate, or the sum of each band's quantity multiplied by its own rate. Different
+band rates are supported. When both representations are present, their total
+quantities must also agree. An aggregate-only invoice can use the default
+band-only spreadsheet when the complete band breakdown is explicitly absent;
+partial band values or contradictory absence diagnostics remain blocking.
+The optional extraction fields `electricity_consumption_quantity` and
+`electricity_selling_unit_rate` retain printed aggregate evidence for validation
+and repair without adding spreadsheet columns or inventing band values.
+
 Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
 handoff from the installed Cloud project and validates the new key against the
 configured model. It changes only the key, preserving the backend, model,
