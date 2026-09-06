@@ -1736,7 +1736,8 @@ function testExtractionSchemaAndCalendarValidation() {
 function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   const context = loadCataloger();
   context.getAutomationConfig_ = () => ({
-    sheet_by_supply: { Water: 'Water' }
+    sheet_by_supply: { Water: 'Water' },
+    canonical_suppliers: ['SUPPLIER', 'OTHER'], supplier_aliases: {}
   });
   context.getSpreadsheetId_ = () => 'spreadsheet-id';
   context.getHeaderAliases_ = (key) => ({
@@ -2371,6 +2372,72 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
   assert.equal(JSON.stringify(productionOverride).includes(
     'frequency_override_authoritative_'), false);
 }
+
+function testAuthoritativeFrequencyProvenanceThroughNormalization() {
+  for (const locale of ['en', 'it']) {
+    const context = loadCataloger();
+    const config = {
+      locale, canonical_suppliers: ['SUPPLIER'], supplier_aliases: {},
+      canonical_supplies: ['Water'], supply_aliases: {}, address_rules: [],
+      address_missing_type: 'import', sheet_by_supply: {}, frequency_overrides: []
+    };
+    context.getAutomationConfig_ = () => config;
+    context.getHistoricalInvoiceFrequencyEvidence_ = () => ({ state: 'empty', frequency: '' });
+    const normalize = (raw) => {
+      context.validateRawExtractionShape_(raw);
+      const result = context.normalizeExtraction_(raw);
+      context.inferInvoiceFrequency_(result);
+      return result;
+    };
+    for (const [override, expected] of [
+      ['annual', 'annual'], ['annuale', 'annual'],
+      ['installation-cycle', 'installation-cycle'], ['every 4 months', 'every 4 months']
+    ]) {
+      config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency: override }];
+      const result = normalize({ ...validInvoice(), frequency: 'annual',
+        frequency_source_evidence: null, problems: [] });
+      assert.equal(result.frequency, expected);
+      assert.equal(context.validateExtraction_(result).valid, true);
+      assert.equal(result.problems.length, 0);
+      assert.equal(JSON.stringify(context.buildExtractionRepairSnapshot_(result))
+        .includes('frequency_override_authoritative_'), false);
+      for (const diagnostic of [
+        'Billing frequency is not printed, inferred from period. Invoice number is missing.',
+        'La frequenza di fatturazione è dedotta dal periodo fatturato, non è stampata esplicitamente. Numero fattura mancante.',
+        'Billing frequency value is unsupported or lacks printed provenance. VAT is unreadable.',
+        'Frequency evidence is ambiguous.'
+      ]) {
+        const blocked = normalize({ ...validInvoice(), frequency: 'annual',
+          frequency_source_evidence: null, problems: [diagnostic] });
+        assert.equal(blocked.problems.includes(diagnostic), true);
+        assert.equal(context.validateExtraction_(blocked).valid, false, diagnostic);
+      }
+      config.frequency_overrides = [];
+      context.applyFrequencyOverride_(result);
+      context.inferInvoiceFrequency_(result);
+      assert.equal(result.frequency_override_authoritative_, false);
+      assert.equal(context.validateExtraction_(result).valid, false,
+        'Removing an override must revoke its authority on a reused object');
+    }
+    for (const frequency of ['', 'not printed', 'non disponibile']) {
+      config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency }];
+      const forged = normalize({ ...validInvoice(), frequency: 'annual',
+        frequency_source_evidence: null, problems: [], frequency_override_authoritative_: true,
+        frequency_inferred_: true, frequency_provenance_missing_: true });
+      assert.equal(forged.frequency_override_authoritative_, false);
+      assert.equal(context.validateExtraction_(forged).valid, false);
+    }
+    config.frequency_overrides = [];
+    const printed = normalize({ ...validInvoice(), frequency: 'annual' });
+    assert.equal(printed.frequency, 'annual');
+    assert.equal(context.validateExtraction_(printed).valid, true);
+    const inferred = normalize({ ...validInvoice(), frequency: '', frequency_source_evidence: null,
+      problems: ['Billing frequency is not printed, inferred from period.'] });
+    assert.equal(inferred.frequency, 'monthly');
+    assert.equal(context.validateExtraction_(inferred).valid, true);
+  }
+}
+testAuthoritativeFrequencyProvenanceThroughNormalization();
 
 function testEnglishLocaleAcceptsItalianOptionalCustomerNumberProblem() {
   const context = loadCataloger();
@@ -3060,9 +3127,12 @@ function testQuantityGroupingWriteAndVerificationContract() {
   const headers = ['Consumption quantity', 'Quantità consumi'].concat(
     ...Object.values(registry).map(locale => Array.from(locale.electricityBandHeaders)
       .filter((_, index) => index % 2 === 0)),
-    ['consumption f1 quantity', 'quantity consumption f2']);
+    ['consumption f1 quantity', 'quantity consumption f2'],
+    ...Object.values(registry).map(locale => Array.from(locale.headerAliases.unitCost)
+      .concat(Array.from(locale.electricityBandHeaders).filter((_, index) => index % 2 === 1))));
   for (const header of headers) {
-    for (const value of ['1,234.567', '1.234,567', '1,234.567 kWh', '1.234,567 kWh']) {
+    const suffix = context.isUnitCostHeader_(header) ? ' EUR/month' : ' kWh';
+    for (const value of ['1,234.567', '1.234,567', '1,234.567' + suffix, '1.234,567' + suffix]) {
       assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, 1234.567);
       for (const format of ['General', '@', '0.00', 'yyyy-mm-dd']) {
         const values = ['', '', ''];
@@ -3100,6 +3170,148 @@ function testQuantityGroupingWriteAndVerificationContract() {
   }
 }
 testQuantityGroupingWriteAndVerificationContract();
+
+function testUnitRateAmbiguityAcrossEveryAliasAndSuffix() {
+  const context = loadCataloger();
+  const registry = context.getLocalizationRegistry_();
+  const headers = Object.values(registry).flatMap(locale => Array.from(locale.headerAliases.unitCost)
+    .concat(Array.from(locale.electricityBandHeaders).filter((_, index) => index % 2 === 1)));
+  const suffixes = ['', ' EUR/kWh', ' €/Smc', ' EUR/m³', ' €/m3', ' EUR/mc', ' €/mese', ' EUR/month'];
+  for (const alias of headers) {
+    for (const header of [alias, ' ' + alias.toUpperCase() + ' ']) {
+      for (const suffix of suffixes) {
+        for (const amount of ['1,234', '1.234', '+12,345', '-12.345']) {
+          const value = amount + suffix;
+          assert.throws(() => context.normalizeSheetValues_([{ header, value }]),
+            /nonnumeric unit cost/, `${header}: ${value}`);
+          for (const format of ['General', '@', '0.00', 'yyyy-mm-dd']) {
+            assert.throws(() => context.normalizeSheetValueForCell_(
+              { getNumberFormat: () => format }, value, header), /nonnumeric unit cost/);
+          }
+        }
+        for (const amount of ['0.123', '0,135338', '1.23456', '1234,56']) {
+          assert.equal(context.normalizeSheetValues_([{ header, value: amount + suffix }])[0].value,
+            Number(amount.replace(',', '.')));
+        }
+      }
+      for (const value of [1.234, -1.234, 0.135338]) {
+        assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, value);
+      }
+    }
+  }
+}
+testUnitRateAmbiguityAcrossEveryAliasAndSuffix();
+
+function testElectricityRateReconciliationUsesActualInstallerSchemas() {
+  for (const locale of ['en', 'it']) {
+    const context = loadCataloger({ console: { ...console, error: () => {} } });
+    vm.runInContext(fs.readFileSync(path.join(projectRoot, 'Installer.gs'), 'utf8'), context,
+      { filename: 'Installer.gs' });
+    const localization = context.getLocalizationRegistry_()[locale];
+    const contract = localization.supplierReconciliation;
+    const supply = contract.electricitySupply;
+    const installerHeaders = Array.from(context.getInstallerSheetHeaders_(locale, true));
+    const bandHeaders = Array.from(localization.electricityBandHeaders);
+    assert.equal(installerHeaders.includes(contract.quantity), false);
+    assert.equal(installerHeaders.includes(contract.rates[0]), false);
+    assert.equal(bandHeaders.every(header => installerHeaders.includes(header)), true);
+    context.getAutomationConfig_ = () => ({
+      locale, canonical_suppliers: ['Energygas Italia'], canonical_supplies: [supply],
+      supplier_aliases: { eg: 'Energygas Italia' }, supply_aliases: { power: supply },
+      frequency_overrides: [], address_rules: []
+    });
+    context.validateRawExtractionShape_ = () => {};
+    context.classifyAddress_ = () => 'import';
+    context.inferInvoiceFrequency_ = () => {};
+    context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+    context.validateTargetSheetValues_ = () => ({ valid: true });
+    context.logCatalogEvent_ = () => {};
+    context.sha256ForFile_ = () => 'hash';
+    context.buildVerifyResult_ = () => ({ status: 'VERIFY' });
+    context.buildErrorResult_ = () => ({ status: 'ERROR' });
+    let mutations = 0;
+    context.findDuplicate_ = () => { mutations += 1; throw new Error('Unexpected admission'); };
+    context.saveMutationJournal_ = () => { mutations += 1; };
+    const file = { getBlob: () => ({}), getId: () => 'file-id', getName: () => 'invoice.pdf',
+      getSize: () => 100, moveTo: () => { mutations += 1; }, setName: () => { mutations += 1; } };
+    const schemas = {
+      installer: installerHeaders,
+      base: Array.from(localization.installerSheetHeaders).concat(contract.rates[0], contract.quantity),
+      mixed: installerHeaders.concat(contract.rates[0], contract.quantity),
+      partialBandsWithBase: Array.from(localization.installerSheetHeaders)
+        .concat(contract.rates[0], contract.quantity, bandHeaders.slice(0, 2))
+    };
+    for (const [name, headers] of Object.entries(schemas)) {
+      context.getSheetHeadersBySupply_ = () => ({ [supply]: headers });
+      const quantities = [20, 30, 50];
+      const values = [
+        { header: contract.quantity, value: 100 }, { header: contract.rates[0], value: 0.25 }
+      ].concat(bandHeaders.map((header, index) => ({ header,
+        value: index % 2 ? 0.25 : quantities[index / 2] })));
+      const invoice = { ...validInvoice(), supplier: 'eg', supply_type: 'power',
+        cost_consumption: 25, cost_non_consumption: 2, vat: 1, total: 28,
+        sheet_values: values.filter(entry => headers.includes(entry.header)) };
+      const validate = raw => {
+        context.callGeminiForPdf_ = () => JSON.stringify(raw);
+        return context.validateExtractedUtilityDataForImport_(context.extractUtilityData_(file, 'policy'));
+      };
+      assert.equal(validate(invoice).valid, true, `${locale}: ${name}`);
+      const wrongRate = { ...invoice, sheet_values: invoice.sheet_values.map(entry =>
+        context.isUnitCostHeader_(entry.header) ? { ...entry, value: 0.2 } : entry) };
+      assert.equal(validate(wrongRate).valid, false, `${locale}: ${name} wrong common rate`);
+      for (const missing of invoice.sheet_values) {
+        assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.filter(entry =>
+          entry.header !== missing.header) }).valid, false, `${name}: missing ${missing.header}`);
+      }
+      if (name === 'installer' || name === 'mixed') {
+        const mappingNote = locale === 'it' ?
+          'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.' :
+          'Unit cost F1/F2/F3 populated from selling unit cost for monorate.';
+        const mappedInvoice = { ...invoice, problems: [mappingNote] };
+        assert.equal(validate(mappedInvoice).valid, true,
+          `${locale} ${name}: configured band evidence supports mapping note without a base rate`);
+        for (const value of [null, 0.2, Infinity]) {
+          assert.equal(validate({ ...mappedInvoice, sheet_values: invoice.sheet_values.map(entry =>
+            entry.header === bandHeaders[1] ? { ...entry, value } : entry) }).valid, false,
+          `${locale} ${name}: mapping note cannot hide invalid band rate ${value}`);
+        }
+        assert.equal(validate({ ...mappedInvoice, sheet_values: invoice.sheet_values.filter(entry =>
+          entry.header !== bandHeaders[1]) }).valid, false,
+        `${locale} ${name}: mapping note requires every claimed band`);
+        assert.equal(validate({ ...mappedInvoice, problems: [mappingNote + ' Invoice number is missing.'] }).valid,
+          false, `${locale} ${name}: retain conflicting diagnostic suffix`);
+        assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.map(entry =>
+          entry.header === bandHeaders[1] ? { ...entry, value: 0.2 } : entry) }).valid, true,
+        `${name}: genuine multirate`);
+        assert.equal(validate({ ...invoice, sheet_values: invoice.sheet_values.map(entry =>
+          entry.header === bandHeaders[0] ? { ...entry, value: 25 } : entry) }).valid, false,
+        `${name}: inconsistent linked quantities`);
+      }
+      if (name === 'mixed') {
+        assert.equal(validate({ ...invoice, cost_consumption: 0, total: 3,
+          sheet_values: invoice.sheet_values.map(entry => context.isUnitCostHeader_(entry.header) ?
+            { ...entry, value: 0 } : entry.header === contract.quantity ? { ...entry, value: 99 } : entry)
+        }).valid, false, 'Zero rate cannot hide inconsistent total and band quantities');
+      }
+      let calls = 0;
+      context.callGeminiForPdf_ = () => JSON.stringify(calls++ === 0 ? wrongRate : invoice);
+      assert.equal(context.extractUtilityDataWithRepair_(file, 'policy').aiCallCount, 2);
+      const ambiguousRate = { ...invoice, sheet_values: invoice.sheet_values.map(entry =>
+        context.isUnitCostHeader_(entry.header) ? { ...entry, value: '1,234 EUR/month' } : entry) };
+      calls = 0;
+      context.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify(ambiguousRate); };
+      assert.equal(context.processIntakeFile_(file, {}, 'policy').status, 'ERROR');
+      assert.equal(calls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+      assert.equal(mutations, 0, 'Ambiguous unit rate exhausts repair before any mutation');
+      calls = 0;
+      context.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify(wrongRate); };
+      assert.equal(context.processIntakeFile_(file, {}, 'policy').status, 'VERIFY');
+      assert.equal(calls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
+      assert.equal(mutations, 0, 'Rate mismatch exhausts repair before any mutation');
+    }
+  }
+}
+testElectricityRateReconciliationUsesActualInstallerSchemas();
 
 function testQuantityGroupingCannotBeSilentlyScaled() {
   const context = loadCataloger();
@@ -3690,6 +3902,7 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   });
   const config = {
     canonical_supplies: ['Electricity'],
+    sheet_by_supply: { Electricity: 'Electricity' },
     canonical_suppliers: ['ENERGYGAS', 'OENERGY'],
     supplier_aliases: { 'ENERGYGAS ITALIA SRL': 'ENERGYGAS' },
     destination_templates: {
@@ -3718,6 +3931,105 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   ], 'Energia Elettrica/ENERGYGAS/{year}');
   assert.equal(config.frequency_overrides[0].supplier, 'Energygas Italia');
   assert.ok(properties.AUTOMATION_CONFIG_JSON);
+
+  // Read the persisted configuration and unchanged historical cells through
+  // both consumers of supplier identity after the actual migration producer.
+  const migrated = JSON.parse(properties.AUTOMATION_CONFIG_JSON);
+  context.getAutomationConfig_ = () => migrated;
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  const headers = ['Supplier', 'Frequency', 'Issue date', 'Account holder',
+    'Service address', 'Source file', 'Invoice number'];
+  context.getHeaderAliases_ = (key) => ({
+    supplier: ['Supplier'], frequency: ['Frequency'], issueDate: ['Issue date'],
+    accountHolder: ['Account holder'], serviceAddress: ['Service address'],
+    sourceFile: ['Source file'], identifier: ['Invoice number']
+  })[key] || [];
+  const layout = { headerRow: 1, headers,
+    lookup: Object.fromEntries(headers.map((header, index) => [header.toLowerCase(), index + 1])) };
+  context.getSheetLayout_ = () => layout;
+  const invoice = { ...validInvoice(), supplier: context.normalizeSupplier_('ENERGYGAS'),
+    supply_type: 'Electricity', issue_date: '2026-06-16', original_file_id: 'current-file' };
+  let rows = [['ENERGYGAS', 'monthly', '2026-06-16', invoice.account_holder,
+    invoice.address_evidence, 'old-file', invoice.identifier]];
+  const sheet = {
+    getLastRow: () => rows.length + 1,
+    getRange: (row) => ({ getValues: () => rows, row })
+  };
+  context.SpreadsheetApp = { openById: () => ({
+    getSpreadsheetTimeZone: () => 'Etc/UTC',
+    getSheetByName: (name) => name === 'Electricity' ? sheet : null
+  }) };
+  context.getFileFromSourceCell_ = (cell) => {
+    const id = rows[cell.row - 2][5];
+    return id ? { getId: () => id } : null;
+  };
+  context.sha256ForFile_ = () => 'same-hash';
+  for (const historicalSupplier of ['ENERGYGAS', ' energygas ',
+    'ENERGYGAS ITALIA SRL', 'Energygas Italia']) {
+    rows[0][0] = historicalSupplier;
+    const before = JSON.stringify(rows);
+    assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'duplicate');
+    assert.equal(context.findDuplicate_(invoice, 'different-hash', 'current-file').status, 'conflict');
+    const later = { ...invoice, issue_date: '2026-07-16' };
+    assert.equal(context.getHistoricalInvoiceFrequencyEvidence_(later).frequency, 'monthly');
+    assert.equal(JSON.stringify(rows), before);
+  }
+  rows[0][0] = 'OENERGY';
+  assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'none');
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+    ...invoice, issue_date: '2026-07-16'
+  }).state, 'empty');
+  rows[0][0] = 'ENERGYGAS';
+  for (const [column, differentValue] of [[2, '2026-08-16'],
+    [3, 'Other Holder'], [4, 'Other Street 1, Rivermouth']]) {
+    const originalValue = rows[0][column];
+    rows[0][column] = differentValue;
+    assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+      ...invoice, issue_date: '2026-07-16'
+    }).state, 'empty');
+    rows[0][column] = originalValue;
+  }
+  for (const [column, differentValue] of [[2, '2026-08-16'], [6, 'OTHER-INVOICE']]) {
+    const originalValue = rows[0][column];
+    rows[0][column] = differentValue;
+    assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'none');
+    rows[0][column] = originalValue;
+  }
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+    ...invoice, supply_type: 'Gas', issue_date: '2026-07-16'
+  }).state, 'empty');
+  rows[0][5] = 'current-file';
+  assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'none');
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+    ...invoice, issue_date: '2026-07-16'
+  }).state, 'empty');
+  rows[0][5] = 'old-file';
+  rows.push([...rows[0]]);
+  assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'conflict');
+  rows[1][1] = 'quarterly';
+  rows[1][5] = 'other-old-file';
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+    ...invoice, issue_date: '2026-07-16'
+  }).state, 'conflict');
+  rows = [rows[0]];
+  rows[0][5] = '';
+  assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'conflict');
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
+    ...invoice, issue_date: '2026-07-16'
+  }).state, 'conflict');
+  assert.equal(migrated.destination_templates['Electricity|Energygas Italia'],
+    'Energia Elettrica/ENERGYGAS/{year}');
+
+  for (const [left, right] of [['', ''], [null, 'Energygas Italia'],
+    ['ENERGYGAS OTHER', 'Energygas Italia']]) {
+    assert.equal(context.supplierIdentitiesMatch_(left, right, migrated), false);
+  }
+  assert.equal(context.supplierIdentitiesMatch_('ENERGYGAS', 'Energygas Italia', {
+    canonical_suppliers: ['ENERGYGAS', 'Energygas Italia'], supplier_aliases: {}
+  }), false);
+  assert.equal(context.supplierIdentitiesMatch_('ENERGYGAS', 'Energygas Italia', {
+    canonical_suppliers: ['OTHER'], supplier_aliases: {}
+  }), false);
 }
 
 function testVertexCostEstimateDoesNotReusePricingForGeminiLatest() {

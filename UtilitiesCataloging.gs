@@ -1946,6 +1946,11 @@ function validateRawExtractionShape_(extracted) {
 
 function normalizeExtraction_(extracted) {
   const normalized = extracted || {};
+  // These flags are runtime conclusions, never model-provided evidence.
+  ['frequency_override_authoritative_', 'frequency_inferred_',
+    'frequency_provenance_missing_'].forEach(function (key) {
+    delete normalized[key];
+  });
   normalized.document_type = normalizeDocumentType_(normalized.document_type);
   normalized.supplier = normalizeSupplier_(normalized.supplier);
   normalized.supply_type = normalizeSupplyType_(normalized.supply_type);
@@ -2658,10 +2663,8 @@ function normalizeSheetValues_(sheetValues, deferMonetary) {
       const value = typeof normalized.value === 'string' ?
         normalized.value.replace(/\s*(?:€|EUR)\s*\/\s*(?:kWh|Smc|m[³3]|mc|mese|month)\s*$/i, '').trim() :
         normalized.value;
-      const numeric = typeof value === 'number' ? value :
-        typeof value === 'string' && /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(value) ?
-          Number(value.replace(',', '.')) : NaN;
-      if (!Number.isFinite(numeric)) {
+      const numeric = parseUnambiguousSheetNumber_(value);
+      if (numeric === null) {
         throw new Error('Gemini extraction has a nonnumeric unit cost value.');
       }
       normalized.value = numeric;
@@ -3019,15 +3022,17 @@ function isInformationalElectricityBandMappingProblem_(problem, extracted) {
     !/(?:monorari|monorate)/.test(text)) {
     return false;
   }
-  const headers = getLocalization_().electricityBandHeaders || [];
-  const requiredHeaders = [headers[1], headers[3], headers[5],
-    getHeaderAliases_('unitCost')[0]];
-  return requiredHeaders.every(function (header) {
-    return (extracted.sheet_values || []).some(function (entry) {
-      return entry && normalizeHeader_(entry.header) === normalizeHeader_(header) &&
-        entry.value !== null && entry.value !== undefined &&
-        String(entry.value).trim() !== '';
-    });
+  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  if (!rateFields.slice(1).every(function (field) { return field.configured; })) {
+    return false;
+  }
+  const commonRate = parseUnambiguousSheetNumber_(rateFields[1].rawValue);
+  return commonRate !== null && rateFields.every(function (field) {
+    const rate = parseUnambiguousSheetNumber_(field.rawValue);
+    return !field.configured || !field.duplicate && rate !== null &&
+      Math.abs(rate - commonRate) < 1e-9;
   });
 }
 
@@ -3213,7 +3218,8 @@ function findSpreadsheetDuplicates_(extracted) {
   const matches = [];
   for (let index = 0; index < values.length; index += 1) {
     const row = values[index];
-    if (normalizeCellText_(row[supplierColumn - 1]) === normalizeCellText_(extracted.supplier) &&
+    if (supplierIdentitiesMatch_(row[supplierColumn - 1], extracted.supplier,
+      automationConfig) &&
       normalizeCellText_(row[identifierColumn - 1]) === normalizeCellText_(extracted.identifier) &&
       dateMatches_(row[dateColumn - 1], extracted.issue_date, spreadsheet.getSpreadsheetTimeZone())) {
       matches.push({
@@ -4275,12 +4281,18 @@ function sha256ForFile_(file) {
   }).join('');
 }
 
-function normalizeSupplier_(supplier) {
+function supplierIdentitiesMatch_(left, right, automationConfig) {
+  const leftIdentity = normalizeCellText_(normalizeSupplier_(left, automationConfig));
+  const rightIdentity = normalizeCellText_(normalizeSupplier_(right, automationConfig));
+  return Boolean(leftIdentity) && leftIdentity === rightIdentity;
+}
+
+function normalizeSupplier_(supplier, configuredAutomation) {
   const value = String(supplier || '').trim();
   if (!value) {
     return '';
   }
-  const automationConfig = getAutomationConfig_();
+  const automationConfig = configuredAutomation || getAutomationConfig_();
   const normalized = normalizeCellText_(value);
   const canonical = automationConfig.canonical_suppliers.filter(function (item) {
     return normalizeCellText_(item) === normalized;
@@ -4320,6 +4332,9 @@ function normalizeSupplyType_(supplyType) {
 }
 
 function applyFrequencyOverride_(extracted) {
+  Object.defineProperty(extracted, 'frequency_override_authoritative_', {
+    value: false, enumerable: false, configurable: true
+  });
   const override = (getAutomationConfig_().frequency_overrides || []).filter(function (item) {
     return item.supplier === extracted.supplier && item.supply_type === extracted.supply_type;
   })[0];
@@ -4404,10 +4419,15 @@ function isMissingFrequencyProblem_(problem) {
     return false;
   }
   const normalized = normalizeCellText_(text);
-  if (/(?:frequenza|billing frequency|frequency)/.test(normalized) &&
-    /(?:non (?:e )?(?:riporta|stampata|stampato|indicata|indicato|presente|trovata|trovato|esplicita|esplicito)|not (?:printed|present|reported|indicated|found|explicit))/.test(normalized) &&
-    /(?:dedott|inferred|derived)/.test(normalized) &&
-    /(?:period|periodo)/.test(normalized)) {
+  const inferredAbsencePatterns = [
+    /^il documento non riporta una frequenza esplicita la frequenza e stata dedotta a (?:mensile|bimestrale|trimestrale) dal periodo fatturato completo$/,
+    /^la frequenza di fatturazione e dedotta dal periodo fatturato non e stampata esplicitamente$/,
+    /^frequenza di fatturazione non trovata o non esplicita nel documento dedotta come (?:mensile|bimestrale|trimestrale) dal periodo di riferimento$/,
+    /^(?:billing )?frequency (?:is )?not (?:printed|present|reported|indicated|explicit) (?:and |but )?(?:is |was )?(?:inferred|derived) (?:as (?:monthly|bimonthly|quarterly) )?from (?:the )?(?:billing |billed )?period$/
+  ];
+  if (inferredAbsencePatterns.some(function (pattern) {
+    return pattern.test(normalized);
+  })) {
     return true;
   }
   return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa]|trovat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
@@ -4423,8 +4443,12 @@ function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
       extracted.frequency_provenance_missing_ !== true)) {
     return false;
   }
-  const normalizedFrequency = normalizeInferredFrequency_(extracted.frequency);
-  if (['monthly', 'bimonthly', 'quarterly'].indexOf(normalizedFrequency) < 0) {
+  const authoritative = extracted.frequency_override_authoritative_ === true;
+  const normalizedFrequency = authoritative ?
+    normalizeExplicitInvoiceFrequency_(extracted.frequency) :
+    normalizeInferredFrequency_(extracted.frequency);
+  if (!normalizedFrequency || !authoritative &&
+    ['monthly', 'bimonthly', 'quarterly'].indexOf(normalizedFrequency) < 0) {
     return false;
   }
   return /^billing frequency value is unsupported or lacks printed provenance\.?$/i
@@ -4538,32 +4562,58 @@ function validateEnergygasLuceDetailedReconciliation_(extracted) {
   });
   const quantityField = readConfiguredReconciliationField_(extracted,
     getSupplierReconciliationGroups_('quantity')[0]);
+  const registry = getLocalizationRegistry_();
+  const bandQuantityFields = [0, 1, 2].map(function (band) {
+    const aliases = Object.keys(registry).reduce(function (all, locale) {
+      return all.concat(registry[locale].electricityDashboard.bandAliases[band]);
+    }, []);
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  const quantityFields = [quantityField].concat(bandQuantityFields);
   // Unit rates retain their full printed precision rather than money rounding.
   const rates = rateFields.filter(function (field) { return field.configured; })
     .map(function (field) { return parseUnambiguousSheetNumber_(field.rawValue); });
   const quantity = normalizeElectricityBandConsumption_(quantityField.rawValue);
-  const commonRate = rateFields[0].configured && rates.length > 0 &&
+  const completeRates = rateFields[0].configured ||
+    rateFields.slice(1).every(function (field) { return field.configured; });
+  const commonRate = completeRates && rates.length > 0 &&
     rates.every(function (rate) {
-      return rate !== null && rate >= 0 && Math.abs(rate - rates[0]) < 1e-9;
+      return rate !== null && Math.abs(rate - rates[0]) < 1e-9;
     });
   const invalidRate = rateFields.some(function (field) {
     return field.configured && (field.duplicate ||
       parseUnambiguousSheetNumber_(field.rawValue) === null);
   });
-  const invalidQuantity = quantityField.configured &&
-    (quantityField.duplicate || quantity === null);
-  if (invalidRate || invalidQuantity ||
-    commonRate && quantity !== null && quantity > 0 &&
-    typeof extracted.cost_consumption === 'number' &&
-    Math.abs(quantity * rates[0] - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE) {
+  const invalidQuantity = quantityFields.some(function (field) {
+    return field.configured && (field.duplicate ||
+      normalizeElectricityBandConsumption_(field.rawValue) === null);
+  });
+  const completeBands = bandQuantityFields.every(function (field) {
+    return field.configured && normalizeElectricityBandConsumption_(field.rawValue) !== null;
+  });
+  const bandQuantity = completeBands ? bandQuantityFields.reduce(function (sum, field) {
+    return sum + normalizeElectricityBandConsumption_(field.rawValue);
+  }, 0) : null;
+  // Total and complete band quantities are independent representations of the
+  // same consumption. A partial band set cannot stand in for the whole bill.
+  const quantities = (quantityField.configured && quantity !== null ? [quantity] : [])
+    .concat(completeBands ? [bandQuantity] : []);
+  const inconsistentQuantities = quantityField.configured && quantity !== null &&
+    completeBands && Math.abs(quantity - bandQuantity) > 1e-9;
+  const consumptionMismatch = commonRate && quantities.some(function (value) {
+    return typeof extracted.cost_consumption !== 'number' ||
+      !Number.isFinite(extracted.cost_consumption) ||
+      Math.abs(value * rates[0] - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE;
+  });
+  if (invalidRate || invalidQuantity || inconsistentQuantities || consumptionMismatch) {
     return invalidExtraction_(
       'The electricity selling rate and quantity are incomplete or do not reconcile with selling consumption cost.',
       'Re-read the selling consumption summary rate and quantity, not a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
       {
         code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
-        fields: rateFields.filter(function (field) { return field.configured; })
+        fields: rateFields.concat(quantityFields).filter(function (field) { return field.configured; })
           .map(function (field) { return field.header; }).concat([
-            quantityField.header, 'cost_consumption', 'cost_non_consumption', 'vat', 'total'
+            'cost_consumption', 'cost_non_consumption', 'vat', 'total'
           ])
       }
     );
@@ -4802,7 +4852,7 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     const counts = Object.create(null);
     let independentIdentityUnavailable = false;
     values.forEach(function (row, index) {
-      if (normalizeCellText_(row[supplierColumn - 1]) !== normalizeCellText_(extracted.supplier)) {
+      if (!supplierIdentitiesMatch_(row[supplierColumn - 1], extracted.supplier, config)) {
         return;
       }
       if (normalizeNameIdentity_(row[holderColumn - 1]) !==

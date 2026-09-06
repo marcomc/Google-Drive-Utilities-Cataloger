@@ -261,7 +261,9 @@ headers, and business rules before any Drive or Sheet mutation. Recognized
 unit-rate and consumption strings normalize to numbers during extraction.
 Other supplementary numeric strings convert for recognized quantitative
 headers independently of cell formatting. Identifier and unknown-header text
-remains literal; ambiguous monetary and consumption grouping is rejected.
+remains literal; ambiguous monetary, consumption, and unit-rate grouping is
+rejected. Native numeric rates and unambiguous high-precision rate strings keep
+their precision.
 Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
 handoff from the installed Cloud project and validates the new key against the
 configured model. It changes only the key, preserving the backend, model,

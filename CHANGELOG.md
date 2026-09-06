@@ -31,7 +31,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Normalize imported reference years and months as literal text, including an
   idempotent migration for existing rows, so chart labels remain stable.
 - Normalize the `ENERGYGAS` supplier abbreviation to the configured
-  `Energygas Italia` spelling and preserve canonical supplier case.
+  `Energygas Italia` spelling and preserve canonical supplier case, including
+  historical duplicate and cadence lookups after configuration migration.
 - Apply supplier-specific gas and electricity extraction guidance: separate
   OENERGY selling/network charges, record absent recalculations as zero, and
   reuse a monoraria electricity selling rate for the printed F1/F2/F3 bands.
@@ -43,7 +44,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Keep inconsistent monetary fields and conflicting billing periods eligible
   for targeted model repair instead of freezing earlier erroneous values.
 - Check a common Energygas selling rate against current quantity and selling
-  cost, rejecting tariff components mistaken for the complete selling rate.
+  cost, including installer-created band-only sheets, rejecting tariff
+  components mistaken for the complete selling rate.
 - Leave unprinted billing cadence to deterministic period/history inference
   without requiring a model-generated absence diagnostic.
 - Normalize recognized euro-per-unit rates in unit-cost columns as numeric
@@ -77,10 +79,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
   schemas, including the reference-month constraint.
 - Validate configured supplier details in both locales, reject unresolved
   omissions, and keep conflicting aggregates eligible for model repair.
-- Reject ambiguous monetary grouping before import and apply numeric field
-  contracts independently of cell formatting.
+- Reject ambiguous grouping in amounts, quantities, and unit-rate strings
+  before import, independently of cell formatting.
 - Preserve substantive five-digit address tokens when recognizing optional
   postal codes.
+- Apply authoritative annual and custom cadence overrides without retaining
+  resolved provenance errors; preserve unrelated compound diagnostics and
+  reject model-supplied runtime authority flags.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 
