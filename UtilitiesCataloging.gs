@@ -1462,16 +1462,26 @@ function getGeminiInteractionsFinishReason_(body) {
 }
 
 function getGeminiUsageMetadata_(body, isGeminiInteractionsApi) {
-  if (!isGeminiInteractionsApi) {
-    return body && body.usageMetadata;
+  const usage = body && (isGeminiInteractionsApi ? body.usage : body.usageMetadata);
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    return null;
   }
-  const usage = body && body.usage || {};
-  return {
+  const metadata = isGeminiInteractionsApi ? {
     promptTokenCount: usage.total_input_tokens,
     candidatesTokenCount: usage.total_output_tokens,
     thoughtsTokenCount: usage.total_thought_tokens,
-    totalTokenCount: usage.total_tokens
-  };
+    totalTokenCount: usage.total_tokens,
+    cachedContentTokenCount: usage.total_cached_tokens
+  } : usage;
+  return hasGeminiUsageMetadata_(metadata) ? metadata : null;
+}
+
+function hasGeminiUsageMetadata_(metadata) {
+  return Boolean(metadata && typeof metadata === 'object' && !Array.isArray(metadata) &&
+    ['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount',
+      'totalTokenCount', 'cachedContentTokenCount'].some(function (field) {
+      return isValidGeminiTokenCount_(metadata[field]);
+    }));
 }
 
 function buildExtractionResponseSchema_() {
@@ -1627,7 +1637,8 @@ function convertExtractionSchemaToVertex_(schema) {
  */
 function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   extractionAttempt) {
-  const usage = usageMetadata || {};
+  const usageMetadataPresent = hasGeminiUsageMetadata_(usageMetadata);
+  const usage = usageMetadataPresent ? usageMetadata : {};
   const promptTokenCount = normalizeGeminiTokenCount_(usage.promptTokenCount);
   const candidatesTokenCount = normalizeGeminiTokenCount_(usage.candidatesTokenCount);
   const thoughtsTokenCount = normalizeGeminiTokenCount_(usage.thoughtsTokenCount);
@@ -1637,7 +1648,7 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
     backend: backend,
     model: getGeminiModel_(),
     extractionAttempt: Number(extractionAttempt) || 1,
-    usageMetadataPresent: Boolean(usageMetadata),
+    usageMetadataPresent: usageMetadataPresent,
     promptTokenCount: promptTokenCount,
     candidatesTokenCount: candidatesTokenCount,
     thoughtsTokenCount: thoughtsTokenCount,
@@ -1647,11 +1658,7 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   if (fallbackReason) {
     payload.fallbackReason = fallbackReason;
   }
-  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), {
-    promptTokenCount: promptTokenCount,
-    candidatesTokenCount: candidatesTokenCount,
-    thoughtsTokenCount: thoughtsTokenCount
-  });
+  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), usageMetadata);
   if (estimate) {
     Object.assign(payload, estimate);
   }
@@ -1659,11 +1666,20 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
 }
 
 function normalizeGeminiTokenCount_(value) {
-  return typeof value === 'number' && isFinite(value) && value >= 0 ? value : 0;
+  return isValidGeminiTokenCount_(value) ? value : 0;
+}
+
+function isValidGeminiTokenCount_(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 function estimateGeminiUsageCostUsd_(backend, model, usage) {
-  if (backend !== 'vertex_ai') {
+  // Presence of a partial usage record does not establish the missing price
+  // dimensions. Never let display defaults turn unknown usage into zero cost.
+  if (backend !== 'vertex_ai' || !hasGeminiUsageMetadata_(usage) ||
+    !['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount'].every(
+      function (field) { return isValidGeminiTokenCount_(usage[field]); }
+    )) {
     return null;
   }
   const pricing = CONFIG.VERTEX_GEMINI_PRICING_BY_MODEL[model];
@@ -2860,7 +2876,7 @@ function normalizeElectricityBandConsumption_(value) {
     return null;
   }
   const text = value.trim().replace(/\s*kwh$/i, '').trim();
-  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text) || /(?:€|EUR)/i.test(text)) {
+  if (/(?:€|EUR)/i.test(text)) {
     return null;
   }
   const quantity = parseUnambiguousSheetNumber_(text);

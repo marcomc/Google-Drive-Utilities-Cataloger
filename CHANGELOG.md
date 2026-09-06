@@ -29,6 +29,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Accept unambiguous leading-zero decimal consumption values through the
+  shared numeric parser while preserving grouping, unit and sign restrictions.
+- Preserve missing provider usage as unavailable, retain reported cached-token
+  counts, and estimate costs only when all required token counts are available.
+- Verify every changed extraction-policy rule against the installed Drive
+  policy and align its secondary-field clause with reviewed supplier-specific
+  zero defaults after explicit absence evidence.
 - Require explicit provider error codes or structured daily-quota violations
   before automatic paid fallback. Preserve transient retries when quota or
   credit terminology appears only in messages or documentation, and recognize

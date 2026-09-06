@@ -369,6 +369,22 @@ Fresh read-only extraction previews of the latest gas and electricity PDFs
 passed on the retained Vertex backend, matching the reviewed numeric values
 without operator-supplied extraction (three and two model calls respectively,
 including automatic repair). The full `make check` suite also passed.
+At 20:27 UTC on 2026-09-06, a separate policy audit verified all 26 changed
+template-rule checks against the live `AGENTS.md`. The current owner-only
+deployment's setup, Workspace Events target, spreadsheet parent and unique
+policy file identified the installation's configured intake folder.
+All 13 Energygas/OENERGY detailed-cost checks were already covered, including
+the power-quota network sum, ASOS/ARIM exclusions, printed IVA, Canone TV,
+regional excise additions and explanatory credit exclusions. One general
+secondary-field clause still prohibited every zero value; a conditional update
+aligned it with the existing supplier rules, allowing only a reviewed
+supplier-specific zero default after explicit absence evidence.
+The single-clause update used the file ETag, retained a private preimage and
+journal, and passed exact byte-for-byte read-back and all 26 policy checks.
+Verified UTF-8 content: 21,114 bytes, SHA-256
+`f0c9256cfbaa6d9ab938b48a0d1f31adbcc3cbc34f01ab1a487ca4cff7aff3cd`.
+This was a policy-only update; its private identity and read-back evidence is
+retained under `.git/codex-pr16/b9-policy-*`.
 Private snapshots and reproducible audit scripts are retained under the ignored
 `.installer/validation/automatic-reimport-20260905/` directory, not published with
 the source repository.
@@ -530,8 +546,12 @@ statuses fail before parsing or mutating Drive and Sheets.
 
 Each successful response also emits `gemini-generation-usage`. It records the
 provider-reported `promptTokenCount`, `candidatesTokenCount`,
-`thoughtsTokenCount`, and `totalTokenCount` for that file. When the selected
-Vertex model has a price table encoded in `Config.gs`, the event also includes
+`thoughtsTokenCount`, `cachedContentTokenCount`, and `totalTokenCount` for that
+file. Missing or unusable provider accounting sets `usageMetadataPresent` to
+false; it does not establish zero-token usage. A reported numeric zero remains
+valid metadata. When the selected Vertex model has a price table encoded in
+`Config.gs` and the provider reports every required input, output and thinking
+count, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.

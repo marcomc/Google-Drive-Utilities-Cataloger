@@ -3457,17 +3457,32 @@ function testQuantityGroupingWriteAndVerificationContract() {
   const headers = ['Consumption quantity', 'Quantità consumi'].concat(
     ...Object.values(registry).map(locale => Array.from(locale.electricityBandHeaders)
       .filter((_, index) => index % 2 === 0)),
-    ['consumption f1 quantity', 'quantity consumption f2'],
+    ...Object.values(registry).flatMap(locale => Array.from(locale.electricityDashboard.bandAliases)
+      .map(aliases => Array.from(aliases))),
+    [1, 2, 3].flatMap(band => ['consumption quantity f' + band,
+      'consumption f' + band + ' quantity', 'quantity consumption f' + band]),
     ...Object.values(registry).map(locale => Array.from(locale.headerAliases.unitCost)
       .concat(Array.from(locale.electricityBandHeaders).filter((_, index) => index % 2 === 1))));
-  for (const header of headers) {
+  for (const header of [...new Set(headers)].flatMap(alias => [alias, ' ' + alias.toUpperCase() + ' '])) {
     const suffix = context.isUnitCostHeader_(header) ? ' EUR/month' : ' kWh';
     const representations = ['1,234.567', '1.234,567', '1,234.567' + suffix, '1.234,567' + suffix]
       .concat([' ', '\u00a0', '\u202f'].flatMap(space => [
         '1' + space + '234.567' + suffix, '1' + space + '234,567' + suffix
-      ]));
-    for (const value of representations) {
-      assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, 1234.567);
+      ])).map(value => [value, 1234.567]).concat(
+        ['0.123', '0,123', '+0.123', '+0,123', '00.123', '00,123', '001.234', '001,234',
+          '.123', ',123', '0.1234'].flatMap(value => [
+          [value, Number(value.replace(',', '.'))],
+          [value + suffix, Number(value.replace(',', '.'))]
+        ]), [[0.123, 0.123], [0, 0]]);
+    if (context.isConsumptionQuantityHeader_(header)) {
+      for (const value of ['1,234 kWh', '1.234 kWh', '0.123 EUR', 'EUR 0.123 kWh',
+        '-0.123 kWh', -0.123, '0.123 Smc', '0.123 kW', 'about 0.123 kWh',
+        '1 23,45 kWh', '1.23.456,78 kWh', NaN, Infinity]) {
+        assert.throws(() => context.normalizeSheetValues_([{ header, value }]), /nonnumeric/);
+      }
+    }
+    for (const [value, expected] of representations) {
+      assert.equal(context.normalizeSheetValues_([{ header, value }])[0].value, expected);
       for (const format of ['General', '@', '0.00', 'yyyy-mm-dd']) {
         const values = ['', '', ''];
         const formulas = ['', '', ''];
@@ -3493,7 +3508,7 @@ function testQuantityGroupingWriteAndVerificationContract() {
         ] };
         const file = { getUrl: () => 'https://drive.test/file' };
         context.writeInvoiceRow_(sheet, 3, layout, file, extracted);
-        assert.equal(values[0], 1234.567);
+        assert.equal(values[0], expected);
         assert.equal(typeof values[0], 'number');
         assert.equal(values[1], '001234');
         assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 3, layout, file, extracted));
@@ -3578,8 +3593,11 @@ function testStrictSpacedGroupingAcrossNumericContracts() {
 testStrictSpacedGroupingAcrossNumericContracts();
 
 function testSpacedGroupingThroughExtractionAdmissionWriteAndRepair() {
+  const cases = [' ', '\u00a0', '\u202f'].map(space => ['1' + space + '234,56', 1234.56])
+    .concat(['0.123', '0,123', '+0.123', '00.123', '001.234'].map(value =>
+      [value, Number(value.replace(',', '.'))]));
   for (const locale of ['en', 'it']) {
-    for (const space of [' ', '\u00a0', '\u202f']) {
+    for (const [representation, expected] of cases) {
       const fixture = createInvoiceVerificationFixture(locale);
       const { context, localization, layout, invoice, sheet, values } = fixture;
       context.getAutomationConfig_ = () => ({ locale, canonical_suppliers: ['SUPPLIER'],
@@ -3594,21 +3612,23 @@ function testSpacedGroupingThroughExtractionAdmissionWriteAndRepair() {
       const quantityHeader = localization.supplierReconciliation.quantity;
       const rateHeader = localization.supplierReconciliation.rates[0];
       const moneyHeader = localization.headerAliases.consumptionCost[0];
-      const raw = { ...invoice, cost_consumption: 1234.56, cost_non_consumption: 2,
-        vat: 1, total: 1237.56, sheet_values: invoice.sheet_values.map(entry =>
-          entry.header === quantityHeader ? { ...entry, value: '1' + space + '234,56 kWh' } :
-            entry.header === rateHeader ? { ...entry, value: '1' + space + '234,56 EUR/month' } : entry)
-          .concat([{ header: moneyHeader, value: '1' + space + '234,56 EUR' }]) };
+      const raw = { ...invoice, cost_consumption: expected, cost_non_consumption: 2,
+        vat: 1, total: expected + 3, sheet_values: invoice.sheet_values.map(entry =>
+          entry.header === quantityHeader ? { ...entry, value: representation + ' kWh' } :
+            entry.header === rateHeader ? { ...entry, value: representation + ' EUR/month' } : entry)
+          .concat([{ header: moneyHeader, value: representation + ' EUR' }]) };
       context.callGeminiForPdf_ = () => JSON.stringify(raw);
       const file = { ...fixture.file, getBlob: () => ({}), getName: () => 'invoice.pdf', getSize: () => 100 };
-      const extracted = context.extractUtilityData_(file, 'policy');
+      const firstAttempt = context.extractUtilityDataWithRepair_(file, 'policy');
+      assert.equal(firstAttempt.aiCallCount, 1);
+      const extracted = firstAttempt.extracted;
       assert.equal(context.validateExtractedUtilityDataForImport_(extracted).valid, true);
       context.writeInvoiceRow_(sheet, 2, layout, file, extracted);
       assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, extracted));
       for (const header of [quantityHeader, rateHeader, moneyHeader]) {
         const column = layout.lookup[context.normalizeHeader_(header)];
         assert.equal(typeof values[column - 1], 'number');
-        assert.equal(values[column - 1], 1234.56);
+        assert.equal(values[column - 1], expected);
       }
       const invalid = { ...raw, sheet_values: raw.sheet_values.map(entry =>
         entry.header === quantityHeader ? { ...entry, value: '1 23,45 kWh' } : entry) };
@@ -3808,6 +3828,8 @@ function testElectricityAggregateAndWeightedRepresentations() {
       assert.match(context.formatExtractionSnapshot_(extracted), /electricity_consumption_quantity/);
     }
     assertValid({ ...raw, electricity_consumption_quantity: 0, cost_consumption: 0, total: 3 }, 'zero quantity');
+    assertValid({ ...raw, electricity_consumption_quantity: 0.123, electricity_selling_unit_rate: 1,
+      cost_consumption: 0.123, total: 3.123 }, 'native aggregate sub-unit quantity');
     assertValid({ ...raw, electricity_selling_unit_rate: 0, cost_consumption: 0, total: 3 }, 'zero rate');
     assertValid({ ...raw, electricity_selling_unit_rate: -0.25, cost_consumption: -25, total: -22 }, 'signed rate');
     const precise = extract({ ...raw, electricity_selling_unit_rate: 0.135338,
@@ -3846,6 +3868,21 @@ function testElectricityAggregateAndWeightedRepresentations() {
     const weighted = { ...raw, electricity_consumption_quantity: null, electricity_selling_unit_rate: null,
       cost_consumption: 33, total: 36, sheet_values: bandValues, problems: [] };
     assertValid(weighted, 'distinct weighted band rates');
+    for (const representation of ['0.123', '0,123', '+0.123', '00.123', '001.234']) {
+      const quantity = Number(representation.replace(',', '.'));
+      const small = { ...weighted, cost_consumption: quantity * 3, total: quantity * 3 + 3,
+        sheet_values: bands.map((header, index) => ({ header,
+          value: index % 2 ? 1 : representation + ' kWh' })) };
+      const normalized = extract(small);
+      assert.equal(context.validateExtractedUtilityDataForImport_(normalized).valid, true);
+      context.writeInvoiceRow_(sheet, 2, layout, file, normalized);
+      assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, normalized));
+      for (const header of bands.filter((_, index) => index % 2 === 0)) {
+        assert.equal(values[layout.lookup[context.normalizeHeader_(header)] - 1], quantity);
+      }
+      assertInvalid({ ...small, cost_consumption: quantity * 3 + 1, total: quantity * 3 + 4 },
+        'sub-unit band quantities still reconcile');
+    }
     const weightedExtraction = extract(weighted);
     context.writeInvoiceRow_(sheet, 2, layout, file, weightedExtraction);
     assert.doesNotThrow(() => context.verifyImportedRow_(sheet, 2, layout, file, weightedExtraction));
@@ -4835,6 +4872,92 @@ function testGeminiLatestUsageTelemetryOmitsUnpricedEstimate() {
   const unknownPayload = events[1].details;
   assert.equal(Object.prototype.hasOwnProperty.call(unknownPayload, 'estimatedCostUsd'), false);
 }
+
+function testProviderUsagePresenceAndCostSufficiencyThroughCaller() {
+  const fields = { promptTokenCount: 'total_input_tokens', candidatesTokenCount: 'total_output_tokens',
+    thoughtsTokenCount: 'total_thought_tokens', totalTokenCount: 'total_tokens',
+    cachedContentTokenCount: 'total_cached_tokens' };
+  const zero = Object.fromEntries(Object.keys(fields).map(field => [field, 0]));
+  const cases = [
+    ['missing', undefined, false, false], ['null', null, false, false],
+    ['empty', {}, false, false], ['array', [], false, false],
+    ['array with record', [{ promptTokenCount: 2 }], false, false],
+    ['string', 'usage unavailable', false, false], ['boolean', true, false, false],
+    ['scalar zero', 0, false, false], ['scalar positive', 4, false, false],
+    ['unknown fields', { total_tool_use_tokens: 2 }, false, false],
+    ['invalid counters', { promptTokenCount: '2', candidatesTokenCount: -1,
+      thoughtsTokenCount: true, totalTokenCount: null }, false, false],
+    ['zero', zero, true, true],
+    ['populated', { promptTokenCount: 11, candidatesTokenCount: 7, thoughtsTokenCount: 3,
+      totalTokenCount: 21, cachedContentTokenCount: 5 }, true, true],
+    ['partial with invalid siblings', { promptTokenCount: 2, candidatesTokenCount: '3',
+      thoughtsTokenCount: -1 }, true, false],
+    ...Object.keys(fields).flatMap(field => [
+      [field + ' only', { [field]: 2 }, true, false],
+      [field + ' explicit zero only', { [field]: 0 }, true, false]
+    ])
+  ];
+  for (const backend of ['gemini_api', 'vertex_ai']) {
+    for (const model of ['gemini-2.5-flash', 'gemini-flash-latest']) {
+      for (const [name, metadata, present, sufficient] of cases) {
+        const events = [];
+        let calls = 0;
+        const usage = backend === 'gemini_api' && metadata && typeof metadata === 'object' &&
+          !Array.isArray(metadata) ? Object.fromEntries(Object.entries(metadata)
+            .map(([key, value]) => [fields[key] || key, value])) : metadata;
+        const body = backend === 'gemini_api' ? {
+          status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: '{}' }] }], usage
+        } : { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }],
+          usageMetadata: usage };
+        const context = loadCataloger({ UrlFetchApp: { fetch: () => {
+          calls += 1;
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+        } } });
+        context.getGeminiModel_ = () => model;
+        context.getScriptProperty_ = key => key === 'GOOGLE_CLOUD_PROJECT_ID' ? 'vertex-project' : 'test-key';
+        context.buildExtractionPrompt_ = () => 'prompt';
+        context.logCatalogEvent_ = (event, payload) => {
+          if (event === 'gemini-generation-usage') events.push(payload);
+        };
+        assert.equal(context.callGeminiForPdfWithBackend_(
+          { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, backend, '', { attempt: 2 }
+        ), '{}', name);
+        assert.equal(calls, 1, name + ': accounting does not retry generation');
+        assert.equal(events.length, 1);
+        const payload = events[0];
+        assert.equal(payload.usageMetadataPresent, present, name + ': ' + backend);
+        assert.equal(payload.backend, backend);
+        assert.equal(payload.model, model);
+        assert.equal(payload.extractionAttempt, 2);
+        for (const field of Object.keys(fields)) {
+          const value = metadata && metadata[field];
+          assert.equal(payload[field], typeof value === 'number' && value >= 0 ? value : 0, name + ': ' + field);
+        }
+        const priced = backend === 'vertex_ai' && model === 'gemini-2.5-flash' && sufficient;
+        for (const key of ['pricingSource', 'estimatedCostUsd', 'estimatedInputCostUsd', 'estimatedOutputCostUsd']) {
+          assert.equal(Object.hasOwn(payload, key), priced, name + ': ' + key);
+        }
+        const directEstimate = context.estimateGeminiUsageCostUsd_(backend, model, metadata);
+        if (priced) {
+          assert.equal(payload.estimatedCostUsd, directEstimate.estimatedCostUsd);
+          assert.equal(payload.estimatedCostUsd,
+            Math.round((metadata.promptTokenCount * 0.3 +
+              (metadata.candidatesTokenCount + metadata.thoughtsTokenCount) * 2.5) * 100) / 100000000);
+        } else {
+          assert.equal(directEstimate, null, name + ': pure estimate rejects insufficient accounting');
+        }
+      }
+    }
+  }
+  const context = loadCataloger();
+  for (const field of ['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount']) {
+    for (const value of [undefined, null, NaN, Infinity, -1, true, '0']) {
+      assert.equal(context.estimateGeminiUsageCostUsd_('vertex_ai', 'gemini-2.5-flash',
+        { ...zero, [field]: value }), null);
+    }
+  }
+}
+testProviderUsagePresenceAndCostSufficiencyThroughCaller();
 
 function testIncompleteGeminiResponseReportsFinishReason() {
   const events = [];
