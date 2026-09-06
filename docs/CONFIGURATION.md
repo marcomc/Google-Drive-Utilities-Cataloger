@@ -58,9 +58,10 @@ then use **Project Settings > Script Properties > Edit script properties**.
 The default `gemini-flash-latest` alias follows Google's newest release of the
 Flash model variation. Google documents that this alias is hot-swapped when a
 new Flash release becomes available and provides advance notice for breaking
-changes. At the `0.6.0` release date, the alias resolves to Gemini 3.8 Flash.
-The default request uses explicit `medium` thinking and an 8,192-token JSON
-response budget for both backends.
+changes. The alias does not pin a numeric Flash version; record the provider's
+reported model version when available rather than inferring it from the alias.
+The default request uses an 8,192-token output budget with explicit `medium`
+thinking on the Developer API and a 4,096-token thinking budget on Vertex AI.
 
 Persisted `gemini-3.6-flash` and `gemini-3.7-flash` values are automatically
 treated as `gemini-flash-latest`, so source deployment upgrades existing

@@ -114,6 +114,12 @@ manual review.
   independent earlier invoices for the same supplier and supply. Conflicting,
   unavailable, or insufficient cadence evidence blocks import. Never copy
   transaction-specific values from earlier invoices.
+  Return `frequency` and `frequency_source_evidence` as null in that case;
+  do not report the mere absence of printed cadence as a problem or infer it
+  in the model. Extract the current billed consumption period, corroborated
+  by the invoice reference period, not offer validity, cumulative spending, or
+  historical periods. Unreadable or conflicting printed period evidence remains
+  blocking.
 - Treat a non-inferred cadence as authoritative only when extraction marks it
   as printed. Reviewed configuration overrides remain authoritative. Missing
   provenance, invalid provenance, and unsupported model prose block import.
@@ -132,6 +138,10 @@ manual review.
   and fields, preserve unrelated supported values unless the PDF contradicts
   them, and return the complete extraction object. The model may correct data
   and evidence but never decides import policy.
+  The `problems` array is not a commentary field: do not include explanations
+  of successful policy-compliant mappings. During repair, remove such notes
+  rather than replacing them with further explanations. Retain unresolved
+  missing required evidence, unreadability, ambiguity, and contradictions.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.

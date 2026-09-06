@@ -13,50 +13,61 @@ function retryFailedUtilitiesCataloging() {
   return runUtilitiesCataloging_('manual_retry');
 }
 
-/**
- * Manually process one file already in the direct intake folder. An owner may
- * optionally pass a JSON extraction marked `operator_verified` after a
- * document has been manually reanalysed; the normal AI path is unchanged.
- */
-function processSingleIntakeFile(fileId, verifiedExtractionJson) {
+/** Run the normal model/validation path without changing an invoice or row. */
+function previewUtilityInvoiceExtraction(fileId) {
   const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
-  const verifiedExtraction = parseVerifiedExtraction_(
-    fileId, verifiedExtractionJson
-  );
+  assertCatalogConfiguration_();
+  return withCatalogProcessingLock_('extraction-preview', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    const file = DriveApp.getFileById(fileId);
+    if (file.getMimeType() !== MimeType.PDF || file.isTrashed()) {
+      throw new Error('Preview requires a non-trashed PDF.');
+    }
+    if (file.getSize() > CONFIG.MAX_PDF_BYTES) {
+      throw new Error('Preview PDF exceeds the inline request size limit.');
+    }
+    const queue = [file];
+    const visited = Object.create(null);
+    let insideRoot = false;
+    while (queue.length && !insideRoot) {
+      const parents = queue.shift().getParents();
+      while (parents.hasNext()) {
+        const parent = parents.next();
+        if (parent.getId() === rootFolder.getId()) {
+          insideRoot = true;
+          break;
+        }
+        if (!visited[parent.getId()]) {
+          visited[parent.getId()] = true;
+          queue.push(parent);
+        }
+      }
+    }
+    if (!insideRoot) {
+      throw new Error('Preview PDF is outside the configured intake tree.');
+    }
+    return extractUtilityDataWithRepair_(file,
+      loadTrustedExtractionPolicy_(rootFolder), deadlineAt);
+  });
+}
+
+/**
+ * Manually start automatic extraction of one direct-intake PDF.
+ */
+function processSingleIntakeFile(fileId) {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
+  if (arguments.length !== 1) {
+    throw new Error('Only a PDF file ID is accepted; extraction must be automatic.');
+  }
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
     return processSingleIntakeFileWithinLock_(
-      fileId, deadlineAt, verifiedExtraction
+      fileId, deadlineAt
     );
   });
 }
 
-function parseVerifiedExtraction_(fileId, extractionJson) {
-  if (extractionJson === undefined || extractionJson === null) {
-    return null;
-  }
-  let extraction = extractionJson;
-  if (typeof extractionJson === 'string') {
-    try {
-      extraction = JSON.parse(extractionJson);
-    } catch (error) {
-      throw new Error('The verified extraction JSON is invalid.');
-    }
-  }
-  if (!extraction || typeof extraction !== 'object' ||
-    Array.isArray(extraction) || extraction.operator_verified !== true) {
-    throw new Error(
-      'A verified extraction object with operator_verified=true is required.'
-    );
-  }
-  if (String(extraction.original_file_id || '') !== String(fileId || '')) {
-    throw new Error('The verified extraction does not match the requested file.');
-  }
-  return extraction;
-}
-
-function processSingleIntakeFileWithinLock_(fileId, deadlineAt,
-  verifiedExtraction) {
+function processSingleIntakeFileWithinLock_(fileId, deadlineAt) {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
 
     if (hasMutationJournal_(fileId)) {
@@ -80,7 +91,7 @@ function processSingleIntakeFileWithinLock_(fileId, deadlineAt,
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
-      deadlineAt, verifiedExtraction);
+      deadlineAt);
     try {
       addOperatorLinksToResult_(result, rootFolder);
     } catch (error) {
@@ -294,8 +305,7 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource, deadlineA
   return { results: results, state: state };
 }
 
-function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt,
-  verifiedExtraction) {
+function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
   const processingDeadlineAt = Number(deadlineAt) ||
     Date.now() + CONFIG.MAX_RUNTIME_MS;
   const originalName = file.getName();
@@ -325,9 +335,8 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt,
     }
 
     const binaryHash = sha256ForFile_(file);
-    const extractionResult = verifiedExtraction ?
-      buildVerifiedExtractionResult_(file, verifiedExtraction) :
-      extractUtilityDataWithRepair_(file, driveAgentsPolicy, processingDeadlineAt);
+    const extractionResult = extractUtilityDataWithRepair_(
+      file, driveAgentsPolicy, processingDeadlineAt);
     const extracted = extractionResult.extracted;
     state.extracted = extracted;
     const validation = extractionResult.validation;
@@ -979,30 +988,6 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
   return { extracted: extracted, validation: validation };
 }
 
-function buildVerifiedExtractionResult_(file, verifiedExtraction) {
-  const extracted = Object.assign({}, verifiedExtraction, {
-    original_file_id: file.getId(),
-    original_file_name: file.getName()
-  });
-  validateRawExtractionShape_(extracted);
-  const headersBySupply = getSheetHeadersBySupply_();
-  const normalized = normalizeExtraction_(extracted);
-  Object.defineProperty(normalized, 'configured_secondary_headers', {
-    value: getConfiguredSecondaryInvoiceHeaders_(
-      headersBySupply[normalized.supply_type] || []
-    ),
-    enumerable: false
-  });
-  inferInvoiceFrequency_(normalized);
-  applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
-  return {
-    extracted: normalized,
-    validation: validateExtractedUtilityDataForImport_(normalized),
-    aiCallCount: 0,
-    repairAttemptCount: 0
-  };
-}
-
 function assertExtractionRepairBudget_(file, deadlineAt, nextAttempt, validation) {
   if (Date.now() + CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS < deadlineAt) {
     return;
@@ -1080,8 +1065,9 @@ function buildExtractionRepairFeedback_(validation, attempt) {
       code: validation.code || 'unclassified_validation_failure',
       fields: normalizeExtractionRepairFields_(validation.fields),
       problem: String(validation.problem || 'Extraction validation failed.'),
-      requested_action: String(validation.action ||
-        'Re-examine the PDF evidence for the affected fields.')
+      requested_action: validation.code === 'model_reported_blocking_problems' ?
+        'Audit each prior problems entry against the PDF and trusted policy. Remove explanatory notes about successful policy-compliant mappings from problems; do not replace them with new commentary. Retain unresolved missing required evidence, unreadability, ambiguity, or contradictions. Return the complete extraction, preserving evidence-backed values.' :
+        String(validation.action || 'Re-examine the PDF evidence for the affected fields.')
     }]
   };
 }
@@ -1187,7 +1173,7 @@ function markInvalidExtractionOutput_(error) {
 }
 
 function isModelExtractionNormalizationError_(error) {
-  return /^Gemini extraction has a nonnumeric electricity band consumption value\.$/
+  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|unit cost) value\.$/
     .test(String(error && error.message || error));
 }
 
@@ -1224,15 +1210,16 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   } else {
     generationConfig.responseJsonSchema = buildExtractionResponseSchema_();
   }
-  // Vertex AI may resolve the latest alias to a Flash variant whose thinking
-  // level control differs from the Developer API. Disable thinking explicitly
-  // there so the response budget is reserved for the bounded JSON payload.
+  // Vertex exposes the token-budget control. Keep reasoning enabled for
+  // document interpretation while bounding its share of the output budget.
   if (model === CONFIG.DEFAULT_MODEL && !isVertexAi) {
     generationConfig.thinkingConfig = {
       thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
     };
   } else if (model === CONFIG.DEFAULT_MODEL && isVertexAi) {
-    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    generationConfig.thinkingConfig = {
+      thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET
+    };
   }
   const payload = {
     contents: [{
@@ -1307,6 +1294,7 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         throw new Error('Gemini returned invalid response JSON.');
       }
       candidate = body.candidates && body.candidates[0];
+      responseLog.modelVersion = String(body.modelVersion || 'UNSPECIFIED');
       responseLog.finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
       logCatalogEvent_('gemini-generation-response', responseLog);
       break;
@@ -1698,7 +1686,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
-    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed; otherwise set it to null. If the billing frequency is not printed explicitly or is uncertain, return frequency as null and add a concise diagnostic. The runtime may infer monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply. If cadence cannot be established or conflicts, the diagnostic blocks import. Do not invent a different cadence or copy a transaction-specific value from earlier invoices.',
+    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed. Otherwise return both frequency and frequency_source_evidence as null; do not add a problem merely because cadence is not printed and do not infer it yourself. The runtime independently infers monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply, and blocks import if evidence is insufficient or conflicting. Extract period_start and period_end from the current billed consumption period, corroborated by the invoice reference period, not an offer-validity, cumulative spending, or historical period. Report unreadable or conflicting printed period evidence. Never copy a transaction-specific value from earlier invoices.',
     'For non-invoice documents, classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. For invoices, address_type is finalized by the runtime comparison with the target supply identity. If no printed service address is present, return null address components and add a concise problem.',
     'Apply these frequency overrides when supplier and supply match: ' +
@@ -1896,6 +1884,15 @@ function normalizeExtraction_(extracted) {
 }
 
 function normalizeNameIdentity_(value) {
+  // Some address windows repeat the same holder after C/O. Collapse only an
+  // exact normalized repetition; a different addressee must remain a mismatch.
+  const careOf = String(value || '').split(/\s+c\s*\/\s*o\s+/i);
+  if (careOf.length === 2 && careOf.every(function (part) { return part.trim(); })) {
+    const holder = normalizeNameIdentity_(careOf[0]);
+    if (holder && holder === normalizeNameIdentity_(careOf[1])) {
+      return holder;
+    }
+  }
   const tokens = normalizeCellText_(value).split(' ').filter(Boolean);
   const honorifics = [
     ['signora'], ['signor'], ['dott', 'ssa'], ['dott'], ['avv'], ['ing'],
@@ -2437,11 +2434,18 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
       matching[0].value === undefined ||
       (typeof matching[0].value === 'string' && !matching[0].value.trim());
     if (!valueIsMissing) {
-      if (matching[0].value !== defaultValue.value ||
+      const suppliedValue = matching[0].value;
+      const matchesDefault = suppliedValue === defaultValue.value ||
+        (typeof defaultValue.value === 'number' &&
+          typeof suppliedValue === 'string' &&
+          /^[+-]?\d+(?:[.,]\d+)?$/.test(suppliedValue.trim()) &&
+          Number(suppliedValue.trim().replace(',', '.')) === defaultValue.value);
+      if (!matchesDefault ||
         isPrintedSupplierDefaultValue_(matching[0])) {
         return;
       }
       if (explicitAbsence) {
+        matching[0].value = defaultValue.value;
         extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
           extracted.problems, defaultValue
         );
@@ -2536,6 +2540,19 @@ function normalizeSheetValues_(sheetValues) {
     if (typeof normalized.value === 'string') {
       normalized.value = normalized.value.trim();
     }
+    if (isUnitCostHeader_(normalized.header) && normalized.value !== null &&
+      normalized.value !== undefined && normalized.value !== '') {
+      const value = typeof normalized.value === 'string' ?
+        normalized.value.replace(/\s*(?:€|EUR)\s*\/\s*(?:kWh|Smc|m[³3]|mc|mese|month)\s*$/i, '').trim() :
+        normalized.value;
+      const numeric = typeof value === 'number' ? value :
+        typeof value === 'string' && /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(value) ?
+          Number(value.replace(',', '.')) : NaN;
+      if (!Number.isFinite(numeric)) {
+        throw new Error('Gemini extraction has a nonnumeric unit cost value.');
+      }
+      normalized.value = numeric;
+    }
     if (isElectricityBandConsumptionHeader_(normalized.header) &&
       normalized.value !== null && normalized.value !== undefined) {
       const quantity = normalizeElectricityBandConsumption_(normalized.value);
@@ -2545,6 +2562,20 @@ function normalizeSheetValues_(sheetValues) {
       normalized.value = quantity;
     }
     return normalized;
+  });
+}
+
+function isUnitCostHeader_(header) {
+  const normalizedHeader = normalizeHeader_(header);
+  const registry = typeof getLocalizationRegistry_ === 'function' ?
+    getLocalizationRegistry_() : {};
+  return Object.keys(registry).some(function (locale) {
+    const localization = registry[locale];
+    const aliases = (localization.headerAliases || {}).unitCost || [];
+    const bandCosts = (localization.electricityBandHeaders || []).filter(
+      function (value, index) { return index % 2 === 1; }
+    );
+    return aliases.concat(bandCosts).map(normalizeHeader_).indexOf(normalizedHeader) >= 0;
   });
 }
 
@@ -2776,6 +2807,9 @@ function validateExtraction_(extracted) {
 
 function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
+  if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
+    return false;
+  }
   const energygasContractAbsence =
     isInformationalEnergygasContractAbsenceProblem_(text, extracted);
   if (!isStandaloneInformationalProblem_(text) && !energygasContractAbsence) {
@@ -2873,7 +2907,17 @@ function isStandaloneInformationalProblem_(problem) {
 
 function getExtractionProblemFieldsForRepair_(problems, extracted) {
   const fields = ['problems'];
+  // Problems are validated before monetary reconciliation. Do not freeze
+  // inconsistent totals merely because an earlier diagnostic was reported first.
+  if (extracted.document_type === 'Invoice' &&
+    !isInvoiceCoreMonetaryReconciled_(extracted)) {
+    fields.push('cost_consumption', 'cost_non_consumption', 'vat', 'total');
+  }
   (problems || []).forEach(function (problem) {
+    if (problem === 'Billing frequency evidence is conflicting and was left blank.') {
+      fields.push('frequency', 'period_start', 'period_end',
+        'reference_year', 'reference_month');
+    }
     const classified = classifyConfiguredSecondaryInvoiceProblem_(
       problem, extracted
     );
@@ -4212,7 +4256,8 @@ function normalizeExplicitInvoiceFrequency_(value) {
 }
 
 function isMissingFrequencyProblem_(problem) {
-  const text = String(problem || '').trim();
+  const text = String(problem || '').trim()
+    .replace(/\bnon esplicitamente (stampat[oa])\b/ig, 'non $1 esplicitamente');
   if (!text) {
     return false;
   }
@@ -4229,7 +4274,7 @@ function isMissingFrequencyProblem_(problem) {
     /(?:period|periodo)/.test(normalized)) {
     return true;
   }
-  return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+  return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa]|trovat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
 }
 
 function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
@@ -4273,6 +4318,42 @@ function validateEnergygasLuceDetailedReconciliation_(extracted) {
     normalizeCellText_(extracted.supplier) !== 'energygas italia' ||
     normalizeCellText_(extracted.supply_type) !== 'luce') {
     return { valid: true };
+  }
+  const rateHeaders = ['Costo unitario', 'Costo unitario F1',
+    'Costo unitario F2', 'Costo unitario F3'];
+  const numericValue = function (header) {
+    const entry = (extracted.sheet_values || []).filter(function (item) {
+      return item && normalizeHeader_(item.header) === normalizeHeader_(header);
+    })[0];
+    const value = entry && entry.value;
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value !== 'string' || !/^\d+(?:[.,]\d+)?$/.test(value.trim())) {
+      return null;
+    }
+    const number = Number(value.trim().replace(',', '.'));
+    return Number.isFinite(number) ? number : null;
+  };
+  const rates = rateHeaders.map(numericValue);
+  const quantity = numericValue('Quantità consumi');
+  // A common selling rate is independently checkable against the current
+  // quantity and selling consumption amount. Do not impose it on multirate bills.
+  const commonRate = rates.every(function (rate) {
+    return rate !== null && rate >= 0 && Math.abs(rate - rates[0]) < 1e-9;
+  });
+  if (commonRate && quantity !== null && quantity > 0 &&
+    typeof extracted.cost_consumption === 'number' &&
+    Math.abs(quantity * rates[0] - extracted.cost_consumption) > CONFIG.MONEY_TOLERANCE) {
+    return invalidExtraction_(
+      'The common electricity selling rate does not reconcile with quantity and selling consumption cost.',
+      'Re-read the selling consumption summary rate, not PREZZO FISSO or a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
+      {
+        code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
+        fields: rateHeaders.concat(['Quantità consumi', 'Totale costi consumo',
+          'cost_consumption'])
+      }
+    );
   }
   const detailHeaders = [
     'Altri costi materia energia',

@@ -64,7 +64,7 @@ function getItalianLocalization_() {
       serviceAddressPlaceholder: "Scrivi qui l'indirizzo di fornitura"
     }),
     subscriberIdentifierProblemPatterns: Object.freeze({
-      missing: '\\b(?:assente|mancante|non\\s+presente|non\\s+(?:(?:e|è)\\s+)?(?:stampat[oa]|indicat[oa]|present[ea]|riportat[oa])|missing|absent|not\\s+(?:present|printed|indicated|reported))\\b',
+      missing: '\\b(?:assente|mancante|non\\s+presente|non\\s+(?:(?:e|è)\\s+)?(?:stampat[oa]|indicat[oa]|present[ea]|riportat[oa]|trovat[oa])|missing|absent|not\\s+(?:present|printed|indicated|reported))\\b',
       contractNumber: '(?:numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|contract(?:\\s+(?:number|code))?)',
       customerCode: '(?:id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     }),

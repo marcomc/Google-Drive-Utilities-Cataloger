@@ -76,6 +76,17 @@
   non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
   remain blocking; a tied historical cadence must fail closed rather than pick
   an arbitrary frequency.
+- For reviewed supplier defaults, normalize a provider's exact numeric string
+  representation only in the target field and only after explicit absence
+  evidence; unreadable or ambiguous evidence remains blocking.
+- In validator-guided repair, preserve only fields that passed their relevant
+  validation. Reopen conflicting monetary or period evidence and cross-check
+  linked quantity, selling-rate, and cost values without inventing a
+  replacement.
+- At the model-to-sheet boundary, enforce each field's type contract: normalize
+  reviewed unit-suffixed localized rates only in numeric unit-cost fields,
+  preserve identifier text, reject ambiguous prose, and verify the resulting
+  Sheets cell type as well as its displayed value.
 - Keep a classification decision canonical from admission through every
   downstream guard and final user-visible status. Discard evidence that cannot
   contribute to a decision before evaluating its identity, provenance, or trust

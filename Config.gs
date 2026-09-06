@@ -31,9 +31,9 @@ const CONFIG = Object.freeze({
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
   // Keep invoice extraction below the model's response ceiling.
   GEMINI_MAX_OUTPUT_TOKENS: 8192,
-  // The current Flash-latest alias supports medium thinking. Make it explicit
-  // so the Developer API and Vertex AI fallback use the same runtime behavior.
+  // Use backend-specific explicit reasoning controls for PDF cost extraction.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
+  GEMINI_VERTEX_THINKING_BUDGET: 4096,
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
   // Reserve time to persist the per-file outcome instead of starting a repair

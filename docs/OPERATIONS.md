@@ -238,6 +238,11 @@ spreadsheet-state errors stop without spending another model call. A repair is
 also deferred when the shared Apps Script runtime budget is nearly exhausted,
 so the file can retain a retryable outcome. The model can revise extracted data
 and evidence but cannot change validation or import policy.
+Repairs preserve unaffected identity and monetary fields. Unreconciled totals
+remain eligible for correction even when an earlier absence diagnostic is
+reported first; a conflicting inferred frequency reopens the printed period
+and reference-date fields for re-examination. Neither condition relaxes the
+final reconciliation or historical-frequency checks.
 Structured logs record each validation outcome, targeted repair request,
 successful repair, and exhausted three-call loop using only file ID, attempt
 counts, validation stage, and issue code; extracted document values are not
@@ -272,7 +277,8 @@ applied to invoice, contract, or customer identifiers.
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
-| `processSingleIntakeFile(fileId)` | Controlled single-file test. An owner may optionally pass a complete JSON extraction with `operator_verified=true` and the exact `original_file_id` for a manually reanalysed PDF. | May process that intake PDF; the optional verified path reuses the journaled import, rollback, and verification pipeline. |
+| `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
+| `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
 | `migrateCatalogerReferencePeriodText` | One-time or repeatable post-release maintenance. | Converts existing non-formula reference year/month cells to literal text without changing other fields. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
@@ -289,6 +295,43 @@ history is used. Conflicting, unavailable, or insufficient evidence leaves a
 blocking diagnostic; it never copies a transaction-specific value from another
 invoice. An explicit printed frequency or reviewed configuration override
 remains authoritative.
+
+On 2026-09-05, the live Drive policy was updated to return null cadence and
+provenance when cadence is unprinted, without reporting that absence alone as
+a problem. It now explicitly distinguishes the current billed consumption
+period from offer-validity, cumulative-spending, and historical periods.
+The separately uploaded policy was verified by an exact byte-for-byte read-back;
+conflicting or unreadable printed periods remain blocking.
+The same day's reviewed policy update also reserves `problems` for unresolved
+document issues rather than explanations of successful mappings. Its separate
+Drive upload was verified byte for byte. Numeric unit-cost normalization accepts
+plain rates and recognized euro-per-unit suffixes only in localized unit-cost
+headers; ambiguous prose is rejected before import, and identifiers stay text.
+
+The 2026-09-05 regression run automatically reimported five Energygas electricity
+PDFs and five OENERGY gas PDFs through the normal journaled pipeline on Vertex
+AI. Existing literal row values were cleared and replaced from fresh extraction;
+no operator-supplied extraction payload was accepted. An independent final Sheets
+and Drive read verified all ten invoice identities, numeric amounts and unit
+rates, literal reference years/months, calculation formulas, unchanged PDF bytes,
+and the configured archive destinations. No PDFs remained in intake. Older gas
+PDFs previously stored directly under the supplier folder were archived into its
+configured year folder, and source links were refreshed accordingly.
+The subsequent Developer API generation probe still returned HTTP 503 for high
+demand; successful Vertex imports do not establish Developer API availability.
+On 2026-09-06, another real PDF probe confirmed the same Developer API 503.
+With explicit owner authorization, the installation was switched persistently
+to `vertex_ai`, retaining `gemini-flash-latest` and the Developer API credentials.
+This settings-only change does not alter the automatic paid-fallback criteria.
+The fresh ten-invoice Sheets/Drive audit passed again, with no intake PDFs;
+deployment 84, project HEAD, and the reviewed live policy remained unchanged.
+Fresh read-only extraction previews of the latest gas and electricity PDFs
+passed on the retained Vertex backend, matching the reviewed numeric values
+without operator-supplied extraction (three and two model calls respectively,
+including automatic repair). The full `make check` suite also passed.
+Private snapshots and reproducible audit scripts are retained under the ignored
+`.installer/validation/automatic-reimport-20260905/` directory, not published with
+the source repository.
 
 Explicit absence or non-applicability of a configured writable secondary field
 is non-blocking only after monetary reconciliation and only when the matching
@@ -453,9 +496,8 @@ estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
 The default `gemini-flash-latest` Developer API runtime uses explicit `medium`
 thinking and an 8,192-token JSON response budget. Vertex AI uses the same alias
-and response budget with explicit `thinkingBudget: 0`, reserving the budget for
-the bounded JSON response even when the alias resolves to a thinking-capable
-Flash variant. Vertex also receives the shared extraction contract converted to
+and output budget with explicit `thinkingBudget: 4096` to retain reasoning for
+aggregate and subordinate invoice cost rows. Vertex also receives the shared extraction contract converted to
 its OpenAPI-style `responseSchema`; the
 Developer API receives the JSON Schema `responseJsonSchema` form. The alias may
 resolve to a newer Flash release without a source or Script Properties update.
@@ -465,9 +507,10 @@ omit cost-estimate fields; Cloud Billing remains authoritative.
 
 If the Developer API returns a transient outage such as HTTP 503 and imports
 must be recovered immediately, an owner may use `configureGeminiBackend` to
-select the configured Vertex AI backend, run the controlled retry, and restore
-`gemini_api`. Do not turn a status code alone into automatic paid-backend
-fallback.
+select the configured Vertex AI backend and run the controlled retry. Restore
+`gemini_api` after temporary recovery unless the owner explicitly authorizes
+keeping Vertex AI active with usage-based billing. Do not turn a status code
+alone into automatic paid-backend fallback.
 
 ```bash
 gcloud logging read \

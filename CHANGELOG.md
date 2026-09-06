@@ -10,8 +10,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Use Google's `gemini-flash-latest` alias as the default model for the Gemini
-  Developer API and Vertex AI fallback; at release time it resolves to Gemini
-  3.8 Flash and follows future Flash releases automatically.
+  Developer API and Vertex AI fallback, following provider-managed Flash
+  releases without pinning a numeric model version.
 - Migrate persisted 3.6 and 3.7 default model values to the latest alias while
   preserving explicitly configured model identifiers as intentional pins.
 
@@ -23,8 +23,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Add the owner-only `configureGeminiBackend` maintenance switch for an
   operator-approved temporary move to the configured Vertex AI backend during a
   Developer API outage.
-- Add an owner-verified extraction repair path that reuses the journaled import
-  pipeline when deterministic PDF reanalysis is required.
+- Add an automatic PDF extraction preview using the normal validation and
+  bounded repair pipeline without modifying invoice rows or source files.
 
 ### Fixed
 
@@ -37,6 +37,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
   reuse a monoraria electricity selling rate for the printed F1/F2/F3 bands.
 - Validate OENERGY Gas and Energygas Luce detail totals before import, preserving
   fail-closed behavior when model output confuses aggregate and `di cui` rows.
+- Enable bounded Vertex reasoning for invoice cost extraction and recognize
+  textual zero defaults only with explicit absence evidence. Accept reviewed
+  Italian absence diagnostics without downgrading unreadable identifiers.
+- Keep inconsistent monetary fields and conflicting billing periods eligible
+  for targeted model repair instead of freezing earlier erroneous values.
+- Check a common Energygas selling rate against current quantity and selling
+  cost, rejecting tariff components mistaken for the complete selling rate.
+- Leave unprinted billing cadence to deterministic period/history inference
+  without requiring a model-generated absence diagnostic.
+- Normalize recognized euro-per-unit rates in unit-cost columns as numeric
+  values while preserving identifier text and rejecting ambiguous rate prose.
+- Give model-diagnostic repair a specific instruction to remove successful
+  mapping commentary while retaining unresolved document problems.
 - Omit unsupported `thinking_level` from Vertex AI requests using the latest
   Flash alias while preserving explicit medium thinking on the Developer API.
 - Convert the shared extraction contract to Vertex AI's `responseSchema` format
@@ -44,6 +57,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Accept reviewed Italian honorifics, street-name connectors, and province
   codes when corroborating the configured supply identity, while keeping the
   substantive street, civic number, and city mandatory.
+- Accept a repeated account-holder name on both sides of a postal `C/O`
+  marker only when both normalized identities are identical.
 - Coerce numeric-looking supplementary sheet values according to the target
   cell's numeric format before writing and verifying, preventing locale-based
   date/time coercion in currency columns.

@@ -138,6 +138,23 @@ function testServiceIdentityAcceptsConfiguredProvinceQualifier() {
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
 }
 
+function testRepeatedCareOfHolderIdentity() {
+  const context = loadCataloger();
+  const expected = {account_holder: 'Avery North', service_address: 'Cedar Boulevard 125, Rivermouth'};
+  const extracted = {
+    account_holder: 'NORTH AVERY C/O AVERY NORTH',
+    address_evidence: 'Cedar Boulevard 125, Rivermouth',
+    service_street: 'Cedar Boulevard', service_civic_number: '125', service_city: 'Rivermouth'
+  };
+  assert.equal(context.validateServiceIdentity_(extracted, expected).valid, true);
+  assert.equal(context.validateServiceIdentity_({
+    ...extracted, account_holder: 'SOMEONE ELSE C/O AVERY NORTH'
+  }, expected).valid, false);
+  assert.equal(context.validateServiceIdentity_({
+    ...extracted, account_holder: 'NORTH AVERY C/O SOMEONE ELSE'
+  }, expected).valid, false);
+}
+
 function testServiceIdentityIgnoresHonorificPrefix() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
@@ -822,6 +839,24 @@ function testFormulaLikeTextIsWrittenLiterally() {
 
 function testExtractionSchemaAndCalendarValidation() {
   const context = loadCataloger();
+  for (const [header, value, expected] of [
+    ['Costo unitario', '0,495714 €/Smc', 0.495714],
+    ['Costo unitario F1', '0.135338 EUR/kWh', 0.135338],
+    ['Unit cost', '0.495714 EUR / Smc', 0.495714],
+    ['Costo unitario', '9 €/mese', 9]
+  ]) {
+    const values = context.normalizeSheetValues_([{ header, value }]);
+    assert.equal(values[0].value, expected);
+    let written;
+    context.setLiteralSheetValue_({ setValue: value => { written = value; } }, values[0].value);
+    assert.equal(written, expected);
+  }
+  assert.equal(context.normalizeSheetValues_([
+    { header: 'Numero contratto', value: '0,495714 €/Smc' }
+  ])[0].value, '0,495714 €/Smc');
+  assert.throws(() => context.normalizeSheetValues_([
+    { header: 'Costo unitario', value: 'circa 0,49 €/Smc' }
+  ]), /nonnumeric unit cost/);
   context.getAutomationConfig_ = () => ({
     locale: 'it',
     canonical_suppliers: ['SUPPLIER', 'ILIAD', 'Energygas Italia'],
@@ -989,6 +1024,27 @@ function testExtractionSchemaAndCalendarValidation() {
   ]));
   assert.deepEqual(energygasAbsentCharges.problems, []);
 
+  for (const zero of ['0', '0.00', '0,00', 0]) {
+    const textualZero = context.normalizeExtraction_({
+      ...raw, supplier: 'ENERGYGAS', supply_type: 'Luce',
+      problems: ['Ricalcoli non presente nel documento.'],
+      sheet_values: [{ header: 'Ricalcoli', value: zero }]
+    });
+    context.applySupplierFieldDefaults_(textualZero, ['Ricalcoli']);
+    assert.deepEqual(textualZero.problems, []);
+    assert.equal(textualZero.sheet_values[0].value, 0);
+  }
+  for (const value of ['0.004', 'zero', '0 EUR', '0/0']) {
+    const notZero = context.normalizeExtraction_({
+      ...raw, supplier: 'ENERGYGAS', supply_type: 'Luce',
+      problems: ['Ricalcoli non presente nel documento.'],
+      sheet_values: [{ header: 'Ricalcoli', value }]
+    });
+    context.applySupplierFieldDefaults_(notZero, ['Ricalcoli']);
+    assert.equal(notZero.problems.length, 1);
+    assert.equal(notZero.sheet_values[0].value, value);
+  }
+
   const energygasBandMappingExplanation = context.normalizeExtraction_({
     ...raw,
     supplier: 'Energygas Italia',
@@ -1023,6 +1079,67 @@ function testExtractionSchemaAndCalendarValidation() {
   };
   assert.equal(context.validateEnergygasLuceDetailedReconciliation_(
     energygasDetailedReconciliation).valid, true);
+  const sellingRateInvoice = {
+    ...energygasDetailedReconciliation,
+    sheet_values: energygasDetailedReconciliation.sheet_values.concat([
+      { header: 'Quantità consumi', value: '381.86' },
+      ...['Costo unitario', 'Costo unitario F1', 'Costo unitario F2', 'Costo unitario F3']
+        .map(header => ({ header, value: '0.135338' }))
+    ])
+  };
+  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(sellingRateInvoice).valid, true);
+  const baseRateInvoice = {
+    ...sellingRateInvoice,
+    sheet_values: sellingRateInvoice.sheet_values.map(entry =>
+      entry.header.startsWith('Costo unitario') ? { ...entry, value: '0.112' } : entry)
+  };
+  const rateValidation = context.validateEnergygasLuceDetailedReconciliation_(baseRateInvoice);
+  assert.equal(rateValidation.valid, false);
+  assert.equal(rateValidation.code, 'energygas_selling_rate_reconciliation_mismatch');
+  assert.equal(rateValidation.fields.includes('Costo unitario F3'), true);
+  assert.equal(context.validateExtractedUtilityDataForImport_(baseRateInvoice).code,
+    'energygas_selling_rate_reconciliation_mismatch');
+  const differentBandRates = {
+    ...sellingRateInvoice,
+    sheet_values: sellingRateInvoice.sheet_values.map(entry =>
+      entry.header === 'Costo unitario F1' ? { ...entry, value: '0.15' } : entry)
+  };
+  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(differentBandRates).valid, true);
+  for (const [quantity, rate] of [[23.45, 0.2], [704.12, 0.151234], [1800, 0.087654]]) {
+    const consumption = Math.round(quantity * rate * 100) / 100;
+    const futureInvoice = {
+      ...sellingRateInvoice, reference_year: 2027,
+      cost_consumption: consumption,
+      total: consumption + sellingRateInvoice.cost_non_consumption + sellingRateInvoice.vat,
+      sheet_values: sellingRateInvoice.sheet_values.map(entry => {
+        if (entry.header === 'Quantità consumi') return { ...entry, value: quantity };
+        if (entry.header.startsWith('Costo unitario')) return { ...entry, value: rate };
+        return entry;
+      })
+    };
+    assert.equal(context.validateEnergygasLuceDetailedReconciliation_(futureInvoice).valid, true);
+    assert.equal(context.validateEnergygasLuceDetailedReconciliation_({
+      ...futureInvoice,
+      sheet_values: futureInvoice.sheet_values.map(entry =>
+        entry.header.startsWith('Costo unitario') ? { ...entry, value: rate / 2 } : entry)
+    }).valid, false);
+  }
+  const textualZeroInvoice = context.normalizeExtraction_({
+    ...energygasDetailedReconciliation,
+    problems: ['Ricalcoli non presente nel documento.'],
+    sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
+      entry.header === 'Ricalcoli' ? { ...entry, value: '0' } : entry)
+  });
+  context.applySupplierFieldDefaults_(textualZeroInvoice, ['Ricalcoli']);
+  assert.equal(context.validateExtraction_(textualZeroInvoice).valid, true);
+  const unprovenTextualZeroInvoice = context.normalizeExtraction_({
+    ...energygasDetailedReconciliation,
+    problems: [],
+    sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
+      entry.header === 'Ricalcoli' ? { ...entry, value: '0' } : entry)
+  });
+  context.applySupplierFieldDefaults_(unprovenTextualZeroInvoice, ['Ricalcoli']);
+  assert.equal(context.validateExtraction_(unprovenTextualZeroInvoice).valid, false);
   assert.equal(context.validateEnergygasLuceDetailedReconciliation_({
     ...energygasDetailedReconciliation,
     sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
@@ -1038,6 +1155,21 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.deepEqual(repairCandidate, {
     cost_consumption: 51.68, vat: 9.65, total: 115.14
   });
+  const unreconciledRepair = {
+    ...energygasDetailedReconciliation, cost_consumption: 55.23,
+    problems: ['Frequenza di fatturazione non trovata.']
+  };
+  const repairFields = context.getExtractionProblemFieldsForRepair_(
+    unreconciledRepair.problems, unreconciledRepair);
+  for (const field of ['cost_consumption', 'cost_non_consumption', 'vat', 'total']) {
+    assert.equal(repairFields.includes(field), true);
+  }
+  const correctedRepair = { cost_consumption: 51.68, vat: 9.65, total: 115.14 };
+  context.preserveUnimplicatedRepairFields_(correctedRepair, {
+    previousExtraction: unreconciledRepair,
+    feedback: { issues: [{ fields: repairFields }] }
+  });
+  assert.equal(correctedRepair.cost_consumption, 51.68);
   const oenergyGasDetailedReconciliation = {
     ...validInvoice(),
     supplier: 'OENERGY',
@@ -1077,20 +1209,9 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(gasDetailValidation.code,
     'oenergy_gas_detail_reconciliation_mismatch');
   assert.throws(
-    () => context.parseVerifiedExtraction_('invoice-id', '{}'),
-    /operator_verified=true/
+    () => context.processSingleIntakeFile('invoice-id', '{}'),
+    /extraction must be automatic/
   );
-  assert.throws(
-    () => context.parseVerifiedExtraction_('invoice-id', JSON.stringify({
-      operator_verified: true,
-      original_file_id: 'other-id'
-    })),
-    /does not match the requested file/
-  );
-  assert.equal(context.parseVerifiedExtraction_('invoice-id', JSON.stringify({
-    operator_verified: true,
-    original_file_id: 'invoice-id'
-  })).operator_verified, true);
 
   const iliadWithoutConfiguredChargeColumn = context.normalizeExtraction_({
     ...raw,
@@ -1280,6 +1401,15 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_(missingFrequency).valid, false);
   assert.equal(context.isMissingFrequencyProblem_(missingFrequency.problems[0]), true);
   assert.equal(context.isMissingFrequencyProblem_('Billing frequency is not printed on the invoice.'), true);
+  assert.equal(context.isMissingFrequencyProblem_('Frequenza di fatturazione non esplicitamente stampata.'), true);
+  assert.equal(context.validateExtraction_({
+    ...raw, contract_number: '', customer_code: 'CL123',
+    problems: ['Numero contratto non trovato.']
+  }).valid, true);
+  assert.equal(context.validateExtraction_({
+    ...raw, contract_number: '', customer_code: 'CL123',
+    problems: ['Numero contratto non trovato perché illeggibile.']
+  }).valid, false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is unreadable.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency absent because the billing period is missing.'), false);
   assert.equal(context.isMissingFrequencyProblem_('Frequency does not match the billing history.'), false);
@@ -1301,7 +1431,8 @@ function testExtractionSchemaAndCalendarValidation() {
     ...raw,
     frequency: '',
     frequency_source_evidence: null,
-    problems: ['Billing frequency value is unsupported or lacks printed provenance.']
+    problems: ['Billing frequency value is unsupported or lacks printed provenance.',
+      'Frequenza di fatturazione non trovata.']
   };
   Object.defineProperty(inferredFrequencyWithProvenanceDiagnostic,
     'frequency_inferred_', { value: true, configurable: true });
@@ -1515,6 +1646,27 @@ function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   context.inferInvoiceFrequency_(extracted);
   assert.equal(extracted.frequency, 'monthly');
   assert.equal(context.validateExtraction_(extracted).valid, true);
+
+  const cumulativePeriod = {
+    ...extracted, period_start: '2026-05-01', frequency: '', problems: []
+  };
+  context.inferInvoiceFrequency_(cumulativePeriod);
+  assert.equal(cumulativePeriod.frequency, '');
+  const periodRepairFields = context.getExtractionProblemFieldsForRepair_(
+    cumulativePeriod.problems, cumulativePeriod);
+  for (const field of ['period_start', 'period_end', 'reference_year', 'reference_month']) {
+    assert.equal(periodRepairFields.includes(field), true);
+  }
+  const correctedPeriod = {
+    ...extracted, period_start: '2026-06-01', frequency: '', problems: []
+  };
+  context.preserveUnimplicatedRepairFields_(correctedPeriod, {
+    previousExtraction: cumulativePeriod,
+    feedback: { issues: [{ fields: periodRepairFields }] }
+  });
+  context.inferInvoiceFrequency_(correctedPeriod);
+  assert.equal(correctedPeriod.frequency, 'monthly');
+  assert.equal(context.validateExtraction_(correctedPeriod).valid, true);
 
   const historyOnly = {
     ...extracted,
@@ -2682,6 +2834,16 @@ function testExtractionRepairLoopTracksChangingFeedback() {
 function testModelNormalizationFailureIsRepairable() {
   const context = loadCataloger();
   assert.equal(context.isModelExtractionNormalizationError_(new Error(
+    'Gemini extraction has a nonnumeric unit cost value.'
+  )), true);
+  const feedback = context.buildExtractionRepairFeedback_({
+    code: 'model_reported_blocking_problems', fields: ['problems'],
+    problem: 'Gemini reported a policy mapping note.',
+    action: 'Manually verify the PDF.'
+  }, 1);
+  assert.match(feedback.issues[0].requested_action, /Remove explanatory notes/);
+  assert.match(feedback.issues[0].requested_action, /Retain unresolved/);
+  assert.equal(context.isModelExtractionNormalizationError_(new Error(
     'Gemini extraction has a nonnumeric electricity band consumption value.'
   )), true);
   assert.equal(context.isModelExtractionNormalizationError_(new Error(
@@ -2794,6 +2956,8 @@ function testExtractionRepairPromptRequiresCompleteReplacementWithMemory() {
   });
 
   assert.match(prompt, /attempt 3 of 3/);
+  assert.match(prompt, /do not add a problem merely because cadence is not printed/);
+  assert.match(prompt, /not an offer-validity, cumulative spending, or historical period/);
   assert.match(prompt, /Structured deterministic validator feedback/);
   assert.match(prompt, /Prior repair history/);
   assert.match(prompt, /Keep previously extracted fields unchanged/);
@@ -2984,7 +3148,7 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
 
   const payload = JSON.parse(requests[0].options.payload);
   assert.equal(requests[0].options.headers.Authorization, 'Bearer oauth-token');
-  assert.equal(payload.generationConfig.thinkingConfig.thinkingBudget, 0);
+  assert.equal(payload.generationConfig.thinkingConfig.thinkingBudget, 4096);
   assert.equal(
     Object.prototype.hasOwnProperty.call(
       payload.generationConfig.thinkingConfig, 'thinkingLevel'
@@ -3942,7 +4106,7 @@ function testPromptKeepsHeadersScopedBySupply() {
     /If a configured secondary field is explicitly absent or not applicable/);
   assert.match(prompt, /only after core monetary reconciliation succeeds/);
   assert.match(prompt, /Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking/);
-  assert.match(prompt, /If cadence cannot be established or conflicts, the diagnostic blocks import/);
+  assert.match(prompt, /blocks import if evidence is insufficient or conflicting/);
   assert.doesNotMatch(prompt, /runtime may import the invoice with that field blank/);
   assert.match(prompt,
     /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
@@ -6475,6 +6639,45 @@ function testSingleFilePreflightsTargetBeforeGlobalSideEffects() {
   assert.deepEqual(calls, ['get-file:file-id', 'release-lock']);
 }
 
+function testAutomaticPreviewUsesPdfAndNormalExtractionOnly() {
+  const iterator = (items) => {
+    let i = 0;
+    return { hasNext: () => i < items.length, next: () => items[i++] };
+  };
+  const root = { getId: () => 'root' };
+  const archive = { getId: () => 'archive', getParents: () => iterator([root]) };
+  let parents = [archive];
+  const file = {
+    getMimeType: () => 'application/pdf', isTrashed: () => false,
+    getSize: () => 100,
+    getParents: () => iterator(parents)
+  };
+  const context = loadCataloger({
+    DriveApp: {getFolderById: () => root, getFileById: () => file}
+  });
+  context.assertCatalogConfiguration_ = () => {};
+  context.getRootFolderId_ = () => 'root';
+  context.withCatalogProcessingLock_ = (_source, run) => run();
+  context.loadTrustedExtractionPolicy_ = () => 'trusted-policy';
+  let calls = 0;
+  context.extractUtilityDataWithRepair_ = (actual, policy, deadline) => {
+    assert.equal(actual, file);
+    assert.equal(policy, 'trusted-policy');
+    assert.ok(deadline > Date.now());
+    calls++;
+    return {validation: {valid: false}, aiCallCount: 3};
+  };
+  assert.equal(context.previewUtilityInvoiceExtraction('file').validation.valid, false);
+  assert.equal(calls, 1);
+  parents = [];
+  assert.throws(() => context.previewUtilityInvoiceExtraction('file'), /outside/);
+  assert.equal(calls, 1);
+  parents = [archive];
+  file.getSize = () => 40 * 1024 * 1024;
+  assert.throws(() => context.previewUtilityInvoiceExtraction('file'), /size limit/);
+  assert.equal(calls, 1);
+}
+
 function testSingleFileByNameResolvesExactlyOneDirectIntakePdf() {
   const file = {
     getId: () => 'file-id',
@@ -6810,6 +7013,7 @@ testHiddenPdfsAreExcludedFromIntake();
 testDeveloperApiKeyUsesHeader();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences();
+testVertexLatestAliasOmitsUnsupportedThinkingLevel();
 testVertexCostEstimateDoesNotReusePricingForGeminiLatest();
 testGeminiLatestUsageTelemetryOmitsUnpricedEstimate();
 testIncompleteGeminiResponseReportsFinishReason();
@@ -6883,6 +7087,8 @@ testProcessingLeaseAndDocumentStatus();
 testManualRetryProcessesSameDayErrorsOnly();
 testSingleFilePreflightsTargetBeforeGlobalSideEffects();
 testSingleFileByNameResolvesExactlyOneDirectIntakePdf();
+testAutomaticPreviewUsesPdfAndNormalExtractionOnly();
+testRepeatedCareOfHolderIdentity();
 testSingleFileByNameRejectsMissingOrAmbiguousMatches();
 testSingleFileProcessesOnlyTheValidatedTarget();
 testSingleFilePersistsWhenOperatorLinksFail();
