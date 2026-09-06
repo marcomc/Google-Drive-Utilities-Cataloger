@@ -3,10 +3,6 @@ const CONFIG = Object.freeze({
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
-  LEGACY_DEFAULT_MODELS: Object.freeze([
-    'gemini-3.6-flash',
-    'gemini-3.7-flash'
-  ]),
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -169,8 +165,7 @@ function getGeminiModel_() {
 
 function normalizeGeminiModel_(model) {
   const normalizedModel = String(model || '').trim();
-  return CONFIG.LEGACY_DEFAULT_MODELS.indexOf(normalizedModel) >= 0 ?
-    CONFIG.DEFAULT_MODEL : normalizedModel || CONFIG.DEFAULT_MODEL;
+  return normalizedModel || CONFIG.DEFAULT_MODEL;
 }
 
 /**

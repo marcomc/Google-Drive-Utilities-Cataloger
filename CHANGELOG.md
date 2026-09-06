@@ -12,8 +12,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Use Google's `gemini-flash-latest` alias as the default model for the Gemini
   Developer API and Vertex AI fallback, following provider-managed Flash
   releases without pinning a numeric model version.
-- Migrate persisted 3.6 and 3.7 default model values to the latest alias while
-  preserving explicitly configured model identifiers as intentional pins.
+- Preserve every configured model identifier, including former default
+  versions; use the latest alias for new or unconfigured installations and
+  explicit operator selection.
 
 ### Added
 

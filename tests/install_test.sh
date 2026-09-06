@@ -415,6 +415,68 @@ test_bootstrap_payload_keeps_key_off_disk() {
   rm -rf "${payload_root}"
 }
 
+test_initial_resume_and_handoff_preserve_model_pins() {
+  local requested_model
+  local model_test_root
+  local test_status
+  model_test_root="$(mktemp -d)"
+  for requested_model in "" "gemini-3.6-flash" "gemini-3.7-flash"; do
+    set +e
+    MODEL_TEST_ROOT="${model_test_root}" REQUESTED_MODEL="${requested_model}" bash -c '
+      set -euo pipefail
+      source "$1"
+      expected_model="${REQUESTED_MODEL:-gemini-flash-latest}"
+      actual_payload=""
+      model_test_root="${MODEL_TEST_ROOT}"
+      STATE_DIR="${model_test_root}/state"
+      STATE_FILE="${STATE_DIR}/state.json"
+      NON_INTERACTIVE=1
+      GDUC_PROJECT_NAME="Test project"
+      GDUC_PROJECT_ID="test-project-123"
+      GDUC_ROOT_FOLDER="1AbCdEfGhIjKlMnOpQrStUvWxYz_12345"
+      GDUC_GEMINI_MODEL="${REQUESTED_MODEL}"
+      active_gcloud_account() { printf "%s\n" "operator@example.com"; }
+      select_billing_account() { printf "%s\n" "000000-000000-000000"; }
+      select_gemini_mode() { printf "%s\n" "gemini_api_with_vertex_fallback"; }
+      gcloud() {
+        case "$*" in
+          "projects describe "*) return 1 ;;
+          "billing accounts describe "*) printf "%s\n" true ;;
+          *) return 99 ;;
+        esac
+      }
+      collect_installation_inputs
+      actual_model="$(state_get ".geminiModel")"
+      [[ "${actual_model}" == "${expected_model}" ]]
+      unset GDUC_GEMINI_MODEL
+      apply_resume_overrides
+      actual_model="$(state_get ".geminiModel")"
+      [[ "${actual_model}" == "${expected_model}" ]]
+      cp "${PROJECT_ROOT}/config.example.json" "${model_test_root}/config.local.json"
+      cp "${PROJECT_ROOT}/AGENTS.example.md" "${model_test_root}/AGENTS.example.md"
+      PROJECT_ROOT="${model_test_root}"
+      build_bootstrap_payload "test-secret" actual_payload
+      actual_model="$(jq -r ".geminiModel" <<<"${actual_payload}")"
+      [[ "${actual_model}" == "${expected_model}" ]]
+      for GDUC_GEMINI_MODEL in "gemini-3.6-flash" "gemini-3.7-flash"; do
+        apply_resume_overrides
+        actual_model="$(state_get ".geminiModel")"
+        [[ "${actual_model}" == "${GDUC_GEMINI_MODEL}" ]]
+        build_bootstrap_payload "test-secret" actual_payload
+        actual_model="$(jq -r ".geminiModel" <<<"${actual_payload}")"
+        [[ "${actual_model}" == "${GDUC_GEMINI_MODEL}" ]]
+      done
+    ' _ "${PROJECT_ROOT}/scripts/install.sh"
+    test_status=$?
+    set -e
+    if [[ "${test_status}" -ne 0 ]]; then
+      printf 'FAIL: installer changed model pin %s\n' "${requested_model:-default}" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  rm -rf "${model_test_root}"
+}
+
 test_resume_runtime_overrides() {
   local actual
 
@@ -1508,6 +1570,7 @@ test_custom_state_directory_safety
 test_runtime_service_selection
 test_secret_input_assignment
 test_bootstrap_payload_keeps_key_off_disk
+test_initial_resume_and_handoff_preserve_model_pins
 test_resume_runtime_overrides
 test_resume_time_zone_cannot_diverge_from_deployed_source
 test_exit_zero_gemini_error_cleanup

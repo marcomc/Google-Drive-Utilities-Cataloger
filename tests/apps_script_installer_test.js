@@ -42,6 +42,25 @@ function loadInstaller(fetchImplementation) {
   return context;
 }
 
+function loadInstallerWithRuntimeConfig(fetchImplementation, stored) {
+  const context = loadInstaller(fetchImplementation);
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (key) => stored[key] || '',
+    setProperty: (key, value) => { stored[key] = value; },
+    setProperties: (values) => { Object.assign(stored, values); },
+    deleteProperty: (key) => { delete stored[key]; }
+  }) };
+  context.Utilities.newBlob = (value) => ({
+    getDataAsString: () => Buffer.from(value).toString('utf8'),
+    getBytes: () => Array.from(Buffer.from(value))
+  });
+  for (const file of ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs']) {
+    vm.runInContext(fs.readFileSync(path.join(projectRoot, file), 'utf8'), context,
+      { filename: file });
+  }
+  return context;
+}
+
 function iteratorFor(items) {
   let index = 0;
   return {
@@ -1955,6 +1974,72 @@ function response(statusCode, body) {
   };
 }
 
+function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
+  for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash']) {
+    for (const [backend, fallback] of [
+      ['gemini_api', false], ['gemini_api', true], ['vertex_ai', false]
+    ]) {
+      const stored = {};
+      const requests = [];
+      const options = {
+        projectId: 'cataloger-project', rootFolderId: 'root-folder-id',
+        spreadsheetTitle: 'Utilities', notificationRecipient: 'owner@example.com',
+        geminiBackend: backend, geminiApiKey: 'developer-secret',
+        geminiModel: ' ' + model + ' ', autoVertexFallback: fallback,
+        vertexLocation: 'global', timeZone: 'Europe/Rome', agentsPolicy: 'policy',
+        automationConfig: JSON.parse(fs.readFileSync(
+          path.join(projectRoot, 'config.example.json'), 'utf8'))
+      };
+      const context = loadInstallerWithRuntimeConfig((url, requestOptions) => {
+        requests.push({ url, options: requestOptions });
+        if (url.includes('secretmanager.googleapis.com')) {
+          return response(200, { payload: { data:
+            Buffer.from(JSON.stringify(options)).toString('base64') } });
+        }
+        assert.ok(url.endsWith('/' + model) || url.endsWith('/' + model + ':countTokens'));
+        if (url.endsWith(':countTokens')) {
+          assert.ok(JSON.parse(requestOptions.payload).model.endsWith('/' + model));
+          return response(200, { totalTokens: 2 });
+        }
+        return response(200, { supportedGenerationMethods: ['generateContent'] });
+      }, stored);
+      context.DriveApp = { getFolderById: () => ({ getUrl: () => 'https://drive.test' }) };
+      context.ensureInstallerPolicyFile_ = () => ({ getUrl: () => 'https://drive.test/policy' });
+      context.ensureInstallerSupplierProfileTemplate_ = () => {};
+      context.ensureInstallerSpreadsheet_ = () => ({
+        getId: () => 'spreadsheet-id', getUrl: () => 'https://sheets.test/spreadsheet-id'
+      });
+      context.ensureInstallerDestinationFolders_ = () => {};
+      context.provisionDriveEventTransportUnlocked_ = () => ({ pubSubConfigured: false });
+      context.installAutomationTriggersUnlocked_ = () => ({
+        geminiBackend: backend, geminiAutoVertexFallbackEnabled: fallback
+      });
+      context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+
+      assert.equal(context.validateInstallerOptions_(options).geminiModel, model);
+      const installed = context.bootstrapCatalogerInstallation({ bootstrapSecretVersion:
+        'projects/cataloger-project/secrets/drive-utilities-cataloger-test-script-id/versions/1'
+      });
+      assert.equal(installed.installed, true);
+      assert.equal(stored.GEMINI_MODEL, model);
+      assert.equal(context.getSetupStatus().geminiModel, model);
+      const expectedProbes = fallback ? 2 : 1;
+      assert.equal(requests.length, 1 + expectedProbes);
+      const before = { ...stored };
+      const status = context.validateConfiguredGeminiAccess();
+      assert.equal(status.geminiModel, model);
+      assert.equal(status.geminiApiValidated, backend === 'gemini_api');
+      assert.equal(status.vertexAiValidated, backend === 'vertex_ai' || fallback);
+      assert.equal(requests.length, 1 + 2 * expectedProbes);
+      assert.deepEqual(stored, before);
+      assert.equal(JSON.stringify(status).includes('developer-secret'), false);
+      assert.equal(context.configureGeminiBackend('vertex_ai').geminiModel, model);
+      assert.equal(context.configureGeminiFreeTierWithVertexFallback().geminiModel, model);
+      assert.equal(stored.GEMINI_MODEL, model);
+    }
+  }
+}
+
 function testGeminiDeveloperApiValidation() {
   const requests = [];
   const context = loadInstaller((url, options) => {
@@ -1987,69 +2072,74 @@ function testGeminiDeveloperApiValidation() {
 }
 
 function testGeminiDeveloperApiKeyRotationPreservesInstallation() {
-  for (const backend of ['gemini_api', 'vertex_ai']) {
-    for (const fallback of ['false', 'true']) {
-      const stored = {
-        GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project',
-        GEMINI_API_KEY: 'old-secret', GEMINI_MODEL: 'gemini-2.5-flash',
-        GEMINI_BACKEND: backend, GEMINI_AUTO_VERTEX_FALLBACK: fallback,
-        GEMINI_VERTEX_FALLBACK_UNTIL: '123456789', OTHER: 'unchanged'
-      };
-      const before = { ...stored };
-      const requests = [];
-      let handoffProject = 'cataloger-project';
-      let validationFails = false;
-      let locked = false;
-      const context = loadInstaller((url) => {
-        assert.equal(locked, true);
-        requests.push(url);
-        return response(200, { payload: { data: Buffer.from(JSON.stringify({
-          projectId: handoffProject, geminiApiKey: 'new-developer-secret',
-          geminiModel: 'gemini-flash-latest', geminiApiProjectId: 'example-api-project'
-        })).toString('base64') } });
-      });
-      context.CONFIG = { PROPERTY_KEYS: Object.fromEntries(
-        Object.keys(stored).map((key) => [key, key])) };
-      context.getGeminiModel_ = () => stored.GEMINI_MODEL;
-      let validations = 0;
-      context.validateInstallerGeminiDeveloperApi_ = (options) => {
-        validations += 1;
-        assert.equal(locked, true);
-        assert.equal(options.geminiModel, before.GEMINI_MODEL);
-        if (validationFails) throw new Error('Provider validation failed');
-      };
-      context.PropertiesService = { getScriptProperties: () => ({
-        getProperty: (key) => stored[key],
-        setProperty: (key, value) => { stored[key] = value; }
-      }) };
-      context.withCatalogLifecycleLock_ = (_operation, callback) => {
-        locked = true;
-        try { return callback(); } finally { locked = false; }
-      };
-      context.getSetupStatus = () => ({ geminiBackend: stored.GEMINI_BACKEND });
-      const options = () => ({ bootstrapSecretVersion:
-        `projects/${handoffProject}/secrets/drive-utilities-cataloger-test-script-id/versions/1` });
-      handoffProject = 'different-project';
-      assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
-        /does not match the installed/);
-      assert.equal(validations, 0);
-      assert.deepEqual(stored, before);
-      handoffProject = 'cataloger-project';
-      delete stored.GOOGLE_CLOUD_PROJECT_ID;
-      const previousRequests = requests.length;
-      assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
-        /Configure the installation/);
-      assert.equal(requests.length, previousRequests);
-      stored.GOOGLE_CLOUD_PROJECT_ID = before.GOOGLE_CLOUD_PROJECT_ID;
-      validationFails = true;
-      assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
-        /Provider validation failed/);
-      assert.deepEqual(stored, before);
-      validationFails = false;
-      const result = context.rotateGeminiDeveloperApiKeyFromSecret(options());
-      assert.deepEqual(stored, { ...before, GEMINI_API_KEY: 'new-developer-secret' });
-      assert.equal(result.geminiApiProjectId, 'example-api-project');
-      assert.equal(JSON.stringify(result).includes('new-developer-secret'), false);
+  for (const model of ['gemini-2.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash']) {
+    for (const backend of ['gemini_api', 'vertex_ai']) {
+      for (const fallback of ['false', 'true']) {
+        const stored = {
+          GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project',
+          GEMINI_API_KEY: 'old-secret', GEMINI_MODEL: model,
+          GEMINI_BACKEND: backend, GEMINI_AUTO_VERTEX_FALLBACK: fallback,
+          GEMINI_VERTEX_FALLBACK_UNTIL: '123456789', OTHER: 'unchanged'
+        };
+        const before = { ...stored };
+        const requests = [];
+        let handoffProject = 'cataloger-project';
+        let validationFails = false;
+        let locked = false;
+        const context = loadInstallerWithRuntimeConfig((url) => {
+          assert.equal(locked, true);
+          requests.push(url);
+          if (url.includes('generativelanguage.googleapis.com')) {
+            assert.ok(url.endsWith('/' + model));
+            return response(200, { supportedGenerationMethods: ['generateContent'] });
+          }
+          return response(200, { payload: { data: Buffer.from(JSON.stringify({
+            projectId: handoffProject, geminiApiKey: 'new-developer-secret',
+            geminiModel: 'gemini-flash-latest', geminiApiProjectId: 'example-api-project'
+          })).toString('base64') } });
+        }, stored);
+        const validateDeveloperApi = context.validateInstallerGeminiDeveloperApi_;
+        let validations = 0;
+        context.validateInstallerGeminiDeveloperApi_ = (options) => {
+          validations += 1;
+          assert.equal(locked, true);
+          assert.equal(options.geminiModel, before.GEMINI_MODEL);
+          if (validationFails) throw new Error('Provider validation failed');
+          validateDeveloperApi(options);
+        };
+        context.PropertiesService = { getScriptProperties: () => ({
+          getProperty: (key) => stored[key],
+          setProperty: (key, value) => { stored[key] = value; }
+        }) };
+        context.withCatalogLifecycleLock_ = (_operation, callback) => {
+          locked = true;
+          try { return callback(); } finally { locked = false; }
+        };
+        const options = () => ({ bootstrapSecretVersion:
+          `projects/${handoffProject}/secrets/drive-utilities-cataloger-test-script-id/versions/1` });
+        handoffProject = 'different-project';
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /does not match the installed/);
+        assert.equal(validations, 0);
+        assert.deepEqual(stored, before);
+        handoffProject = 'cataloger-project';
+        delete stored.GOOGLE_CLOUD_PROJECT_ID;
+        const previousRequests = requests.length;
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /Configure the installation/);
+        assert.equal(requests.length, previousRequests);
+        stored.GOOGLE_CLOUD_PROJECT_ID = before.GOOGLE_CLOUD_PROJECT_ID;
+        validationFails = true;
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /Provider validation failed/);
+        assert.deepEqual(stored, before);
+        validationFails = false;
+        const result = context.rotateGeminiDeveloperApiKeyFromSecret(options());
+        assert.deepEqual(stored, { ...before, GEMINI_API_KEY: 'new-developer-secret' });
+        assert.equal(result.geminiApiProjectId, 'example-api-project');
+        assert.equal(result.geminiModel, model);
+        assert.equal(JSON.stringify(result).includes('new-developer-secret'), false);
+      }
     }
   }
 }
@@ -2438,6 +2528,7 @@ testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
 testServiceIdentityMigrationRestoresCompleteChartState();
 testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
+testInstallerAndConfiguredProbesPreserveFormerDefaultPins();
 testGeminiDeveloperApiKeyRotationPreservesInstallation();
 testVertexValidation();
 testFallbackValidatesBothBackends();

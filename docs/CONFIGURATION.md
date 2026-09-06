@@ -66,12 +66,14 @@ and `store:false` so invoice documents are not retained as Interaction state.
 Vertex AI continues to use `generateContent`, the same alias and output budget,
 with an explicit `thinkingBudget: 4096`.
 
-Persisted `gemini-3.6-flash` and `gemini-3.7-flash` values are automatically
-treated as `gemini-flash-latest`, so source deployment upgrades existing
-installations without a separate Script Properties change. The owner-only
-`validateConfiguredGeminiAccess` function performs a harmless metadata/token
-count validation against every enabled backend. Any other valid model
-identifier remains an explicit pin and is not replaced automatically.
+Every saved model identifier, including `gemini-3.6-flash` and
+`gemini-3.7-flash`, remains an explicit pin after source deployment. The moving
+alias is used only when runtime model configuration is absent or blank, or
+when the operator explicitly selects it. To switch an existing installation,
+call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
+Then `validateConfiguredGeminiAccess()` performs a harmless metadata/token count
+validation against every enabled backend. A former default spelling alone
+does not establish that the operator intended to follow future defaults.
 Reasoning controls follow the selected API and documented
 [Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
 and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)

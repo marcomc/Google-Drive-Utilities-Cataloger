@@ -4291,6 +4291,8 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
     ['gemini-2.5-pro', 'medium', true],
     ['gemini-2.5-flash', 'medium', true],
     ['gemini-2.5-flash-lite', 'medium', true],
+    ['gemini-3.6-flash', 'medium', false],
+    ['gemini-3.7-flash', 'medium', false],
     ['gemini-3.8-flash', 'medium', false],
     ['gemini-3.5-flash', 'medium', false],
     ['gemini-3.5-flash-lite', 'medium', false],
@@ -4302,6 +4304,7 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
   for (const [model, level, vertexBudget] of models) {
     for (const backend of ['gemini_api', 'vertex_ai']) {
       const requests = [];
+      const usageEvents = [];
       const properties = {
         GEMINI_MODEL: model,
         GEMINI_API_KEY: 'developer-secret',
@@ -4318,13 +4321,19 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
       } } });
       context.getScriptProperty_ = (key) => properties[key] || '';
       context.buildExtractionPrompt_ = () => 'prompt';
-      context.logCatalogEvent_ = () => {};
-      context.logGeminiUsage_ = () => {};
+      context.logCatalogEvent_ = (event, details) => {
+        if (event === 'gemini-generation-usage') usageEvents.push(details);
+      };
       assert.equal(context.callGeminiForPdfWithBackend_(
         { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, backend, ''
       ), '{}');
       assert.equal(requests.length, 1, model + ': ' + backend);
       assert.equal(properties.GEMINI_MODEL, model);
+      assert.equal(usageEvents.length, 1);
+      assert.equal(usageEvents[0].model, model);
+      if (model === 'gemini-3.6-flash' || model === 'gemini-3.7-flash') {
+        assert.equal(Object.hasOwn(usageEvents[0], 'estimatedCostUsd'), false);
+      }
       const payload = JSON.parse(requests[0].options.payload);
       if (backend === 'gemini_api') {
         assert.equal(payload.model, model);
@@ -4351,7 +4360,7 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
 
 function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   const properties = {};
-  const context = loadCataloger({
+  const overrides = {
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (key) => properties[key] || '',
@@ -4360,17 +4369,33 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
         }
       })
     }
-  });
-  context.getSetupStatus = () => ({ geminiModel: context.getGeminiModel_() });
+  };
+  const context = loadCataloger(overrides);
 
   assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
-  properties.GEMINI_MODEL = 'gemini-3.6-flash';
+  properties.GEMINI_MODEL = '  ';
   assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
-  properties.GEMINI_MODEL = 'gemini-3.7-flash';
-  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
-
-  const result = context.configureGeminiModel('gemini-3.6-flash');
-
+  assert.equal(properties.GEMINI_MODEL, '  ');
+  for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash',
+    'gemini-2.5-flash', 'gemini-unverified-model']) {
+    properties.GEMINI_MODEL = ' ' + model + ' ';
+    assert.equal(context.getGeminiModel_(), model);
+    assert.equal(context.getSetupStatus().geminiModel, model);
+    assert.equal(loadCataloger(overrides).getGeminiModel_(), model);
+    assert.equal(properties.GEMINI_MODEL, ' ' + model + ' ');
+    const result = context.configureGeminiModel(' ' + model + ' ');
+    assert.equal(properties.GEMINI_MODEL, model);
+    assert.equal(result.geminiModel, model);
+    assert.equal(context.configureGeminiBackend('vertex_ai').geminiModel, model);
+    assert.equal(properties.GEMINI_MODEL, model);
+    const before = { ...properties };
+    for (const invalid of ['', ' ', 'models/' + model, model + '/bad']) {
+      assert.throws(() => context.configureGeminiModel(invalid),
+        /must be a Gemini model identifier/);
+      assert.deepEqual(properties, before);
+    }
+  }
+  const result = context.configureGeminiModel('gemini-flash-latest');
   assert.equal(properties.GEMINI_MODEL, 'gemini-flash-latest');
   assert.equal(result.geminiModel, 'gemini-flash-latest');
   assert.throws(
@@ -4643,12 +4668,12 @@ function testGeminiResponseWithoutFinishReasonFailsClosed() {
   );
 }
 
-function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
+function testDepletedPrepaymentCreditsSwitchToVertexForOneHour(model = 'gemini-2.5-flash') {
   const requests = [];
   const events = [];
   const properties = {
     GEMINI_API_KEY: 'developer-secret',
-    GEMINI_MODEL: 'gemini-2.5-flash',
+    GEMINI_MODEL: model,
     GEMINI_BACKEND: 'gemini_api',
     GEMINI_AUTO_VERTEX_FALLBACK: 'true',
     GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project'
@@ -4705,7 +4730,6 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   context.getVertexAiLocation_ = () => 'global';
   context.getScriptProperty_ = (key) => properties[key] || '';
   context.buildExtractionPrompt_ = () => 'prompt';
-  context.logGeminiUsage_ = () => {};
   context.logCatalogEvent_ = (event, details) => {
     events.push({ event, details });
   };
@@ -4758,20 +4782,30 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour() {
   assert.match(requests[3].url, /generativelanguage\.googleapis\.com/);
   for (const index of [0, 3]) {
     const payload = JSON.parse(requests[index].options.payload);
-    assert.equal(payload.model, 'gemini-2.5-flash');
+    assert.equal(payload.model, model);
     assert.equal(payload.store, false);
     assert.deepEqual(payload.generation_config, {
       max_output_tokens: 8192, thinking_level: 'medium'
     });
   }
   for (const index of [1, 2]) {
-    assert.ok(requests[index].url.endsWith('/gemini-2.5-flash:generateContent'));
+    assert.ok(requests[index].url.endsWith('/' + model + ':generateContent'));
     const payload = JSON.parse(requests[index].options.payload);
     assert.equal(payload.generationConfig.maxOutputTokens, 8192);
-    assert.deepEqual(payload.generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+    assert.deepEqual(payload.generationConfig.thinkingConfig,
+      model === 'gemini-2.5-flash' ? { thinkingBudget: 4096 } : undefined);
     assert.equal(Object.hasOwn(payload, 'generation_config'), false);
   }
-  assert.equal(properties.GEMINI_MODEL, 'gemini-2.5-flash');
+  assert.equal(properties.GEMINI_MODEL, model);
+  const usage = events.filter((entry) => entry.event === 'gemini-generation-usage');
+  assert.equal(usage.length, 3);
+  assert.ok(usage.every((entry) => entry.details.model === model));
+}
+
+function testFormerDefaultPinsSurviveFallbackAndCooldown() {
+  for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash']) {
+    testDepletedPrepaymentCreditsSwitchToVertexForOneHour(model);
+  }
 }
 
 function testRepairContextSurvivesAutomaticVertexFallback() {
@@ -8508,6 +8542,7 @@ testGeminiLatestUsageTelemetryOmitsUnpricedEstimate();
 testIncompleteGeminiResponseReportsFinishReason();
 testGeminiResponseWithoutFinishReasonFailsClosed();
 testDepletedPrepaymentCreditsSwitchToVertexForOneHour();
+testFormerDefaultPinsSurviveFallbackAndCooldown();
 testRepairContextSurvivesAutomaticVertexFallback();
 testEmailReportIncludesSoftwareVersion();
 testPostExtractionSpreadsheetErrorReportPreservesDiagnostics();
