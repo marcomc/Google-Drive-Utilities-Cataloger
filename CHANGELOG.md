@@ -31,6 +31,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Normalize imported reference years and months as literal text, including an
   idempotent migration for existing rows, so chart labels remain stable.
+  Checkpoint the migration's pending row before format or value changes and
+  verify its identity and current contents before resuming an interrupted write.
 - Normalize the `ENERGYGAS` supplier abbreviation to the configured
   `Energygas Italia` spelling and preserve canonical supplier case, including
   historical duplicate and cadence lookups after configuration migration.

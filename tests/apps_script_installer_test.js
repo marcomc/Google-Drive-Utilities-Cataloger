@@ -978,88 +978,236 @@ function createMutableInstallerChartFixture() {
   return { chart, state };
 }
 
-function testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas() {
-  const context = loadInstaller(() => {
-    throw new Error('network must not run');
-  });
-  const cells = [
-    ['Issue date', 'Supplier', 'Reference year', 'Reference month'],
-    ['2026-08-10', 'OENERGY', 2026, 7],
-    ['2026-07-08', 'OENERGY', '2026', '06'],
-    ['2026-06-09', 'OENERGY', 2026, 5]
-  ];
-  const formulas = [
-    ['', '', '', ''],
-    ['', '', '', ''],
-    ['', '', '', ''],
-    ['', '', '=YEAR(A4)', '']
-  ];
-  const formats = [
-    ['@', '@', '@', '@'],
-    ['@', '@', '0', '0'],
-    ['@', '@', '@', '@'],
-    ['@', '@', '0', '@']
-  ];
-  const writes = [];
-  const sheet = {
-    getName: () => 'Gas',
-    getLastRow: () => cells.length,
-    getRange: (row, column, rows = 1, columns = 1) => {
-      if (rows === 1 && columns === 4) {
+function createReferencePeriodMigrationFixture(locale = 'en', headerRow = 1, sheetCount = 1) {
+  const stored = {};
+  const context = loadInstallerWithRuntimeConfig(() => { throw new Error('Unexpected network'); }, stored);
+  vm.runInContext(fs.readFileSync(path.join(projectRoot, 'UtilitiesCataloging.gs'), 'utf8'), context);
+  const localization = context.getLocalizationRegistry_()[locale];
+  context.getLocalization_ = () => localization;
+  context.getHeaderAliases_ = key => localization.headerAliases[key];
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.Utilities.DigestAlgorithm = { SHA_256: 'sha256' };
+  context.Utilities.Charset = { UTF_8: 'utf8' };
+  context.Utilities.computeDigest = (_algorithm, text) => Array.from(
+    require('node:crypto').createHash('sha256').update(text).digest());
+  const operations = [];
+  let failure;
+  const operation = (name, action) => {
+    operations.push(name);
+    const fails = failure && failure.name === name && --failure.remaining === 0;
+    if (fails && failure.when === 'before') { failure = null; throw new Error('Injected ' + name); }
+    const result = action();
+    if (fails) { failure = null; throw new Error('Injected ' + name); }
+    return result;
+  };
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: key => stored[key] || null,
+    setProperty: (key, value) => operation('checkpoint', () => { stored[key] = value; }),
+    deleteProperty: key => operation('cleanup', () => { delete stored[key]; })
+  }) };
+  const sheets = Array.from({ length: sheetCount }, (_, index) => {
+    const headers = ['issueDate', 'supplier', 'year', 'month'].map(key => localization.headerAliases[key][0])
+      .concat('Derived label');
+    const cells = Array.from({ length: headerRow - 1 }, () => headers.map(() => ''))
+      .concat([headers, [new Date('2026-08-10T00:00:00Z'), 'SUPPLIER-' + index, 2026, 7, 'numeric'],
+        [new Date('2026-09-10T00:00:00Z'), 'SUPPLIER-' + index, 2026, 8, 'numeric']]);
+    const formulas = cells.map(() => headers.map(() => ''));
+    const formats = cells.map(() => ['@', '@', '0', '0', 'General']);
+    const state = { cells, formulas, formats, id: index + 1, name: 'Sheet ' + index, headerRow };
+    state.sheet = {
+      getSheetId: () => state.id, getName: () => state.name, getLastRow: () => cells.length,
+      getRange: (row, column, _rows = 1, width = 1) => {
+        if (width > 1) return {
+          getValues: () => [operation('read', () => cells[row - 1].slice(column - 1, column - 1 + width))],
+          getFormulas: () => [formulas[row - 1].slice(column - 1, column - 1 + width)],
+          getNumberFormats: () => [formats[row - 1].slice(column - 1, column - 1 + width)]
+        };
         return {
-          getValues: () => [cells[row - 1].slice(0, 4)],
-          getFormulas: () => [formulas[row - 1].slice(0, 4)]
+          setNumberFormat: value => operation('format', () => { formats[row - 1][column - 1] = value; }),
+          setValue: value => operation('value', () => { cells[row - 1][column - 1] = value; }),
+          setRichTextValue: value => operation('value', () => {
+            cells[row - 1][column - 1] = value.text;
+            if (formulas[row - 1][4]) cells[row - 1][4] = typeof cells[row - 1][2] + ':' + cells[row - 1][3];
+          })
         };
       }
-      return {
-        getNumberFormat: () => formats[row - 1][column - 1]
-      };
-    }
-  };
-  const layout = {
-    headerRow: 1,
-    headers: cells[0],
-    lookup: {
-      'issue date': 1,
-      supplier: 2,
-      'reference year': 3,
-      'reference month': 4
-    }
-  };
-  context.CONFIG = { PROPERTY_KEYS: {
-    SPREADSHEET_ID: 'SPREADSHEET_ID'
-  } };
-  context.assertCatalogConfiguration_ = () => {};
-  context.withCatalogLifecycleLock_ = (_label, callback) => callback();
-  context.getSpreadsheetId_ = () => 'spreadsheet-id';
-  context.getAutomationConfig_ = () => ({
-    canonical_supplies: ['Gas', 'Electricity'],
-    sheet_by_supply: { Gas: 'Gas', Electricity: 'Gas' }
+    };
+    return state;
   });
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => sheet })
-  };
-  context.getSheetLayout_ = () => layout;
-  context.getHeaderAliases_ = (key) => ({
-    issueDate: ['Issue date'], supplier: ['Supplier'],
-    year: ['Reference year'], month: ['Reference month']
-  })[key] || [];
-  context.findHeaderIndex_ = (lookup, aliases) => aliases.reduce(
-    (column, alias) => column || lookup[String(alias).toLowerCase()] || 0, 0
-  );
-  context.setTextValueForHeaders_ = (_sheet, row, _layout, _formulas,
-    aliases, value) => writes.push({ row, header: aliases[0], value });
+  const config = { canonical_supplies: sheets.map(s => s.name),
+    sheet_by_supply: Object.fromEntries(sheets.map(s => [s.name, s.name])) };
+  const spreadsheet = { getId: () => 'spreadsheet-id',
+    getSheetByName: name => (sheets.find(s => s.name === name) || {}).sheet };
+  context.SpreadsheetApp = { openById: () => spreadsheet, newRichTextValue: () => ({
+    setText(text) { this.text = text; return this; }, build() { return { text: this.text }; }
+  }) };
+  context.getAutomationConfig_ = () => config;
+  context.getSheetLayout_ = sheet => operation('layout', () => {
+    const state = sheets.find(s => s.sheet === sheet);
+    const headers = state.cells[state.headerRow - 1];
+    return { headerRow: state.headerRow, headers,
+      lookup: Object.fromEntries(headers.map((header, index) => [context.normalizeHeader_(header), index + 1])) };
+  });
+  const key = vm.runInContext('CONFIG.PROPERTY_KEYS.REFERENCE_PERIOD_MIGRATION', context);
+  return { context, stored, key, sheets, config, spreadsheet, operations,
+    fail: (name, remaining = 1, when = 'before') => { failure = { name, remaining, when }; },
+    migrate: () => context.migrateCatalogerReferencePeriodText(),
+    mutationCount: () => operations.filter(name => name === 'format' || name === 'value').length };
+}
 
-  const result = context.migrateCatalogerReferencePeriodText();
+function testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas() {
+  for (const locale of ['en', 'it']) {
+    for (const headerRow of [1, 3]) {
+      const f = createReferencePeriodMigrationFixture(locale, headerRow, 2);
+      f.config.canonical_supplies.push('Shared');
+      f.config.sheet_by_supply.Shared = f.sheets[0].name;
+      f.sheets[0].formulas[headerRow][4] = '=TYPE(C' + (headerRow + 1) + ')';
+      f.sheets[1].formulas[headerRow + 1][2] = '=YEAR(A' + (headerRow + 2) + ')';
+      const result = f.migrate();
+      assert.equal(result.sheets.length, 2);
+      assert.deepEqual(Array.from(result.sheets, item => item.changedRows), [2, 2]);
+      assert.equal(f.sheets[0].cells[headerRow][2], '2026');
+      assert.equal(f.sheets[0].cells[headerRow][3], '07');
+      assert.equal(f.sheets[0].cells[headerRow][4], 'string:07', 'Dependent formula result may change');
+      assert.equal(f.sheets[1].cells[headerRow + 1][2], 2026, 'Formula-backed year preserved');
+      assert.equal(f.sheets[1].cells[headerRow + 1][3], '08');
+      assert.equal(f.stored[f.key], undefined);
+      const count = f.mutationCount();
+      assert.deepEqual(Array.from(f.migrate().sheets, item => item.changedRows), [0, 0]);
+      assert.equal(f.mutationCount(), count);
+      f.sheets[0].cells.push(['', '', 2030, 1, '']);
+      f.sheets[0].formulas.push(['', '', '', '', '']);
+      f.sheets[0].formats.push(['@', '@', '0', '0', 'General']);
+      f.migrate();
+      assert.equal(f.sheets[0].cells.at(-1)[2], 2030, 'Rows without imported identity remain untouched');
+      assert.equal(f.mutationCount(), count);
+    }
+  }
+}
 
-  assert.equal(result.migrated, true);
-  assert.equal(result.sheets.length, 1);
-  assert.equal(result.sheets[0].changedRows, 2);
-  assert.deepEqual(writes, [
-    { row: 2, header: 'Reference year', value: '2026' },
-    { row: 2, header: 'Reference month', value: '07' },
-    { row: 4, header: 'Reference month', value: '05' }
-  ]);
+function testReferencePeriodMigrationRecoversEveryMutationBoundary() {
+  for (const locale of ['en', 'it']) {
+    for (const name of ['format', 'value', 'checkpoint', 'cleanup']) {
+      const count = name === 'checkpoint' ? 5 : name === 'cleanup' ? 1 : 2;
+      for (let index = 1; index <= count; index += 1) {
+        for (const when of ['before', 'after']) {
+          const f = createReferencePeriodMigrationFixture(locale);
+          f.sheets[0].formulas[1][4] = '=TYPE(C2)';
+          f.fail(name, index, when);
+          assert.throws(f.migrate, /Injected/, [locale, name, index, when].join(':'));
+          if (name === 'checkpoint' && index === 1 && when === 'before') {
+            assert.equal(f.mutationCount(), 0, 'Initial checkpoint must precede mutation');
+          }
+          const before = f.sheets[0].cells.map(row => row.slice());
+          const writes = f.operations.filter(op => op === 'value').length;
+          f.migrate();
+          assert.equal(f.sheets[0].cells[1][2], '2026');
+          assert.equal(f.sheets[0].cells[1][3], '07');
+          assert.equal(f.sheets[0].cells[2][3], '08');
+          assert.equal(f.stored[f.key], undefined);
+          if (before[1][2] === '2026' && before[1][3] === '07') {
+            assert.equal(f.operations.filter(op => op === 'value').length - writes, 2,
+              'Completed first row must not be rewritten while second row advances');
+          }
+        }
+      }
+    }
+    // A failure on the next sheet leaves earlier rows committed.
+    const f = createReferencePeriodMigrationFixture(locale, 1, 2);
+    f.fail('format', 5, 'before');
+    assert.throws(f.migrate, /Injected/);
+    assert.equal(f.sheets[0].cells[2][3], '08');
+    const writes = f.operations.filter(op => op === 'value').length;
+    f.migrate();
+    assert.equal(f.operations.filter(op => op === 'value').length - writes, 4);
+  }
+  const baseline = createReferencePeriodMigrationFixture();
+  baseline.migrate();
+  for (const name of ['read', 'layout']) {
+    const count = baseline.operations.filter(operation => operation === name).length;
+    for (let index = 1; index <= count; index += 1) {
+      const f = createReferencePeriodMigrationFixture();
+      f.fail(name, index);
+      assert.throws(f.migrate, /Injected/);
+      assert.doesNotThrow(f.migrate, `Recovery after ${name} ${index}`);
+      assert.equal(f.sheets[0].cells[2][3], '08');
+      assert.equal(f.stored[f.key], undefined);
+    }
+  }
+}
+
+function testReferencePeriodMigrationRejectsConflictsAndInvalidCheckpoints() {
+  const changes = [
+    f => { f.sheets[0].cells[1][1] = 'CHANGED'; },
+    f => { f.sheets[0].cells[1][2] = 2030; },
+    f => { f.sheets[0].formats[1][2] = '0.00'; },
+    f => { f.sheets[0].formulas[1][2] = '=2026'; },
+    f => { f.sheets[0].formulas[1][4] = '=OTHER()'; },
+    f => { f.sheets[0].cells[0][4] = 'Changed header'; },
+    f => { f.sheets[0].cells.splice(1, 1); f.sheets[0].formulas.splice(1, 1); f.sheets[0].formats.splice(1, 1); },
+    f => { f.sheets[0].id = 12; },
+    f => { f.spreadsheet.getId = () => 'other-spreadsheet'; },
+    f => { f.sheets[0].headerRow = 2; }
+  ];
+  for (const change of changes) {
+    const f = createReferencePeriodMigrationFixture();
+    f.fail('format', 1, 'after');
+    assert.throws(f.migrate, /Injected/);
+    change(f);
+    const pending = f.stored[f.key];
+    const count = f.mutationCount();
+    assert.throws(f.migrate, /migration|requires/i);
+    assert.equal(f.mutationCount(), count, 'Conflicting state cannot be overwritten');
+    assert.equal(f.stored[f.key], pending);
+  }
+  for (const update of [() => '{', () => ' '.repeat(8001), () => 'null',
+    journal => ({ ...journal, version: 2 }), journal => ({ ...journal, extra: true }),
+    journal => ({ ...journal, row: 999 }), journal => ({ ...journal, fields: [] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], expected: '2030' }] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], prior: { type: 'date', value: 1e20 }, expected: 'Invalid Date' }] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], stage: 'unknown' }] })]) {
+    const f = createReferencePeriodMigrationFixture();
+    f.fail('format', 1, 'after');
+    assert.throws(f.migrate, /Injected/);
+    const changed = update(JSON.parse(f.stored[f.key]));
+    f.stored[f.key] = typeof changed === 'string' ? changed : JSON.stringify(changed);
+    const pending = f.stored[f.key];
+    const count = f.mutationCount();
+    assert.throws(f.migrate, /checkpoint|migration/i);
+    assert.equal(f.mutationCount(), count);
+    assert.equal(f.stored[f.key], pending);
+  }
+  const oversized = createReferencePeriodMigrationFixture();
+  oversized.sheets[0].cells[1][2] = '9'.repeat(9000);
+  assert.throws(oversized.migrate, /size limit/);
+  assert.equal(oversized.mutationCount(), 0);
+  assert.equal(oversized.stored[oversized.key], undefined);
+  const missing = createReferencePeriodMigrationFixture('en', 1, 2);
+  missing.sheets[1].cells[0][3] = 'Missing required month';
+  assert.throws(missing.migrate, /requires/);
+  assert.equal(missing.mutationCount(), 0, 'All target headers preflight before first row');
+  const presentation = createReferencePeriodMigrationFixture();
+  presentation.sheets[0].formulas[1][4] = '=TYPE(C2)';
+  presentation.fail('value', 1, 'after');
+  assert.throws(presentation.migrate, /Injected/);
+  presentation.sheets[0].formats[1][0] = 'dd/mm/yyyy';
+  presentation.sheets[0].formats[1][4] = '@';
+  presentation.sheets[0].cells[1][4] = 'recalculated';
+  assert.doesNotThrow(presentation.migrate, 'Unrelated formatting and recalculation preserve row identity');
+  assert.equal(presentation.sheets[0].formats[1][0], 'dd/mm/yyyy');
+  assert.equal(presentation.sheets[0].formats[1][4], '@');
+  const completed = createReferencePeriodMigrationFixture();
+  completed.fail('cleanup');
+  assert.throws(completed.migrate, /Injected/);
+  completed.sheets[0].cells[1][2] = 2026;
+  const count = completed.mutationCount();
+  const pending = completed.stored[completed.key];
+  assert.throws(completed.migrate, /cell changed/,
+    'A completed checkpoint cannot overwrite a later edit back to the prior numeric value');
+  assert.equal(completed.mutationCount(), count);
+  assert.equal(completed.stored[completed.key], pending);
 }
 
 function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
@@ -2510,6 +2658,8 @@ testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testSpreadsheetValidationUsesDetectedHeaderRow();
 testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas();
+testReferencePeriodMigrationRecoversEveryMutationBoundary();
+testReferencePeriodMigrationRejectsConflictsAndInvalidCheckpoints();
 testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
 testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();

@@ -296,6 +296,14 @@ Reference years and months are written as literal text. Run the idempotent
 owner-only `migrateCatalogerReferencePeriodText` function after this release
 to normalize existing imported rows; it skips formula-backed cells and does
 not change other columns.
+The migration validates configured tabs and required headers before writing,
+and checkpoints one pending row's prior and intended state. Completed rows
+remain converted. Repeat the same function after resolving a Sheets error to
+finish the pending row and resume the idempotent scan. If the recorded row
+identity, layout, or target-cell contents or formats have changed, recovery
+stops and preserves the checkpoint for inspection instead of overwriting later
+edits. Formula recalculation and unrelated cell formatting remain compatible. This
+maintenance checkpoint does not disable ordinary invoice processing.
 Post-write verification requires the exact text month, such as `06`, in both
 the native cell value and displayed text. Rollback restores the original
 snapshot, including any historical numeric period cells. When verification
