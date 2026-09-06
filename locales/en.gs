@@ -202,6 +202,21 @@ function getEnglishLocalization_() {
       }),
       emailSubject: '[Utilities] {count} PDF(s) processed'
     }),
+    numericSupplementaryHeaders: Object.freeze([
+      'Consumption quantity',
+      'Fixed charge',
+      'Transport and charges',
+      'Excise duties',
+      'Recalculations',
+      'Other energy costs',
+      'Transport and meter management',
+      'System charges',
+      'TV licence fee',
+      'Non-separable network and charges',
+      'Collection charges',
+      'Discounts',
+      'Wi-Fi extender'
+    ]),
     headerAliases: Object.freeze({
       issueDate: ['issue date'],
       supplier: ['supplier'],

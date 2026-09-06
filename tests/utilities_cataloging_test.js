@@ -146,19 +146,37 @@ function testServiceIdentityMatchesNormalizedHolderAndAddress() {
 function testServiceIdentityAcceptsConfiguredProvinceQualifier() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'FORTUNA LAURA',
-    address_evidence: 'Corso Camillo Benso Conte Di Cavour 125 - 47521 Cesena (FC)',
-    service_street: 'Corso Camillo Benso Conte Di Cavour',
+    account_holder: 'NORTH AVERY',
+    address_evidence: 'Corso Cedar Meridian Boulevard 125 - 99991 Rivermouth (FC)',
+    service_street: 'Corso Cedar Meridian Boulevard',
     service_civic_number: '125',
-    service_city: 'Cesena',
-    service_postal_code: '47521'
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
   }, {
-    account_holder: 'FORTUNA LAURA',
-    service_address: 'CORSO CAMILLO BENSO CONTE DI CAVOUR 125 47521 CESENA FC'
+    account_holder: 'NORTH AVERY',
+    service_address: 'CORSO CEDAR MERIDIAN BOULEVARD 125 99991 RIVERMOUTH FC'
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
 }
+
+function testServiceIdentityPreservesSubstantiveQualifiers() {
+  const context = loadCataloger();
+  for (const [configured, street, civic, city] of [
+    ['Via San Marco 125 Rivermouth', 'Via Santa Marco', '125', 'Rivermouth'],
+    ['Via Po 125 Rivermouth', 'Via 125', '125', 'Rivermouth'],
+    ['Via Cedar 125 San Giorgio', 'Via Cedar', '125', 'Santa Giorgio'],
+    ['Via Cedar 125/A Rivermouth', 'Via Cedar', '125', 'Rivermouth']
+  ]) {
+    const result = context.validateServiceIdentity_({
+      account_holder: 'Avery North',
+      address_evidence: `${street} ${civic} ${city}`,
+      service_street: street, service_civic_number: civic, service_city: city
+    }, { account_holder: 'Avery North', service_address: configured });
+    assert.equal(result.valid, false, configured);
+  }
+}
+testServiceIdentityPreservesSubstantiveQualifiers();
 
 function testRepeatedCareOfHolderIdentity() {
   const context = loadCataloger();
@@ -180,15 +198,15 @@ function testRepeatedCareOfHolderIdentity() {
 function testServiceIdentityIgnoresHonorificPrefix() {
   const context = loadCataloger();
   const result = context.validateServiceIdentity_({
-    account_holder: 'Sig.ra FORTUNA LAURA',
-    address_evidence: 'Corso Camillo Benso Cavour 125 - FC 47521 Cesena',
-    service_street: 'Corso Camillo Benso Cavour',
+    account_holder: 'Sig.ra NORTH AVERY',
+    address_evidence: 'Corso Cedar Meridian Boulevard 125 - FC 99991 Rivermouth',
+    service_street: 'Corso Cedar Meridian Boulevard',
     service_civic_number: '125',
-    service_city: 'Cesena',
-    service_postal_code: '47521'
+    service_city: 'Rivermouth',
+    service_postal_code: '99991'
   }, {
-    account_holder: 'FORTUNA LAURA',
-    service_address: 'CORSO CAMILLO BENSO CONTE DI CAVOUR 125 47521 CESENA FC'
+    account_holder: 'NORTH AVERY',
+    service_address: 'CORSO CEDAR MERIDIAN BOULEVARD 125 99991 RIVERMOUTH FC'
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { valid: true });
@@ -1063,6 +1081,19 @@ function testExtractionSchemaAndCalendarValidation() {
   }]);
   assert.deepEqual(JSON.parse(JSON.stringify(energygasAggregateAbsence.problems)), []);
 
+  for (const suffix of [' Il totale è ambiguo e non leggibile.',
+    ' Il totale non corrisponde.', ' Verificare un conflitto nel documento.']) {
+    const problem = 'Oneri di sistema non presente nel documento, le voci ASOS/ARIM sono subordinate o aggregate.' + suffix;
+    const invoice = context.normalizeExtraction_({
+      ...raw, supplier: 'ENERGYGAS', supply_type: 'Luce',
+      problems: [problem], sheet_values: []
+    });
+    context.applySupplierFieldDefaults_(invoice, ['Oneri di sistema']);
+    assert.equal(invoice.problems.includes(problem), true);
+    assert.equal(invoice.sheet_values.length, 0);
+    assert.equal(context.validateExtraction_(invoice).valid, false);
+  }
+
   for (const zero of ['0', '0.00', '0,00', 0]) {
     const textualZero = context.normalizeExtraction_({
       ...raw, supplier: 'ENERGYGAS', supply_type: 'Luce',
@@ -1103,6 +1134,16 @@ function testExtractionSchemaAndCalendarValidation() {
     'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.',
     energygasBandMappingExplanation
   ), true);
+
+  for (const problem of [
+    'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita monorario ma il valore è illeggibile.',
+    'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita monorario. Il totale non corrisponde.',
+    'Unit cost F1 F2 F3 populated from selling unit cost for monorate but the rate is unreadable and inconsistent.'
+  ]) {
+    assert.equal(context.validateExtraction_({
+      ...energygasBandMappingExplanation, problems: [problem]
+    }).valid, false);
+  }
 
   const energygasDetailedReconciliation = {
     ...energygasBandMappingExplanation,
@@ -1188,11 +1229,11 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.parseSheetMoneyValue_('1.234,56 €'), 1234.56);
   const repairCandidate = { cost_consumption: 50, vat: 9, total: 110 };
   context.preserveUnimplicatedRepairFields_(repairCandidate, {
-    previousExtraction: { cost_consumption: 51.68, vat: 9.65, total: 115.14 },
+    previousExtraction: { document_type: 'Invoice', cost_consumption: 51.68, cost_non_consumption: 53.81, vat: 9.65, total: 115.14 },
     feedback: { issues: [{ fields: ['Rete e oneri non scorporabili'] }] }
   });
   assert.deepEqual(repairCandidate, {
-    cost_consumption: 51.68, vat: 9.65, total: 115.14
+    cost_consumption: 51.68, cost_non_consumption: 53.81, vat: 9.65, total: 115.14
   });
   const unreconciledRepair = {
     ...energygasDetailedReconciliation, cost_consumption: 55.23,
@@ -2770,6 +2811,48 @@ function testExtractionRepairLoopPreservesLastValidExtractionAfterMalformedRepai
   assert.equal(result.validation.valid, true);
   assert.equal(repairContexts[2].previousExtraction.identifier, 'INV-LAST-VALID');
 }
+
+function testQuantityGroupingCannotBeSilentlyScaled() {
+  const context = loadCataloger();
+  context.getHeaderAliases_ = () => [];
+  for (const header of ['Consumption quantity', 'Quantità consumi']) {
+    for (const value of ['1,234', '1.234']) {
+      assert.throws(() => context.normalizeSheetValues_([{ header, value }]),
+        /nonnumeric consumption quantity/);
+      assert.throws(() => context.normalizeSheetValueForCell_(
+        { getNumberFormat: () => '0.000' }, value, header),
+      /nonnumeric consumption quantity/);
+    }
+    assert.equal(context.normalizeSheetValues_([{ header, value: '1234,56' }])[0].value,
+      1234.56);
+  }
+  assert.equal(context.normalizeSheetValues_([{ header: 'Unit cost', value: '0.123' }])[0].value, 0.123);
+}
+testQuantityGroupingCannotBeSilentlyScaled();
+
+function testMalformedRepairDoesNotFreezeInvalidFields() {
+  const context = loadCataloger();
+  let calls = 0;
+  context.callGeminiForPdf_ = () => [
+    JSON.stringify({ ...validInvoice(), identifier: '' }),
+    'not JSON', JSON.stringify(validInvoice())
+  ][calls++];
+  context.getSheetHeadersBySupply_ = () => ({ Water: [] });
+  context.normalizeExtraction_ = (value) => value;
+  context.validateRawExtractionShape_ = () => {};
+  context.inferInvoiceFrequency_ = () => {};
+  context.applySupplierFieldDefaults_ = () => {};
+  context.getConfiguredSecondaryInvoiceHeaders_ = () => [];
+  context.validateExtractedUtilityDataForImport_ = (value) => context.validateExtraction_(value);
+  context.logCatalogEvent_ = () => {};
+  const result = context.extractUtilityDataWithRepair_({
+    getBlob: () => ({}), getId: () => 'test-file', getName: () => 'invoice.pdf'
+  }, 'policy');
+  assert.equal(calls, 3);
+  assert.equal(result.extracted.identifier, 'INV-1');
+  assert.equal(result.validation.valid, true);
+}
+testMalformedRepairDoesNotFreezeInvalidFields();
 
 function testGeminiEmptyStopResponseIsRepairableOutput() {
   const context = loadCataloger({
@@ -5212,7 +5295,7 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
     headers: [
       'Total consumption costs', 'Collection charges', 'Discounts',
       'Wi-Fi extender', 'Total non-consumption costs', 'VAT', 'Total cost',
-      'Source file'
+      'Source file', 'PDR'
     ],
     lookup: {
       'total consumption costs': 1,
@@ -5222,15 +5305,15 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
       'total non-consumption costs': 5,
       vat: 6,
       'total cost': 7,
-      'source file': 8
+      'source file': 8, pdr: 9
     }
   };
-  const formulas = ['', '', '', '', '=B3+C3+D3', '', '=A3+E3+F3', ''];
+  const formulas = ['', '', '', '', '=B3+C3+D3', '', '=A3+E3+F3', '', ''];
   const sheet = {
     getLastRow: () => 3,
     getParent: () => ({ getSpreadsheetLocale: () => 'en_US' }),
     getRange: (row, column, _rows, width) => {
-      if (column === 1 && width === 8) {
+      if (column === 1 && width === 9) {
         return { getFormulas: () => [formulas] };
       }
       return {
@@ -5252,7 +5335,8 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
       { header: 'Collection charges', value: '0.00' },
       { header: 'Discounts', value: '-4.00' },
       { header: 'Wi-Fi extender', value: '3.98' },
-      { header: 'VAT', value: '0.00' }
+      { header: 'VAT', value: '0.00' },
+      { header: 'PDR', value: '00123456789012' }
     ]
   };
 
@@ -5269,11 +5353,12 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
     [3, 6, 'value', 0]
   ]);
 
-  const actualValues = [25.99, 0, -4, 3.98, -0.02, 0, 25.97, 'invoice'];
+  assert.equal(writes.find(entry => entry[1] === 9)[3].text, '00123456789012');
+  const actualValues = [25.99, 0, -4, 3.98, -0.02, 0, 25.97, 'invoice', '00123456789012'];
   const verificationSheet = {
     getLastRow: () => 3,
     getRange: (_row, column, _rows, width) => {
-      if (column === 1 && width === 8) {
+      if (column === 1 && width === 9) {
         return { getFormulas: () => [formulas] };
       }
       return {
@@ -5288,6 +5373,9 @@ function testDetailedCostSheetValuesOverrideBroadReconciliationValues() {
   };
   assert.doesNotThrow(() => context.verifyImportedRow_(verificationSheet, 3,
     layout, { getUrl: () => 'https://drive.test/file' }, extracted));
+  actualValues[8] = 123456789012;
+  assert.throws(() => context.verifyImportedRow_(verificationSheet, 3,
+    layout, { getUrl: () => 'https://drive.test/file' }, extracted), /verification failed/);
 }
 
 function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {

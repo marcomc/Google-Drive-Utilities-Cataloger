@@ -59,14 +59,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
   absence evidence for the configured zero `Oneri di sistema` default.
 - Convert the shared extraction contract to Vertex AI's `responseSchema` format
   so structured PDF extraction remains bounded and schema-constrained.
-- Accept reviewed Italian honorifics, street-name connectors, and province
-  codes when corroborating the configured supply identity, while keeping the
-  substantive street, civic number, and city mandatory.
+- Accept reviewed honorifics and trailing province codes when corroborating
+  supply identity; preserve street qualifiers, civic suffixes, and city tokens
+  so distinct addresses cannot collapse into the same identity.
 - Accept a repeated account-holder name on both sides of a postal `C/O`
   marker only when both normalized identities are identical.
-- Coerce numeric-looking supplementary sheet values according to the target
-  cell's numeric format before writing and verifying, preventing locale-based
-  date/time coercion in currency columns.
+- Convert supplementary numeric strings only in recognized quantitative
+  columns, preserve leading-zero identifiers regardless of cell format, and
+  reject ambiguous consumption grouping before import.
+- Preserve only reconciled monetary groups during repair; malformed responses
+  and unresolved fields remain correctable on the final attempt.
+- Keep conflicting or compound diagnostics blocking even when they begin with
+  accepted supplier-default or electricity-band mapping explanations.
+- Bind credential rotation to the installed Cloud project and preserve the
+  configured model, backend, paid-fallback opt-in, and cooldown.
 
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 

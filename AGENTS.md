@@ -86,7 +86,9 @@
 - At the model-to-sheet boundary, enforce each field's type contract: normalize
   reviewed unit-suffixed localized rates only in numeric unit-cost fields,
   preserve identifier text, reject ambiguous prose, and verify the resulting
-  Sheets cell type as well as its displayed value.
+  Sheets cell type as well as its displayed value. Never infer a field type
+  from cell formatting alone; cover supplementary leading-zero identifiers
+  and ambiguous quantity grouping through writes and verification.
 - Keep a classification decision canonical from admission through every
   downstream guard and final user-visible status. Discard evidence that cannot
   contribute to a decision before evaluating its identity, provenance, or trust
@@ -225,7 +227,14 @@
 - Keep localized diagnostic recognition bounded and table-driven. Cover common
   grammatical wrappers and word-order variants alongside ambiguity and mismatch
   vetoes, and verify the final validator outcome rather than the helper alone.
+  Match the entire diagnostic and retain conflicting suffix sentences even
+  after a recognized prefix.
 - Match localized spreadsheet sentinels in field context rather than as a
   cross-field union, and derive formula-backed presentation state from the
   displayed value used by the sheet. Cover locale changes and partial-field
   sentinel cases.
+- Normalize address qualifiers only in their verified component position;
+  never remove street-name, civic-suffix, or city tokens as global stop words.
+- Credential rotation must bind the handoff to the installed project and change
+  only the credential. Preserve model, backend, paid-fallback opt-in, and
+  cooldown, and test mismatched projects before any provider call or write.

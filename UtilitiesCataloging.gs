@@ -1140,23 +1140,21 @@ function preserveUnimplicatedRepairFields_(extracted, repairContext) {
     !repairContext.feedback || !Array.isArray(repairContext.feedback.issues)) {
     return;
   }
-  const implicated = Object.create(null);
-  repairContext.feedback.issues.forEach(function (issue) {
-    (issue.fields || []).forEach(function (field) {
-      implicated[String(field || '').trim()] = true;
-    });
-  });
-  [
-    'supplier', 'supply_type', 'issue_date', 'identifier', 'contract_number',
-    'customer_code', 'account_holder', 'address_evidence', 'service_street',
-    'service_civic_number', 'service_city', 'service_postal_code',
-    'reference_year', 'reference_month', 'period_start', 'period_end',
-    'cost_consumption', 'vat', 'total'
-  ].forEach(function (field) {
-    if (!implicated[field] &&
-      Object.prototype.hasOwnProperty.call(repairContext.previousExtraction, field)) {
-      extracted[field] = repairContext.previousExtraction[field];
-    }
+  const monetaryFields = ['cost_consumption', 'cost_non_consumption', 'vat', 'total'];
+  const issues = repairContext.feedback.issues;
+  // An early failure proves nothing about later identity/date validations.
+  // Preserve only a reconciled monetary group, and reopen it as a unit.
+  if (!isInvoiceCoreMonetaryReconciled_(repairContext.previousExtraction) ||
+    issues.some(function (issue) {
+      return issue.stage === 'raw-output' || !(issue.fields || []).length ||
+        issue.fields.some(function (field) {
+          return monetaryFields.indexOf(field) >= 0;
+        });
+    })) {
+    return;
+  }
+  monetaryFields.forEach(function (field) {
+    extracted[field] = repairContext.previousExtraction[field];
   });
 }
 
@@ -1173,7 +1171,7 @@ function markInvalidExtractionOutput_(error) {
 }
 
 function isModelExtractionNormalizationError_(error) {
-  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|unit cost) value\.$/
+  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|consumption quantity|unit cost) value\.$/
     .test(String(error && error.message || error));
 }
 
@@ -2001,10 +1999,8 @@ function isAddressPostalCodeToken_(token) {
   return /^\d{5}$/.test(token);
 }
 
-function isAddressQualifierToken_(token) {
-  // Italian utility addresses commonly append a two-letter province code or
-  // use a connecting word in an official street name. Keep this allow-list
-  // narrow so an omitted substantive street token remains a mismatch.
+function isAddressProvinceToken_(token) {
+  // Province codes are optional only in the trailing province position.
   return [
     'ag', 'al', 'an', 'ao', 'ap', 'aq', 'ar', 'at', 'av', 'ba', 'bg', 'bi',
     'bl', 'bn', 'bo', 'br', 'bs', 'bt', 'bz', 'ca', 'cb', 'ce', 'ch', 'cl',
@@ -2014,16 +2010,19 @@ function isAddressQualifierToken_(token) {
     'pa', 'pc', 'pd', 'pe', 'pg', 'pi', 'pn', 'po', 'pr', 'pt', 'pu', 'pv',
     'pz', 'ra', 'rc', 're', 'rg', 'ri', 'rm', 'rn', 'ro', 'sa', 'si', 'so',
     'sp', 'sr', 'ss', 'su', 'sv', 'ta', 'te', 'tn', 'to', 'tp', 'tr', 'ts',
-    'tv', 'ud', 'va', 'vb', 'vc', 've', 'vi', 'vr', 'vs', 'vt', 'vv',
-    'conte', 'di', 'del', 'della', 'dei', 'degli', 'delle', 'san', 'santa',
-    'santo'
+    'tv', 'ud', 'va', 'vb', 'vc', 've', 'vi', 'vr', 'vs', 'vt', 'vv'
   ].indexOf(String(token || '').toLowerCase()) >= 0;
 }
 
-function removeAddressQualifierTokens_(tokens) {
-  return tokens.filter(function (token) {
-    return !isAddressQualifierToken_(token);
-  });
+function removeTrailingAddressProvince_(tokens, city) {
+  const provinceIndex = tokens.length - 1;
+  if (city.length && isAddressProvinceToken_(tokens[provinceIndex]) &&
+    city.every(function (token, index) {
+      return tokens[provinceIndex - city.length + index] === token;
+    })) {
+    return tokens.slice(0, provinceIndex);
+  }
+  return tokens;
 }
 
 function hasAddressComponentPlacement_(addressTokens, components,
@@ -2111,18 +2110,10 @@ function validateServiceIdentity_(extracted, expected) {
       }
     );
   }
-  // The configured control may include a province code and official street
-  // connectors that the PDF abbreviates or omits. Normalize only those
-  // reviewed qualifiers on both sides; substantive street tokens, civic
-  // number, and city remain required and exact.
-  const configuredIdentityAddress = removeAddressQualifierTokens_(
-    configuredAddress);
-  const configuredIdentityComponents = addressComponents.map(function (
-    component) {
-    return removeAddressQualifierTokens_(component);
-  });
+  // Only a trailing province after the complete city is optional. Street,
+  // city and civic tokens remain identity evidence, including short names.
   const addressMatches = hasAddressComponentPlacement_(
-    configuredIdentityAddress, configuredIdentityComponents, true);
+    removeTrailingAddressProvince_(configuredAddress, city), addressComponents, true);
   const evidenceMatches = hasAddressComponentPlacement_(evidenceAddress,
     addressComponents, false);
   if (holder !== normalizeNameIdentity_(configured.account_holder) ||
@@ -2632,11 +2623,13 @@ function normalizeSheetValues_(sheetValues) {
       }
       normalized.value = numeric;
     }
-    if (isElectricityBandConsumptionHeader_(normalized.header) &&
+    if (isConsumptionQuantityHeader_(normalized.header) &&
       normalized.value !== null && normalized.value !== undefined) {
       const quantity = normalizeElectricityBandConsumption_(normalized.value);
       if (quantity === null) {
-        throw new Error('Gemini extraction has a nonnumeric electricity band consumption value.');
+        throw new Error(isElectricityBandConsumptionHeader_(normalized.header) ?
+          'Gemini extraction has a nonnumeric electricity band consumption value.' :
+          'Gemini extraction has a nonnumeric consumption quantity value.');
       }
       normalized.value = quantity;
     }
@@ -2656,6 +2649,12 @@ function isUnitCostHeader_(header) {
     );
     return aliases.concat(bandCosts).map(normalizeHeader_).indexOf(normalizedHeader) >= 0;
   });
+}
+
+function isConsumptionQuantityHeader_(header) {
+  return isElectricityBandConsumptionHeader_(header) ||
+    ['consumption quantity', 'quantità consumi'].map(normalizeHeader_)
+      .indexOf(normalizeHeader_(header)) >= 0;
 }
 
 function isElectricityBandConsumptionHeader_(header) {
@@ -2934,6 +2933,10 @@ function isInformationalElectricityBandMappingProblem_(problem, extracted) {
     return false;
   }
   const text = normalizeCellText_(problem);
+  if (!isStandaloneInformationalProblem_(problem) ||
+    /(?:ambigu|incert|unclear|unreadable|illeggibil|non leggibil|conflict|contradditt|mismatch|does not match|non corrispond|incoerent|inconsistent)/.test(text)) {
+    return false;
+  }
   if (!/(?:costo unitario f1 f2 f3|unit cost f1 f2 f3)/.test(text) ||
     !/(?:popolat|filled|populated)/.test(text) ||
     !/(?:costo unitario di vendita|selling unit cost)/.test(text) ||
@@ -3863,7 +3866,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
       values[normalizedHeader] !== undefined) {
       const cell = sheet.getRange(row, column);
       setLiteralSheetValue_(cell, normalizeSheetValueForCell_(
-        cell, values[normalizedHeader]));
+        cell, values[normalizedHeader], normalizedHeader));
     }
   });
 
@@ -3936,7 +3939,16 @@ function setLiteralSheetValue_(range, value) {
   range.setValue(value);
 }
 
-function normalizeSheetValueForCell_(range, value) {
+function normalizeSheetValueForCell_(range, value, header) {
+  const quantitative = isReconciliationCostHeader_(normalizeHeader_(header)) ||
+    isUnitCostHeader_(header) || isElectricityBandConsumptionHeader_(header) ||
+    Object.keys(getLocalizationRegistry_()).some(function (locale) {
+      return (getLocalizationRegistry_()[locale].numericSupplementaryHeaders || [])
+        .map(normalizeHeader_).indexOf(normalizeHeader_(header)) >= 0;
+    });
+  if (!quantitative) {
+    return value;
+  }
   if (typeof value !== 'string' || !range ||
     typeof range.getNumberFormat !== 'function') {
     return value;
@@ -3948,21 +3960,18 @@ function normalizeSheetValueForCell_(range, value) {
   if (!/[#0?]/.test(numberFormat) || /[ymdhsg]/i.test(numberFormat)) {
     return value;
   }
-  const normalized = value.trim().replace(/\s/g, '');
+  if (isConsumptionQuantityHeader_(header)) {
+    const quantity = normalizeElectricityBandConsumption_(value);
+    if (quantity === null) {
+      throw new Error('Gemini extraction has a nonnumeric consumption quantity value.');
+    }
+    return quantity;
+  }
+  const normalized = value.trim();
   if (!/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(normalized)) {
     return value;
   }
-  const lastComma = normalized.lastIndexOf(',');
-  const lastDot = normalized.lastIndexOf('.');
-  let canonical = normalized;
-  if (lastComma >= 0 && lastDot >= 0) {
-    canonical = lastComma > lastDot ?
-      normalized.replace(/\./g, '').replace(',', '.') :
-      normalized.replace(/,/g, '');
-  } else if (lastComma >= 0) {
-    canonical = normalized.replace(',', '.');
-  }
-  const numeric = Number(canonical);
+  const numeric = Number(normalized.replace(',', '.'));
   return Number.isFinite(numeric) ? numeric : value;
 }
 
@@ -4071,7 +4080,7 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     const cell = column ? sheet.getRange(row, column) : null;
     const actual = cell ? cell.getValue() : null;
     const expectedValue = cell ? normalizeSheetValueForCell_(
-      cell, expected[normalizedHeader]) : expected[normalizedHeader];
+      cell, expected[normalizedHeader], normalizedHeader) : expected[normalizedHeader];
     const matches = column === monthColumn ?
       referenceMonthValuesMatch_(actual, expectedValue) :
       sheetValuesMatch_(actual, expectedValue, extracted.issue_date);

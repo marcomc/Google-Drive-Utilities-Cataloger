@@ -257,9 +257,17 @@ three logical extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
-headers, and business rules before any Drive or Sheet mutation. Supplementary
-numeric values are written as numbers only when the destination cell has a
-numeric format; untrusted nonnumeric text remains literal rich text.
+headers, and business rules before any Drive or Sheet mutation. Recognized
+unit-rate and consumption strings normalize to numbers during extraction.
+Other supplementary numeric strings convert only for recognized quantitative
+headers with a numeric cell format. Identifier and unknown-header text remains literal even
+in numeric-formatted cells; ambiguous consumption grouping is rejected.
+Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
+handoff from the installed Cloud project and validates the new key against the
+configured model. It changes only the key, preserving the backend, model,
+paid-fallback opt-in, and cooldown. Backend changes use the separate
+`configureGeminiBackend` function.
+
 Reference years and months are written as literal text. Run the idempotent
 owner-only `migrateCatalogerReferencePeriodText` function after this release
 to normalize existing imported rows; it skips formula-backed cells and does

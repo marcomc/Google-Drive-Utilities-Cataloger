@@ -103,7 +103,7 @@ function getItalianLocalization_() {
         value: 0,
         fieldPattern: '\\boneri\\s+di\\s+sistema\\b',
         explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|è)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?(?:[.]|$)"
+        explicitAbsenceDiagnosticPattern: "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|è)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?[.]?\\s*$"
       }),
       Object.freeze({
         supplier: 'Energygas Italia',
@@ -199,6 +199,22 @@ function getItalianLocalization_() {
       }),
       emailSubject: '[Utenze] {count} PDF elaborato/i'
     }),
+    numericSupplementaryHeaders: Object.freeze([
+      'Quantità consumi',
+      'Quota fissa',
+      'Trasporto e oneri',
+      'Accise',
+      'Ricalcoli',
+      'Altri costi materia energia',
+      'Trasporto e gestione contatore',
+      'Oneri di sistema',
+      'Canone TV',
+      'Rete e oneri non scorporabili',
+      'Spese d’incasso',
+      'Spese d\'incasso',
+      'Sconti',
+      'Wi-Fi extender'
+    ]),
     headerAliases: Object.freeze({
       issueDate: ['data di emissione'],
       supplier: ['fornitore'],

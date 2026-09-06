@@ -683,31 +683,33 @@ function readInstallerBootstrapOptions_(options) {
  * existing installation handoff ownership checks remain in force.
  */
 function rotateGeminiDeveloperApiKeyFromSecret(options) {
-  const privateOptions = readInstallerBootstrapOptions_(options);
-  const apiKey = String(privateOptions.geminiApiKey || '').trim();
-  const model = normalizeGeminiModel_(privateOptions.geminiModel);
-  const apiProjectId = String(privateOptions.geminiApiProjectId || '').trim();
-  if (!apiKey) {
-    throw new Error('Gemini Developer API key is missing from the handoff.');
-  }
-  if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(apiProjectId)) {
-    throw new Error('Gemini API project identity is invalid.');
-  }
-  validateInstallerGeminiDeveloperApi_({
-    geminiApiKey: apiKey,
-    geminiModel: model
-  });
-
-  const properties = PropertiesService.getScriptProperties();
-  withCatalogLifecycleLock_('gemini-api-key-rotation', function () {
+  return withCatalogLifecycleLock_('gemini-api-key-rotation', function () {
+    const properties = PropertiesService.getScriptProperties();
+    const installedProject = properties.getProperty(
+      CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
+    if (!installedProject) {
+      throw new Error('Configure the installation Cloud project before key rotation.');
+    }
+    const privateOptions = readInstallerBootstrapOptions_(options);
+    if (privateOptions.projectId !== installedProject) {
+      throw new Error('Credential handoff does not match the installed Cloud project.');
+    }
+    const apiKey = String(privateOptions.geminiApiKey || '').trim();
+    const apiProjectId = String(privateOptions.geminiApiProjectId || '').trim();
+    if (!apiKey) {
+      throw new Error('Gemini Developer API key is missing from the handoff.');
+    }
+    if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(apiProjectId)) {
+      throw new Error('Gemini API project identity is invalid.');
+    }
+    validateInstallerGeminiDeveloperApi_({
+      geminiApiKey: apiKey,
+      geminiModel: getGeminiModel_()
+    });
     properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY, apiKey);
-    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_MODEL, model);
-    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_BACKEND, 'gemini_api');
-    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_AUTO_VERTEX_FALLBACK, 'true');
-    properties.deleteProperty(CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL);
-  });
-  return Object.assign(getSetupStatus(), {
-    geminiApiProjectId: apiProjectId
+    return Object.assign(getSetupStatus(), {
+      geminiApiProjectId: apiProjectId
+    });
   });
 }
 

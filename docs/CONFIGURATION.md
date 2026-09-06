@@ -166,9 +166,9 @@ retain the printed holder and address, so address changes remain visible in the
 historical record.
 
 Comparison ignores case, punctuation, repeated whitespace, line breaks, common
-Italian street abbreviations, reviewed honorific prefixes, street-name
-connectors, and province codes. Street, civic number, and city must all be
-present; field order, CAP, and formatting do not have to match. A missing
+Italian street abbreviations, reviewed honorific prefixes, and a trailing
+province code after the complete city. Street-name connectors and qualifiers
+remain significant, as do every civic-number and city token; field order, CAP, and formatting do not have to match. A missing
 control value or mismatch produces `NEEDS REVIEW` without changing Drive or
 Sheets, except for the explicit pristine-tab first-import bootstrap above.
 
