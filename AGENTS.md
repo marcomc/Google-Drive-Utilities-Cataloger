@@ -62,6 +62,10 @@
 - When a Gemini model has no verified Vertex price table, keep provider token
   counts in usage telemetry but omit cost-estimate fields; test the caller-level
   event payload as well as the pricing helper.
+- Treat successful provider metadata discovery as distinct from generation
+  readiness. Use a bounded minimal generation probe when inference availability
+  matters, and compare credential identity, endpoint, payload, and observation
+  time before correlating failures from different requests.
 - For structured output from thinking models, set and test explicit thinking
   and response budgets; log the finish reason without logging document data,
   and fail closed unless the provider explicitly reports a successful terminal
