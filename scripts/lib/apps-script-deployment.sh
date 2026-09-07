@@ -215,91 +215,15 @@ read_apps_script_version_content() {
 
 validate_apps_script_version_entrypoints() {
   local content_json="$1"
-  shift
-  local entrypoint
   local sources_json
+  local helper_dir
 
-  sources_json="$(jq -c '[.files[]? | select((.type? == "SERVER_JS" or .type? == null) and (.source | type == "string")) | .source]' <<<"${content_json}")" || {
+  helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
+  sources_json="$(jq -ec '[.files[]? | select((.type? == "SERVER_JS" or .type? == null) and (.source | type == "string")) | .source]' <<<"${content_json}")" || {
     printf '%s\n' 'Apps Script version content sources were invalid.' >&2
     return 1
   }
-
-  for entrypoint in "$@"; do
-    if ! printf '%s' "${sources_json}" | node -e '
-      const entrypoint = process.argv[1];
-      let input = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => { input += chunk; });
-      process.stdin.on("end", () => {
-        const sources = JSON.parse(input);
-        const isTopLevel = (source) => {
-          let depth = 0;
-          let state = "code";
-          let previousSignificantCharacter = null;
-          let hasLineBreakSincePreviousSignificantCharacter = false;
-          const isFunctionDeclaration = () => {
-            if (previousSignificantCharacter === null ||
-                previousSignificantCharacter === ";" ||
-                previousSignificantCharacter === "}") return true;
-            return hasLineBreakSincePreviousSignificantCharacter &&
-              !"=([{,:?+-*/%!&|^~<>".includes(previousSignificantCharacter);
-          };
-          for (let i = 0; i < source.length; i += 1) {
-            const character = source[i];
-            const next = source[i + 1];
-            if (state === "line-comment") {
-              if (character === "\n") {
-                state = "code";
-                hasLineBreakSincePreviousSignificantCharacter = true;
-              }
-              continue;
-            }
-            if (state === "block-comment") {
-              if (character === "*" && next === "/") { state = "code"; i += 1; }
-              if (character === "\n") hasLineBreakSincePreviousSignificantCharacter = true;
-              continue;
-            }
-            if (state === "single" || state === "double" || state === "template") {
-              if (character === "\\") { i += 1; continue; }
-              if ((state === "single" && character === String.fromCharCode(39)) ||
-                  (state === "double" && character === String.fromCharCode(34)) ||
-                  (state === "template" && character === String.fromCharCode(96))) {
-                state = "code";
-                previousSignificantCharacter = "v";
-                hasLineBreakSincePreviousSignificantCharacter = false;
-              }
-              continue;
-            }
-            if (/\s/.test(character)) {
-              if (character === "\n" || character === "\r") {
-                hasLineBreakSincePreviousSignificantCharacter = true;
-              }
-              continue;
-            }
-            if (character === "/" && next === "/") { state = "line-comment"; i += 1; continue; }
-            if (character === "/" && next === "*") { state = "block-comment"; i += 1; continue; }
-            if (character === String.fromCharCode(39)) { state = "single"; continue; }
-            if (character === String.fromCharCode(34)) { state = "double"; continue; }
-            if (character === String.fromCharCode(96)) { state = "template"; continue; }
-            if (depth === 0 && isFunctionDeclaration() &&
-                source.slice(i).match(new RegExp("^(?:async\\s+)?function\\s+" + entrypoint + "\\s*\\("))) {
-              return true;
-            }
-            if (character === "{") { depth += 1; }
-            if (character === "}") { depth = Math.max(0, depth - 1); }
-            previousSignificantCharacter = character;
-            hasLineBreakSincePreviousSignificantCharacter = false;
-          }
-          return false;
-        };
-        process.exit(sources.some(isTopLevel) ? 0 : 1);
-      });
-    ' "${entrypoint}"; then
-      printf 'Apps Script version is missing required entrypoint %s.\n' \
-        "${entrypoint}" >&2
-      return 1
-    fi
-  done
+  printf '%s' "${sources_json}" | node "${helper_dir}/apps-script-entrypoints.js"
 }
 
 validate_owner_only_api_deployment() {
@@ -341,6 +265,99 @@ validate_owner_only_api_deployment() {
   fi
 }
 
+list_apps_script_resources() {
+  local auth_file="$1"
+  local script_id="$2"
+  local collection="$3"
+  local result_variable="$4"
+  local access_token response_json http_response http_status request_url encoded_token
+  local page_number next_token="" seen_tokens='[]' resources_json='[]'
+
+  if [[ ! "${script_id}" =~ ^[A-Za-z0-9_-]+$ ||
+    ! "${collection}" =~ ^(versions|deployments)$ ]]; then
+    printf '%s\n' 'Invalid Apps Script discovery identity.' >&2
+    return 1
+  fi
+  # This CLI read only refreshes authorization. Its truncated output is never
+  # used to establish absence or uniqueness; REST pagination proves those.
+  if ! run_apps_script_clasp_json "${auth_file}" "" deployments; then
+    return 1
+  fi
+  access_token="$(jq -er '.tokens.default.access_token |
+    select(type == "string" and length > 0)' "${auth_file}" 2>/dev/null)" || {
+    printf '%s\n' 'The clasp authorization does not contain a usable access token.' >&2
+    return 1
+  }
+  for ((page_number = 1; page_number <= 10; page_number += 1)); do
+    request_url="https://script.googleapis.com/v1/projects/${script_id}/${collection}?pageSize=100"
+    if [[ -n "${next_token}" ]]; then
+      encoded_token="$(jq -rn --arg token "${next_token}" '$token | @uri')" || return 1
+      request_url+="&pageToken=${encoded_token}"
+    fi
+    if ! http_response="$(printf 'Authorization: Bearer %s\nAccept: application/json\n' \
+      "${access_token}" | curl --silent --show-error --header @- \
+      --write-out $'\n%{http_code}' "${request_url}" 2>/dev/null)"; then
+      printf '%s\n' 'Apps Script discovery transport failed.' >&2
+      return 1
+    fi
+    if [[ "${http_response}" != *$'\n'* ]]; then
+      printf '%s\n' 'Apps Script discovery returned no HTTP status.' >&2
+      return 1
+    fi
+    http_status="${http_response##*$'\n'}"
+    response_json="${http_response%$'\n'*}"
+    if [[ "${http_status}" != 200 ]]; then
+      printf '%s\n' 'Apps Script discovery request failed.' >&2
+      return 1
+    fi
+    if ! jq -e --arg collection "${collection}" --arg script_id "${script_id}" '
+      def positive_integer: type == "number" and . > 0 and . == floor;
+      type == "object" and
+      ((has($collection) | not) or (.[$collection] | type == "array")) and
+      ((has("nextPageToken") | not) or (.nextPageToken | type == "string")) and
+      all(.[$collection][]?;
+        if $collection == "versions" then
+          .scriptId == $script_id and (.versionNumber | positive_integer) and
+          ((has("description") | not) or (.description | type == "string"))
+        else
+          (.deploymentId | type == "string" and test("^[A-Za-z0-9_-]+$")) and
+          .deploymentConfig.scriptId == $script_id and
+          (.deploymentConfig.versionNumber == null or
+            (.deploymentConfig.versionNumber | positive_integer)) and
+          ((.deploymentConfig | has("description") | not) or
+            (.deploymentConfig.description | type == "string"))
+        end)
+    ' <<<"${response_json}" >/dev/null 2>&1; then
+      printf '%s\n' 'Apps Script discovery returned invalid resource identity or pagination.' >&2
+      return 1
+    fi
+    resources_json="$(jq -cn --argjson existing "${resources_json}" \
+      --argjson page "${response_json}" --arg collection "${collection}" \
+      '$existing + ($page[$collection] // [])')" || return 1
+    if ! jq -e --arg collection "${collection}" '
+      map(if $collection == "versions" then .versionNumber else .deploymentId end) |
+      length == (unique | length)
+    ' <<<"${resources_json}" >/dev/null; then
+      printf '%s\n' 'Apps Script discovery returned duplicate resource identities.' >&2
+      return 1
+    fi
+    next_token="$(jq -r '.nextPageToken // ""' <<<"${response_json}")" || return 1
+    if [[ -z "${next_token}" ]]; then
+      printf -v "${result_variable}" '%s' "${resources_json}"
+      return 0
+    fi
+    if jq -e --arg token "${next_token}" 'index($token) != null' \
+      <<<"${seen_tokens}" >/dev/null; then
+      printf '%s\n' 'Apps Script discovery repeated a page token.' >&2
+      return 1
+    fi
+    seen_tokens="$(jq -c --arg token "${next_token}" '. + [$token]' \
+      <<<"${seen_tokens}")" || return 1
+  done
+  printf '%s\n' 'Apps Script discovery exceeded its complete-pagination limit.' >&2
+  return 1
+}
+
 find_owner_only_api_deployment() {
   local auth_file="$1"
   local script_id="$2"
@@ -353,10 +370,8 @@ find_owner_only_api_deployment() {
   local match_count=0
 
   deployments_json=""
-  if ! run_apps_script_clasp_json \
-    "${auth_file}" \
-    deployments_json \
-    deployments; then
+  if ! list_apps_script_resources \
+    "${auth_file}" "${script_id}" deployments deployments_json; then
     return 1
   fi
   if ! jq -e 'type == "array"' <<<"${deployments_json}" >/dev/null; then

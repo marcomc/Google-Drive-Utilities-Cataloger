@@ -238,6 +238,11 @@ spreadsheet-state errors stop without spending another model call. A repair is
 also deferred when the shared Apps Script runtime budget is nearly exhausted,
 so the file can retain a retryable outcome. The model can revise extracted data
 and evidence but cannot change validation or import policy.
+Repairs preserve monetary fields only after their relevant validators pass and
+the next failure leaves that group unaffected. Identity, period, and disputed
+amounts remain eligible for correction; a conflicting inferred frequency reopens the printed period
+and reference-date fields for re-examination. Neither condition relaxes the
+final reconciliation or historical-frequency checks.
 Structured logs record each validation outcome, targeted repair request,
 successful repair, and exhausted three-call loop using only file ID, attempt
 counts, validation stage, and issue code; extracted document values are not
@@ -252,13 +257,59 @@ three logical extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
-headers, and business rules before any Drive or Sheet mutation.
-Post-write verification treats `6`, `06`, and the numeric value `6` as the same
-reference month. When a verification comparison fails, the recipient report
-includes the affected field and the expected and observed values (plus a money
-tolerance where applicable). Other failures report the phase, reason, and
-recommended action rather than inventing a comparison. This equivalence is not
-applied to invoice, contract, or customer identifiers.
+headers, and business rules before any Drive or Sheet mutation. Recognized
+unit-rate and consumption strings normalize to numbers during extraction.
+Other supplementary numeric strings convert for recognized quantitative
+headers independently of cell formatting. Identifier and unknown-header text
+remains literal; ambiguous monetary, consumption, and unit-rate grouping is
+rejected. Native numeric rates and unambiguous high-precision rate strings keep
+their precision. Three-digit groups separated by spaces, nonbreaking spaces,
+or narrow nonbreaking spaces are accepted; malformed grouping remains blocking.
+Readback verification requires literal text cells for identifiers and reference
+periods and preserves rate and quantity precision. Informational diagnostics
+must match a complete supported statement; additional blocking clauses remain
+unresolved. Ordinary field-label colons and supported affirmative VAT wording
+remain informational. Supplier defaults apply only to the matching supplier
+and supply; other invoices retain generic optional-field handling. A verified
+absent detail contributes no amount to a fully configured cost partition, whose
+remaining values must still reconcile. A malformed repair cannot replace the
+last sanitized extraction.
+
+For Energygas electricity, each complete printed representation must reconcile
+to the selling consumption cost: aggregate quantity multiplied by its selling
+rate, or the sum of each band's quantity multiplied by its own rate. Different
+band rates are supported. When both representations are present, their total
+quantities must also agree. An aggregate-only invoice can use the default
+band-only spreadsheet when the complete band breakdown is explicitly absent;
+partial band values or contradictory absence diagnostics remain blocking.
+The optional extraction fields `electricity_consumption_quantity` and
+`electricity_selling_unit_rate` retain printed aggregate evidence for validation
+and repair without adding spreadsheet columns or inventing band values.
+
+Credential rotation through `rotateGeminiDeveloperApiKeyFromSecret` requires a
+handoff from the installed Cloud project and validates the new key against the
+configured model. It changes only the key, preserving the backend, model,
+paid-fallback opt-in, and cooldown. Backend changes use the separate
+`configureGeminiBackend` function.
+
+Reference years and months are written as literal text. Run the idempotent
+owner-only `migrateCatalogerReferencePeriodText` function after this release
+to normalize existing imported rows; it skips formula-backed cells and does
+not change other columns.
+The migration validates configured tabs and required headers before writing,
+and checkpoints one pending row's prior and intended state. Completed rows
+remain converted. Repeat the same function after resolving a Sheets error to
+finish the pending row and resume the idempotent scan. If the recorded row
+identity, layout, or target-cell contents or formats have changed, recovery
+stops and preserves the checkpoint for inspection instead of overwriting later
+edits. Formula recalculation and unrelated cell formatting remain compatible. This
+maintenance checkpoint does not disable ordinary invoice processing.
+Post-write verification requires the exact text month, such as `06`, in both
+the native cell value and displayed text. Rollback restores the original
+snapshot, including any historical numeric period cells. When verification
+fails, the recipient report includes the field and expected and observed values
+(plus a money tolerance where applicable). Other failures report the phase,
+reason, and recommended action rather than inventing a comparison.
 
 ## Operations
 
@@ -266,8 +317,10 @@ applied to invoice, contract, or customer identifiers.
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
 | `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
-| `processSingleIntakeFile(fileId)` | Controlled single-file test. | May process that intake PDF. |
+| `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
+| `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
+| `migrateCatalogerReferencePeriodText` | One-time or repeatable post-release maintenance. | Converts existing non-formula reference year/month cells to literal text without changing other fields. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
@@ -282,6 +335,59 @@ history is used. Conflicting, unavailable, or insufficient evidence leaves a
 blocking diagnostic; it never copies a transaction-specific value from another
 invoice. An explicit printed frequency or reviewed configuration override
 remains authoritative.
+
+On 2026-09-05, the live Drive policy was updated to return null cadence and
+provenance when cadence is unprinted, without reporting that absence alone as
+a problem. It now explicitly distinguishes the current billed consumption
+period from offer-validity, cumulative-spending, and historical periods.
+The separately uploaded policy was verified by an exact byte-for-byte read-back;
+conflicting or unreadable printed periods remain blocking.
+The same day's reviewed policy update also reserves `problems` for unresolved
+document issues rather than explanations of successful mappings. Its separate
+Drive upload was verified byte for byte. Numeric unit-cost normalization accepts
+plain rates and recognized euro-per-unit suffixes only in localized unit-cost
+headers; ambiguous prose is rejected before import, and identifiers stay text.
+
+The 2026-09-05 regression run automatically reimported five Energygas electricity
+PDFs and five OENERGY gas PDFs through the normal journaled pipeline on Vertex
+AI. Existing literal row values were cleared and replaced from fresh extraction;
+no operator-supplied extraction payload was accepted. An independent final Sheets
+and Drive read verified all ten invoice identities, numeric amounts and unit
+rates, literal reference years/months, calculation formulas, unchanged PDF bytes,
+and the configured archive destinations. No PDFs remained in intake. Older gas
+PDFs previously stored directly under the supplier folder were archived into its
+configured year folder, and source links were refreshed accordingly.
+The subsequent Developer API generation probe still returned HTTP 503 for high
+demand; successful Vertex imports do not establish Developer API availability.
+On 2026-09-06, another real PDF probe confirmed the same Developer API 503.
+With explicit owner authorization, the installation was switched persistently
+to `vertex_ai`, retaining `gemini-flash-latest` and the Developer API credentials.
+This settings-only change does not alter the automatic paid-fallback criteria.
+The fresh ten-invoice Sheets/Drive audit passed again, with no intake PDFs;
+deployment 84, project HEAD, and the reviewed live policy remained unchanged.
+Fresh read-only extraction previews of the latest gas and electricity PDFs
+passed on the retained Vertex backend, matching the reviewed numeric values
+without operator-supplied extraction (three and two model calls respectively,
+including automatic repair). The full `make check` suite also passed.
+At 20:27 UTC on 2026-09-06, a separate policy audit verified all 26 changed
+template-rule checks against the live `AGENTS.md`. The current owner-only
+deployment's setup, Workspace Events target, spreadsheet parent and unique
+policy file identified the installation's configured intake folder.
+All 13 Energygas/OENERGY detailed-cost checks were already covered, including
+the power-quota network sum, ASOS/ARIM exclusions, printed IVA, Canone TV,
+regional excise additions and explanatory credit exclusions. One general
+secondary-field clause still prohibited every zero value; a conditional update
+aligned it with the existing supplier rules, allowing only a reviewed
+supplier-specific zero default after explicit absence evidence.
+The single-clause update used the file ETag, retained a private preimage and
+journal, and passed exact byte-for-byte read-back and all 26 policy checks.
+Verified UTF-8 content: 21,114 bytes, SHA-256
+`f0c9256cfbaa6d9ab938b48a0d1f31adbcc3cbc34f01ab1a487ca4cff7aff3cd`.
+This was a policy-only update; its private identity and read-back evidence is
+retained under `.git/codex-pr16/b9-policy-*`.
+Private snapshots and reproducible audit scripts are retained under the ignored
+`.installer/validation/automatic-reimport-20260905/` directory, not published with
+the source repository.
 
 Explicit absence or non-applicability of a configured writable secondary field
 is non-blocking only after monetary reconciliation and only when the matching
@@ -434,22 +540,46 @@ unprovenanced row.
 `gemini-generation-request` is emitted once for each outbound model request.
 Count this event by file ID to detect retries or redundant processing; a normal
 file has one request and one `gemini-generation-response` event. A successful
-response also records the provider `finishReason`; values other than `STOP`
-fail before parsing or mutating Drive and Sheets.
+response also records the provider `finishReason`: Vertex requires `STOP`, and
+Interactions requires root status `completed` (logged as `COMPLETED`). Other
+statuses fail before parsing or mutating Drive and Sheets.
 
 Each successful response also emits `gemini-generation-usage`. It records the
 provider-reported `promptTokenCount`, `candidatesTokenCount`,
-`thoughtsTokenCount`, and `totalTokenCount` for that file. When the selected
-Vertex model has a price table encoded in `Config.gs`, the event also includes
+`thoughtsTokenCount`, `cachedContentTokenCount`, and `totalTokenCount` for that
+file. Missing or unusable provider accounting sets `usageMetadataPresent` to
+false; it does not establish zero-token usage. A reported numeric zero remains
+valid metadata. When the selected Vertex model has a price table encoded in
+`Config.gs` and the provider reports every required input, output and thinking
+count, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
-The default `gemini-3.7-flash` runtime uses explicit `medium` thinking and an
-8,192-token JSON response budget. The same model and generation settings are
-sent to the Gemini Developer API and the temporary Vertex AI fallback. Until a
-verified Vertex price is added to `Config.gs`, usage events for Gemini 3.7 and
-other unpriced models retain provider token counts but intentionally omit cost
-estimate fields; Cloud Billing remains authoritative.
+The default `gemini-flash-latest` Developer API runtime uses Google's
+Interactions API with explicit `medium` thinking, an 8,192-token JSON response
+budget, the shared JSON Schema contract, and `store:false` for stateless invoice
+processing. Vertex AI continues to use `generateContent` with the same alias
+and output budget plus an explicit `thinkingBudget: 4096` to retain reasoning
+for aggregate and subordinate invoice cost rows. Vertex receives the shared
+extraction contract converted to its OpenAPI-style `responseSchema`. The alias
+may resolve to a newer Flash release without a source or Script Properties
+update.
+The Interactions parser follows Google's current
+[REST steps schema](https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026),
+which replaced legacy `outputs`; a completed response can omit per-step status.
+Vertex schema conversion preserves nullable enums, mixed primitive value types,
+and reference-month patterns using the supported
+[Schema fields](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/Schema).
+Until a verified Vertex price is added to `Config.gs`, usage events for the
+alias and other unpriced models retain provider token counts but intentionally
+omit cost-estimate fields; Cloud Billing remains authoritative.
+
+If the Developer API returns a transient outage such as HTTP 503 and imports
+must be recovered immediately, an owner may use `configureGeminiBackend` to
+select the configured Vertex AI backend and run the controlled retry. Restore
+`gemini_api` after temporary recovery unless the owner explicitly authorizes
+keeping Vertex AI active with usage-based billing. Do not turn a status code
+alone into automatic paid-backend fallback.
 
 ```bash
 gcloud logging read \

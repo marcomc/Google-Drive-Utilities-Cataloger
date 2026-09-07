@@ -82,6 +82,9 @@ manual review.
   character; use numbers only for quantities, money, rates, and measurements.
 - Store the reference month as the two-character text value `mm` (`01` through
   `12`), never as an unpadded or numeric value.
+- Store the reference year as four-digit literal text, never as a numeric
+  value. Preserve the exact configured canonical supplier spelling and case;
+  do not replace it with a filename abbreviation or uppercase fallback.
 - Keep a printed contract number and customer/client code in separate destination
   columns. Never substitute one for the other.
 - For invoice ownership, accept either a printed contract number or a printed
@@ -102,27 +105,43 @@ manual review.
   A difference beyond a few cents blocks the import.
 - A note that line items include VAT is not itself an uncertainty when the
   invoice shows VAT and total explicitly and that reconciliation succeeds.
+- When a final payable total is printed, treat it as authoritative and preserve
+  the printed VAT. Never recalculate a different total from an assumed tax
+  treatment for Canone TV or use VAT, a detail, or the total as a balancing
+  residual.
 - When billing frequency is not printed, the runtime may infer monthly,
   bimonthly, or quarterly cadence from a complete billed period or verified
   independent earlier invoices for the same supplier and supply. Conflicting,
   unavailable, or insufficient cadence evidence blocks import. Never copy
   transaction-specific values from earlier invoices.
+  Return `frequency` and `frequency_source_evidence` as null in that case;
+  do not report the mere absence of printed cadence as a problem or infer it
+  in the model. Extract the current billed consumption period, corroborated
+  by the invoice reference period, not offer validity, cumulative spending, or
+  historical periods. Unreadable or conflicting printed period evidence remains
+  blocking.
 - Treat a non-inferred cadence as authoritative only when extraction marks it
   as printed. Reviewed configuration overrides remain authoritative. Missing
   provenance, invalid provenance, and unsupported model prose block import.
 - An unreadable or ambiguous configured secondary field blocks import. Inspect
   other current-document tables before reporting the diagnostic. The reviewed
   subscriber-identifier, tax-inclusion, and supplier-default exceptions remain
-  narrow and unchanged.
+  narrow and supplier-specific.
 - A configured secondary-field absence is non-blocking only when its exact
   normalized `sheet_values` entry is omitted or has value `null`. Empty text,
-  zero, false, or duplicate normalized entries remain blocking.
+  false, or duplicate normalized entries remain blocking. A reviewed supplier
+  default may materialize numeric zero only after that supplier-specific
+  absence evidence; never use a generic zero default.
 - When deterministic validation rejects repairable extracted document data,
   the runtime may request at most two targeted re-extractions after the initial
   model call. Re-examine the complete PDF, focus on the structured issue codes
   and fields, preserve unrelated supported values unless the PDF contradicts
   them, and return the complete extraction object. The model may correct data
   and evidence but never decides import policy.
+  The `problems` array is not a commentary field: do not include explanations
+  of successful policy-compliant mappings. During repair, remove such notes
+  rather than replacing them with further explanations. Retain unresolved
+  missing required evidence, unreadability, ambiguity, and contradictions.
 - When a sheet has detailed cost columns and calculated totals, assign each
   charge to one cost category only. Do not include a detailed charge in a
   summary cost field when the sheet formula already includes that detail.
@@ -136,6 +155,40 @@ manual review.
   the matching existing spreadsheet headers, even when the contract is
   monoraria and the unit price is identical across all bands. Do not collapse
   those values into F0, a total-only field, or a single summary field.
+- For a monoraria electricity bill with one printed selling rate, write that
+  same selling rate to the base unit-cost column and the F1, F2, and F3
+  unit-cost columns when those band quantities are printed. Do not use the
+  network-inclusive rate as the selling unit cost. Keep transport/meter,
+  system-charge, and recalculation columns at reviewed zero only when their
+  explicit absence or non-applicability is established.
+- For Energygas electricity bills, put the fixed selling amount in `Altri
+  costi materia energia`, sum the printed network/oneri amounts for consumption,
+  fixed quota, and power quota once in `Rete e oneri non scorporabili`, and do
+  not map subordinate ASOS/ARIM detail rows into `Oneri di sistema`. Keep
+  `Totale costi consumo` equal to the selling consumption amount only; keep
+  `Accise` and `Canone TV` separate and never include either in
+  `Rete e oneri non scorporabili`. Never use a detailed field, VAT, or total as
+  a balancing residual. If the printed `Totale da pagare` includes
+  `Canone TV`, include that amount in the reconciliation total because the
+  target `Costo totale` formula includes it.
+  Preserve the printed IVA exactly; if detail rows do not reconcile, recheck the
+  printed cost rows and total selection rather than changing IVA to balance it.
+- For gas bills with separate `di cui spesa per vendita` and `di cui spesa per
+  rete e oneri generali di sistema` rows, put the selling portions in the
+  consumption and fixed-cost fields, sum the consumption and fixed network or
+  oneri portions once in `Trasporto e oneri`, and do not use broad quota totals
+  in both categories. Verify that `Quota fissa` + `Trasporto e oneri` +
+  `Accise` + `Ricalcoli` equals the non-consumption total and that `Totale
+  costi consumo` equals the consumption total. If no applied recalculation
+  amount is printed, use the reviewed `Ricalcoli` zero default only after
+  explicit absence evidence. When network/oneri amounts are printed under both
+  consumption and fixed quota, include both in `Trasporto e oneri`; read
+  `Accise` by summing every printed amount in the `ACCISE e ADDIZIONALI`
+  section, including regional additions, rather than deriving it from VAT or
+  using only `Accisa complessivamente applicata` when it omits additions.
+  Do not subtract an explanatory negative or credit line such as `Oneri generali di
+  sistema` from those positive summary amounts unless the line is explicitly part
+  of the payable summary; it is not a balancing adjustment.
 - Preserve the document's units and period for each band. Distinguish kWh
   consumption from euro cost and do not derive a band value from the total
   when the document does not provide that band value. If a reported band is

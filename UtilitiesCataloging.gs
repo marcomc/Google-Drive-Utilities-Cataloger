@@ -13,14 +13,57 @@ function retryFailedUtilitiesCataloging() {
   return runUtilitiesCataloging_('manual_retry');
 }
 
+/** Run the normal model/validation path without changing an invoice or row. */
+function previewUtilityInvoiceExtraction(fileId) {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
+  assertCatalogConfiguration_();
+  return withCatalogProcessingLock_('extraction-preview', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    const file = DriveApp.getFileById(fileId);
+    if (file.getMimeType() !== MimeType.PDF || file.isTrashed()) {
+      throw new Error('Preview requires a non-trashed PDF.');
+    }
+    if (file.getSize() > CONFIG.MAX_PDF_BYTES) {
+      throw new Error('Preview PDF exceeds the inline request size limit.');
+    }
+    const queue = [file];
+    const visited = Object.create(null);
+    let insideRoot = false;
+    while (queue.length && !insideRoot) {
+      const parents = queue.shift().getParents();
+      while (parents.hasNext()) {
+        const parent = parents.next();
+        if (parent.getId() === rootFolder.getId()) {
+          insideRoot = true;
+          break;
+        }
+        if (!visited[parent.getId()]) {
+          visited[parent.getId()] = true;
+          queue.push(parent);
+        }
+      }
+    }
+    if (!insideRoot) {
+      throw new Error('Preview PDF is outside the configured intake tree.');
+    }
+    return extractUtilityDataWithRepair_(file,
+      loadTrustedExtractionPolicy_(rootFolder), deadlineAt);
+  });
+}
+
 /**
- * Manually process one file already in the direct intake folder.
+ * Manually start automatic extraction of one direct-intake PDF.
  */
 function processSingleIntakeFile(fileId) {
   const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
+  if (arguments.length !== 1) {
+    throw new Error('Only a PDF file ID is accepted; extraction must be automatic.');
+  }
   assertCatalogConfiguration_();
   return withCatalogProcessingLock_('manual', function () {
-    return processSingleIntakeFileWithinLock_(fileId, deadlineAt);
+    return processSingleIntakeFileWithinLock_(
+      fileId, deadlineAt
+    );
   });
 }
 
@@ -293,8 +336,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
 
     const binaryHash = sha256ForFile_(file);
     const extractionResult = extractUtilityDataWithRepair_(
-      file, driveAgentsPolicy, processingDeadlineAt
-    );
+      file, driveAgentsPolicy, processingDeadlineAt);
     const extracted = extractionResult.extracted;
     state.extracted = extracted;
     const validation = extractionResult.validation;
@@ -854,7 +896,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
       if (!error.invalidExtractionOutput) {
         throw error;
       }
-      extracted = error.extractionSnapshot || lastValidExtraction || {};
+      extracted = lastValidExtraction || error.extractionSnapshot || {};
       validation = withExtractionValidationStage_(invalidExtraction_(
         'Gemini returned extraction JSON that failed deterministic validation.',
         'Re-examine the PDF and return a complete object matching the required schema.',
@@ -880,6 +922,9 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
             issueStage: validation.stage
           }
         ));
+        if (lastValidExtraction) {
+          error.extractionSnapshot = lastValidExtraction;
+        }
         throw error;
       }
     }
@@ -928,6 +973,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
     });
     repairContext = {
       attempt: attempt + 1,
+      monetaryValidated: extracted.monetary_validated_ === true,
       previousExtraction: buildExtractionRepairSnapshot_(extracted),
       feedback: feedback,
       history: history.slice()
@@ -967,12 +1013,33 @@ function assertExtractionRepairBudget_(file, deadlineAt, nextAttempt, validation
 }
 
 function validateExtractedUtilityDataForImport_(extracted) {
+  Object.defineProperty(extracted, 'monetary_validated_', {
+    value: false, enumerable: false, configurable: true
+  });
+  const detailedCostValidation = withExtractionValidationStage_(
+    validateEnergygasLuceDetailedReconciliation_(extracted),
+    'energygas-detail-reconciliation'
+  );
+  if (!detailedCostValidation.valid) {
+    return detailedCostValidation;
+  }
+  const gasCostValidation = withExtractionValidationStage_(
+    validateOenergyGasDetailedReconciliation_(extracted),
+    'oenergy-gas-detail-reconciliation'
+  );
+  if (!gasCostValidation.valid) {
+    return gasCostValidation;
+  }
   let validation = withExtractionValidationStage_(
     validateExtraction_(extracted), 'extraction'
   );
   if (!validation.valid) {
     return validation;
   }
+  Object.defineProperty(extracted, 'monetary_validated_', {
+    value: extracted.document_type === 'Invoice', enumerable: false,
+    configurable: true
+  });
   if (extracted.document_type === 'Invoice') {
     validation = withExtractionValidationStage_(
       validateServiceIdentityForInvoice_(extracted), 'service-identity'
@@ -1009,8 +1076,9 @@ function buildExtractionRepairFeedback_(validation, attempt) {
       code: validation.code || 'unclassified_validation_failure',
       fields: normalizeExtractionRepairFields_(validation.fields),
       problem: String(validation.problem || 'Extraction validation failed.'),
-      requested_action: String(validation.action ||
-        'Re-examine the PDF evidence for the affected fields.')
+      requested_action: validation.code === 'model_reported_blocking_problems' ?
+        'Audit each prior problems entry against the PDF and trusted policy. Remove explanatory notes about successful policy-compliant mappings from problems; do not replace them with new commentary. Retain unresolved missing required evidence, unreadability, ambiguity, or contradictions. Return the complete extraction, preserving evidence-backed values.' :
+        String(validation.action || 'Re-examine the PDF evidence for the affected fields.')
     }]
   };
 }
@@ -1066,15 +1134,59 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
     marked.extractionSnapshot = buildExtractionRepairSnapshot_(extracted);
     throw marked;
   }
+  preserveUnimplicatedRepairFields_(normalized, repairContext);
+  Object.defineProperty(normalized, 'configured_writable_headers', {
+    value: (headersBySupply[normalized.supply_type] || []).slice(),
+    enumerable: false
+  });
   Object.defineProperty(normalized, 'configured_secondary_headers', {
     value: getConfiguredSecondaryInvoiceHeaders_(
-      headersBySupply[normalized.supply_type] || []
+      headersBySupply[normalized.supply_type] || [], normalized
     ),
     enumerable: false
   });
   inferInvoiceFrequency_(normalized);
   applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
+  try {
+    normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
+  } catch (error) {
+    if (!isModelExtractionNormalizationError_(error)) {
+      throw error;
+    }
+    const marked = markInvalidExtractionOutput_(error);
+    marked.extractionIssueCode = 'invalid_extraction_normalization';
+    marked.extractionFields = ['sheet_values'];
+    marked.extractionSnapshot = buildExtractionRepairSnapshot_(normalized);
+    throw marked;
+  }
   return normalized;
+}
+
+function preserveUnimplicatedRepairFields_(extracted, repairContext) {
+  if (!extracted || !repairContext || !repairContext.previousExtraction ||
+    !repairContext.feedback || !Array.isArray(repairContext.feedback.issues)) {
+    return;
+  }
+  const monetaryFields = ['cost_consumption', 'cost_non_consumption', 'vat', 'total'];
+  const issues = repairContext.feedback.issues;
+  // An early failure proves nothing about later identity/date validations.
+  // Preserve only a reconciled monetary group, and reopen it as a unit.
+  if (repairContext.monetaryValidated !== true ||
+    !isInvoiceCoreMonetaryReconciled_(repairContext.previousExtraction) ||
+    issues.some(function (issue) {
+      return issue.stage === 'raw-output' || /reconciliation/.test(issue.stage || '') ||
+        !(issue.fields || []).length ||
+        issue.fields.some(function (field) {
+          return monetaryFields.indexOf(field) >= 0 ||
+            ['electricity_consumption_quantity', 'electricity_selling_unit_rate'].indexOf(field) >= 0 ||
+            isNumericInvoiceHeader_(field);
+        });
+    })) {
+    return;
+  }
+  monetaryFields.forEach(function (field) {
+    extracted[field] = repairContext.previousExtraction[field];
+  });
 }
 
 function markInvalidExtractionOutput_(error) {
@@ -1090,7 +1202,7 @@ function markInvalidExtractionOutput_(error) {
 }
 
 function isModelExtractionNormalizationError_(error) {
-  return /^Gemini extraction has a nonnumeric electricity band consumption value\.$/
+  return /^Gemini extraction has a nonnumeric (?:electricity band consumption|consumption quantity|unit cost|monetary) value\.$/
     .test(String(error && error.message || error));
 }
 
@@ -1101,9 +1213,36 @@ function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
     getEffectiveGeminiBackend_(), '', repairContext);
 }
 
+function getGeminiReasoningConfig_(model, backend) {
+  const gemini25Models = [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
+  ];
+  if (backend === 'vertex_ai') {
+    // Vertex generateContent uses token budgets for Gemini 2.5. Preserve the
+    // verified budget contract for our mutable default alias as well.
+    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
+      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
+    } : {};
+  }
+  // Interactions accepts levels even for 2.5; its controls differ from Vertex.
+  // https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking
+  if (model === 'gemini-3-pro-preview') {
+    return { thinking_level: 'high' };
+  }
+  const mediumLevelModels = gemini25Models.concat([
+    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
+  ]);
+  return mediumLevelModels.indexOf(model) !== -1 ? {
+    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
+  } : {};
+}
+
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   driveAgentsPolicy, file, backend, fallbackReason, repairContext) {
   const isVertexAi = backend === 'vertex_ai';
+  const isGeminiInteractionsApi = !isVertexAi;
   const extractionAttempt = repairContext ? Number(repairContext.attempt) : 1;
   const model = getGeminiModel_();
   const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
@@ -1113,32 +1252,48 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       data: Utilities.base64Encode(blob.getBytes())
     }
   } : {
-    inline_data: {
-      mime_type: MimeType.PDF,
-      data: Utilities.base64Encode(blob.getBytes())
-    }
+    type: 'document',
+    data: Utilities.base64Encode(blob.getBytes()),
+    mime_type: MimeType.PDF
   };
+  const prompt = buildExtractionPrompt_(
+    sheetHeadersBySupply,
+    driveAgentsPolicy,
+    repairContext
+  );
   const generationConfig = {
     maxOutputTokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS,
-    responseMimeType: 'application/json',
-    responseJsonSchema: buildExtractionResponseSchema_()
+    responseMimeType: 'application/json'
   };
-  if (model === 'gemini-3.7-flash') {
-    generationConfig.thinkingConfig = {
-      thinkingLevel: CONFIG.GEMINI_FLASH_THINKING_LEVEL
-    };
+  if (isVertexAi) {
+    generationConfig.responseSchema = buildVertexExtractionResponseSchema_();
   }
-  const payload = {
+  const reasoningConfig = getGeminiReasoningConfig_(model, backend);
+  if (isVertexAi) {
+    Object.assign(generationConfig, reasoningConfig);
+  }
+  const payload = isGeminiInteractionsApi ? {
+    model: model,
+    input: [
+      { type: 'text', text: prompt },
+      pdfPart
+    ],
+    response_format: [{
+      type: 'text',
+      mime_type: 'application/json',
+      schema: buildExtractionResponseSchema_()
+    }],
+    generation_config: Object.assign({
+      max_output_tokens: CONFIG.GEMINI_MAX_OUTPUT_TOKENS
+    }, reasoningConfig),
+    // Invoice PDFs are processed statelessly and must not be retained by the
+    // Interactions API after the response is returned.
+    store: false
+  } : {
     contents: [{
       role: 'user',
       parts: [
-        {
-          text: buildExtractionPrompt_(
-            sheetHeadersBySupply,
-            driveAgentsPolicy,
-            repairContext
-          )
-        },
+        { text: prompt },
         pdfPart
       ]
     }],
@@ -1201,7 +1356,12 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         throw new Error('Gemini returned invalid response JSON.');
       }
       candidate = body.candidates && body.candidates[0];
-      responseLog.finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
+      responseLog.modelVersion = String(
+        body.modelVersion || body.model || 'UNSPECIFIED'
+      );
+      responseLog.finishReason = isGeminiInteractionsApi ?
+        getGeminiInteractionsFinishReason_(body) :
+        String(candidate && candidate.finishReason || 'UNSPECIFIED');
       logCatalogEvent_('gemini-generation-response', responseLog);
       break;
     }
@@ -1236,15 +1396,20 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return a usable response.');
   }
 
-  logGeminiUsage_(body.usageMetadata, file, backend, fallbackReason,
+  logGeminiUsage_(getGeminiUsageMetadata_(body, isGeminiInteractionsApi), file, backend, fallbackReason,
     extractionAttempt);
-  const finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
-  if (finishReason !== 'STOP') {
+  const finishReason = isGeminiInteractionsApi ?
+    getGeminiInteractionsFinishReason_(body) :
+    String(candidate && candidate.finishReason || 'UNSPECIFIED');
+  const successfulFinishReason = isGeminiInteractionsApi ? 'COMPLETED' : 'STOP';
+  if (finishReason !== successfulFinishReason) {
     throw new Error('Gemini extraction was incomplete (finish reason: ' +
       finishReason + ').');
   }
-  const parts = candidate && candidate.content && candidate.content.parts;
-  if (!parts || !parts[0] || !parts[0].text) {
+  const outputText = isGeminiInteractionsApi ?
+    getGeminiInteractionsOutputText_(body) :
+    getGeminiGenerateContentOutputText_(candidate);
+  if (!outputText) {
     const emptyExtractionError = new Error(
       'Gemini did not return valid extraction JSON.'
     );
@@ -1253,7 +1418,70 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     emptyExtractionError.extractionFields = [];
     throw emptyExtractionError;
   }
-  return parts[0].text;
+  return outputText;
+}
+
+function getGeminiGenerateContentOutputText_(candidate) {
+  const parts = candidate && candidate.content && candidate.content.parts;
+  return parts && parts[0] && parts[0].text || '';
+}
+
+function getGeminiInteractionsOutputText_(body) {
+  // The May 2026 REST migration replaced legacy outputs with typed steps:
+  // https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026
+  const steps = Array.isArray(body && body.steps) ? body.steps : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (!step || step.type !== 'model_output' || !Array.isArray(step.content)) {
+      continue;
+    }
+    for (let contentIndex = step.content.length - 1; contentIndex >= 0;
+      contentIndex -= 1) {
+      const content = step.content[contentIndex];
+      if (content && content.type === 'text' && content.text) {
+        return content.text;
+      }
+    }
+  }
+  return '';
+}
+
+function getGeminiInteractionsFinishReason_(body) {
+  if (!body || body.status !== 'completed') {
+    return String(body && body.status || 'UNSPECIFIED').toUpperCase();
+  }
+  const steps = Array.isArray(body.steps) ? body.steps : [];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index] && steps[index].type === 'model_output') {
+      // The Interactions API may omit the per-step status on a completed
+      // synchronous response; the root completed status is authoritative.
+      return 'COMPLETED';
+    }
+  }
+  return 'UNSPECIFIED';
+}
+
+function getGeminiUsageMetadata_(body, isGeminiInteractionsApi) {
+  const usage = body && (isGeminiInteractionsApi ? body.usage : body.usageMetadata);
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    return null;
+  }
+  const metadata = isGeminiInteractionsApi ? {
+    promptTokenCount: usage.total_input_tokens,
+    candidatesTokenCount: usage.total_output_tokens,
+    thoughtsTokenCount: usage.total_thought_tokens,
+    totalTokenCount: usage.total_tokens,
+    cachedContentTokenCount: usage.total_cached_tokens
+  } : usage;
+  return hasGeminiUsageMetadata_(metadata) ? metadata : null;
+}
+
+function hasGeminiUsageMetadata_(metadata) {
+  return Boolean(metadata && typeof metadata === 'object' && !Array.isArray(metadata) &&
+    ['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount',
+      'totalTokenCount', 'cachedContentTokenCount'].some(function (field) {
+      return isValidGeminiTokenCount_(metadata[field]);
+    }));
 }
 
 function buildExtractionResponseSchema_() {
@@ -1324,6 +1552,8 @@ function buildExtractionResponseSchema_() {
       period_start: nullableString,
       period_end: nullableString,
       consumption_description: nullableString,
+      electricity_consumption_quantity: nullableNumber,
+      electricity_selling_unit_rate: nullableNumber,
       cost_consumption: nullableNumber,
       cost_non_consumption: nullableNumber,
       vat: nullableNumber,
@@ -1351,13 +1581,64 @@ function buildExtractionResponseSchema_() {
 }
 
 /**
+ * Vertex AI's structured-output endpoint uses its OpenAPI-style Schema shape,
+ * while the Developer API accepts the JSON Schema representation above.
+ * Convert the shared contract instead of maintaining two extraction schemas.
+ */
+function buildVertexExtractionResponseSchema_() {
+  return convertExtractionSchemaToVertex_(buildExtractionResponseSchema_());
+}
+
+function convertExtractionSchemaToVertex_(schema) {
+  const vertexSchema = {};
+  const types = Array.isArray(schema.type) ? schema.type.filter(function (type) {
+    return type !== 'null';
+  }) : [schema.type];
+  if (types.length > 1) {
+    vertexSchema.anyOf = types.map(function (type) {
+      return { type: String(type).toUpperCase() };
+    });
+  } else if (types.length > 0 && types[0]) {
+    vertexSchema.type = String(types[0]).toUpperCase();
+  }
+  if (Array.isArray(schema.type) && schema.type.indexOf('null') >= 0) {
+    vertexSchema.nullable = true;
+  }
+  if (Array.isArray(schema.enum)) {
+    vertexSchema.enum = schema.enum.filter(function (value) {
+      return value !== null;
+    });
+  }
+  if (typeof schema.pattern === 'string') {
+    vertexSchema.pattern = schema.pattern;
+  }
+  if (Array.isArray(schema.required)) {
+    vertexSchema.required = schema.required.slice();
+  }
+  if (schema.properties && typeof schema.properties === 'object') {
+    vertexSchema.properties = {};
+    Object.keys(schema.properties).forEach(function (key) {
+      vertexSchema.properties[key] = convertExtractionSchemaToVertex_(
+        schema.properties[key]
+      );
+    });
+    vertexSchema.propertyOrdering = Object.keys(schema.properties);
+  }
+  if (schema.items && typeof schema.items === 'object') {
+    vertexSchema.items = convertExtractionSchemaToVertex_(schema.items);
+  }
+  return vertexSchema;
+}
+
+/**
  * Record the provider-reported token counts for one successful generation.
  * `estimatedCostUsd` is intentionally a current list-price estimate: billing
  * exports and the Cloud Billing console remain the financial source of truth.
  */
 function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   extractionAttempt) {
-  const usage = usageMetadata || {};
+  const usageMetadataPresent = hasGeminiUsageMetadata_(usageMetadata);
+  const usage = usageMetadataPresent ? usageMetadata : {};
   const promptTokenCount = normalizeGeminiTokenCount_(usage.promptTokenCount);
   const candidatesTokenCount = normalizeGeminiTokenCount_(usage.candidatesTokenCount);
   const thoughtsTokenCount = normalizeGeminiTokenCount_(usage.thoughtsTokenCount);
@@ -1367,7 +1648,7 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
     backend: backend,
     model: getGeminiModel_(),
     extractionAttempt: Number(extractionAttempt) || 1,
-    usageMetadataPresent: Boolean(usageMetadata),
+    usageMetadataPresent: usageMetadataPresent,
     promptTokenCount: promptTokenCount,
     candidatesTokenCount: candidatesTokenCount,
     thoughtsTokenCount: thoughtsTokenCount,
@@ -1377,11 +1658,7 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   if (fallbackReason) {
     payload.fallbackReason = fallbackReason;
   }
-  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), {
-    promptTokenCount: promptTokenCount,
-    candidatesTokenCount: candidatesTokenCount,
-    thoughtsTokenCount: thoughtsTokenCount
-  });
+  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), usageMetadata);
   if (estimate) {
     Object.assign(payload, estimate);
   }
@@ -1389,11 +1666,20 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
 }
 
 function normalizeGeminiTokenCount_(value) {
-  return typeof value === 'number' && isFinite(value) && value >= 0 ? value : 0;
+  return isValidGeminiTokenCount_(value) ? value : 0;
+}
+
+function isValidGeminiTokenCount_(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 function estimateGeminiUsageCostUsd_(backend, model, usage) {
-  if (backend !== 'vertex_ai') {
+  // Presence of a partial usage record does not establish the missing price
+  // dimensions. Never let display defaults turn unknown usage into zero cost.
+  if (backend !== 'vertex_ai' || !hasGeminiUsageMetadata_(usage) ||
+    !['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount'].every(
+      function (field) { return isValidGeminiTokenCount_(usage[field]); }
+    )) {
     return null;
   }
   const pricing = CONFIG.VERTEX_GEMINI_PRICING_BY_MODEL[model];
@@ -1416,8 +1702,7 @@ function roundGeminiCostUsd_(value) {
 }
 
 function getGeminiApiEndpoint_() {
-  return 'https://generativelanguage.googleapis.com/v1beta/models/' +
-    encodeURIComponent(getGeminiModel_()) + ':generateContent';
+  return 'https://generativelanguage.googleapis.com/v1beta/interactions';
 }
 
 function getVertexAiEndpoint_() {
@@ -1435,13 +1720,45 @@ function getGeminiVertexFallbackReason_(response) {
   if (response.getResponseCode() !== 429) {
     return '';
   }
-  const responseText = response.getContentText();
-  if (/GenerateRequestsPerDay|generate_content_free_tier_requests|requests?\s+per\s+day|\bRPD\b/i
-    .test(responseText)) {
+  let error;
+  try {
+    const body = JSON.parse(response.getContentText());
+    error = body && body.error;
+  } catch (parseError) {
+    return '';
+  }
+  if (!error || typeof error !== 'object' || Array.isArray(error) ||
+    typeof error.message !== 'string') {
+    return '';
+  }
+  // Interactions documents this code as daily exhaustion. Its other string
+  // codes (including short-window throttling) cannot be overridden by prose.
+  // https://ai.google.dev/gemini-api/docs/api-errors
+  if (error.code === 'quota_exceeded') {
     return 'gemini-api-daily-quota-exhausted';
   }
-  if (/prepayment credits?\s+(?:are\s+)?(?:depleted|exhausted)|(?:prepay(?:ment)?\s+)?(?:credits?|credit balance).{0,40}(?:depleted|exhausted|empty)/i
-    .test(responseText)) {
+  if (error.code !== 429 || error.status !== 'RESOURCE_EXHAUSTED') {
+    return '';
+  }
+  const dailyViolation = Array.isArray(error.details) && error.details.some(function (detail) {
+    return detail && detail['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure' &&
+      Array.isArray(detail.violations) && detail.violations.some(function (violation) {
+        return violation &&
+          typeof violation.quotaMetric === 'string' && typeof violation.quotaId === 'string' &&
+          /^generativelanguage\.googleapis\.com\/[a-z][a-z0-9_]*$/
+            .test(violation.quotaMetric) &&
+          /^GenerateRequestsPerDayPerProjectPerModel(?:-(?:FreeTier|PaidTier))?$/
+            .test(violation.quotaId);
+      });
+  });
+  // The requests metric is shared by minute/day limits. Only the violated
+  // quota ID establishes its period; Help links and RetryInfo do not.
+  if (dailyViolation) {
+    return 'gemini-api-daily-quota-exhausted';
+  }
+  // Preserve the observed legacy billing response's terminal first sentence.
+  // Conditional statements and Help metadata cannot authorize paid routing.
+  if (/^Your prepayment credits are depleted\.(?:\s|$)/.test(error.message)) {
     return 'gemini-api-prepayment-credits-depleted';
   }
   return '';
@@ -1526,6 +1843,8 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
     '  "consumption_description": "concise text or null",',
+    '  "electricity_consumption_quantity": null,',
+    '  "electricity_selling_unit_rate": null,',
     '  "cost_consumption": 0.00,',
     '  "cost_non_consumption": 0.00,',
     '  "vat": 0.00,',
@@ -1533,18 +1852,26 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "sheet_values": [{"header":"exact allowed header","value": "number, boolean, text, or date","source_evidence":"printed only for a visibly printed zero-valued supplier default"}],',
     '  "problems": ["observed problems"]',
     '}',
-    'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds.',
+    'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds. Do not add a problem merely to explain a deterministic mapping required by this prompt when the printed evidence is clear and reconciliation succeeds.',
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
+    'When writing to Sheets, reference year is also literal text with four digits. Return the exact configured canonical supplier spelling and case. Do not uppercase the canonical supplier spelling or replace it with a filename abbreviation.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each mutually exclusive top-level printed cost row in sheet_values using its exact header. If one target header represents a combined category, sum only the mutually exclusive top-level rows in the same printed parent section that belong to that category; never combine similarly named rows from separate sections such as consumption versus fixed/power charges. Do not map subordinate lines introduced by "di cui" (or equivalent wording) into a top-level cost header when their amount is already included in an aggregate or parent row; those subordinate amounts are explanatory evidence, not additional costs. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
     'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem.',
     'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
       JSON.stringify(localization.supplierFieldDefaults || []) + '.',
-    'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
+    'When the invoice prints a final payable total, that printed total is authoritative. Return it exactly together with the printed VAT; never recalculate a different total because of an assumed tax treatment for Canone TV or any other line. If detailed rows do not reconcile to the printed final total, report the conflict and re-examine the printed rows rather than changing VAT, a detail, or the total.',
+    'For Energygas Luce, after assigning those details, verify the arithmetic directly: Altri costi materia energia + Trasporto e gestione contatore + Oneri di sistema + Accise + Canone TV + Ricalcoli + Rete e oneri non scorporabili must equal cost_non_consumption within rounding. If it does not, correct the printed row assignments; never make the values agree by changing VAT, total, or another detail.',
+    'For OENERGY Gas, verify Quota fissa + Trasporto e oneri + Accise + Ricalcoli equals cost_non_consumption, and verify Totale costi consumo equals cost_consumption before checking the invoice total. Keep the selling consumption amount separate from network/oneri amounts; never use the broad consumption or fixed quota twice and never balance by changing VAT or total.',
+    'On OENERGY Gas invoices, the network/oneri evidence can contain one amount under consumption and another under the fixed quota. Both printed amounts belong in Trasporto e oneri; a result containing only the fixed-quota network amount is incomplete. When the target has one Accise column, sum every printed amount in the ACCISE e ADDIZIONALI section, including regional additions; do not use only Accisa complessivamente applicata when it omits those additions, and never derive Accise from VAT or another total.',
+    'On OENERGY Gas invoices, do not subtract an explanatory negative or credit line such as Oneri generali di sistema from the positive network/oneri summary amounts. Use the positive payable amounts printed in the consumption and fixed-quota summaries once each; an explanatory tax/detail line is not a replacement or balancing adjustment unless it is explicitly part of the payable summary.',
+    'For Gas invoices with separate "di cui spesa per vendita" and "di cui spesa per rete e oneri generali di sistema" rows, put the selling portion in Costo unitario/Totale costi consumo and Quota fissa, and sum the printed network/oneri summary amounts for consumption and fixed portions once in Trasporto e oneri. Do not use the broad quota totals in both categories. If no applied ricalcolo amount is printed, omit Ricalcoli and report one concise standalone absence problem such as "Ricalcoli non presente nel documento." so the reviewed zero default can be applied; do not describe the default as printed evidence.',
+    'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. For a monoraria bill with one printed selling rate, use the rate printed in the summary row "di cui spesa per vendita energia elettrica" (or its localized equivalent) for Costo unitario and repeat that common selling rate in Costo unitario F1/F2/F3 when F1/F2/F3 quantities are reported. Do not use PREZZO FISSO, DISPACCIAMENTO, a formula component, or the network-inclusive summary rate as the selling unit cost. For the Energygas Luce sheet, follow this exact mutually exclusive mapping: Totale costi consumo and cost_consumption are the printed selling consumption amount only; Altri costi materia energia is the printed fixed selling amount only; Rete e oneri non scorporabili is the single sum of the printed network/oneri consumption amount, fixed network amount, and power-quota network amount; Oneri di sistema receives zero when ASOS/ARIM are subordinate detail rows rather than a separate top-level charge; do not map subordinate ASOS/ARIM detail rows into Oneri di sistema; Trasporto e gestione contatore and Ricalcoli receive their reviewed zero defaults when absent; Accise and Canone TV remain separate and are never included in Rete e oneri non scorporabili. Do not move the fixed selling amount into Totale costi consumo, do not put accise or Canone TV into Rete e oneri non scorporabili, and do not use a balancing or residual value for any detailed field, broad cost, VAT, or total. Every detailed value must be a printed amount or a reviewed zero default; never solve a mismatch by changing another field. Recheck every printed component, including the power quota, before calculating the network/oneri sum. Preserve the printed IVA exactly; never alter IVA to force the reconciliation. If a detail sum conflicts with the printed IVA and total, re-examine the printed cost rows and total selection rather than inventing a balancing VAT value. Use the printed total payable consistently with its Canone TV detail: when Totale da pagare includes the printed Canone TV, include that amount in the reconciliation total and non-consumption total because the target Costo totale formula includes Canone TV. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
+    'For electricity invoices with a printed aggregate consumption quantity and selling unit rate, return both electricity_consumption_quantity and electricity_selling_unit_rate as native JSON numbers, independently of the available sheet headers. These are validation evidence only: do not add unconfigured sheet_values headers. Never calculate either field from a cost or invent an average rate. If the aggregate pair is not printed, omit both fields or return null. If no F1/F2/F3 quantities or rates are reported, leave their cells absent or null and add a separate standalone absence diagnostic naming each configured band header exactly. Do not omit a partially reported or ambiguous band representation; report its uncertainty. Every complete aggregate and band representation must independently reconcile with the printed selling consumption cost; for different band rates use the sum of each band quantity times its own rate.',
     'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
     'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
-    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed; otherwise set it to null. If the billing frequency is not printed explicitly or is uncertain, return frequency as null and add a concise diagnostic. The runtime may infer monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply. If cadence cannot be established or conflicts, the diagnostic blocks import. Do not invent a different cadence or copy a transaction-specific value from earlier invoices.',
+    'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed. Otherwise return both frequency and frequency_source_evidence as null; do not add a problem merely because cadence is not printed and do not infer it yourself. The runtime independently infers monthly, bimonthly, or quarterly from a complete billed period or verified independent earlier invoices for the same supplier and supply, and blocks import if evidence is insufficient or conflicting. Extract period_start and period_end from the current billed consumption period, corroborated by the invoice reference period, not an offer-validity, cumulative spending, or historical period. Report unreadable or conflicting printed period evidence. Never copy a transaction-specific value from earlier invoices.',
     'For non-invoice documents, classify a printed address only with these configured rules: ' +
       JSON.stringify(automationConfig.address_rules) + '. For invoices, address_type is finalized by the runtime comparison with the target supply identity. If no printed service address is present, return null address components and add a concise problem.',
     'Apply these frequency overrides when supplier and supply match: ' +
@@ -1661,6 +1988,14 @@ function validateRawExtractionShape_(extracted) {
       }
     }
   );
+  ['electricity_consumption_quantity', 'electricity_selling_unit_rate'].forEach(function (field) {
+    const value = extracted[field];
+    if (value !== null && value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value) ||
+        field === 'electricity_consumption_quantity' && value < 0)) {
+      throw new Error('Gemini extraction field has an invalid type: ' + field);
+    }
+  });
   if (extracted.reference_year !== null &&
     extracted.reference_year !== undefined &&
     (typeof extracted.reference_year !== 'number' ||
@@ -1698,6 +2033,11 @@ function validateRawExtractionShape_(extracted) {
 
 function normalizeExtraction_(extracted) {
   const normalized = extracted || {};
+  // These flags are runtime conclusions, never model-provided evidence.
+  ['frequency_override_authoritative_', 'frequency_inferred_',
+    'frequency_provenance_missing_'].forEach(function (key) {
+    delete normalized[key];
+  });
   normalized.document_type = normalizeDocumentType_(normalized.document_type);
   normalized.supplier = normalizeSupplier_(normalized.supplier);
   normalized.supply_type = normalizeSupplyType_(normalized.supply_type);
@@ -1737,12 +2077,35 @@ function normalizeExtraction_(extracted) {
     normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
   normalizeExtractedInvoiceFrequency_(normalized);
   applyFrequencyOverride_(normalized);
-  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
+  // Apply reviewed supplier defaults to their original representation before
+  // monetary text normalization can turn a non-approved representation into 0.
+  normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values, true);
   return normalized;
 }
 
 function normalizeNameIdentity_(value) {
-  return normalizeCellText_(value).split(' ').filter(Boolean).sort().join(' ');
+  // Some address windows repeat the same holder after C/O. Collapse only an
+  // exact normalized repetition; a different addressee must remain a mismatch.
+  const careOf = String(value || '').split(/\s+c\s*\/\s*o\s+/i);
+  if (careOf.length === 2 && careOf.every(function (part) { return part.trim(); })) {
+    const holder = normalizeNameIdentity_(careOf[0]);
+    if (holder && holder === normalizeNameIdentity_(careOf[1])) {
+      return holder;
+    }
+  }
+  const tokens = normalizeCellText_(value).split(' ').filter(Boolean);
+  const honorifics = [
+    ['signora'], ['signor'], ['dott', 'ssa'], ['dott'], ['avv'], ['ing'],
+    ['prof'], ['sig', 'ra'], ['sig'], ['mr'], ['mrs'], ['ms'], ['miss'],
+    ['dr']
+  ];
+  const honorific = honorifics.find(function (candidate) {
+    return candidate.every(function (token, index) {
+      return tokens[index] === token;
+    });
+  });
+  const identityTokens = honorific ? tokens.slice(honorific.length) : tokens;
+  return identityTokens.sort().join(' ');
 }
 
 function normalizeAddressIdentityText_(value) {
@@ -1763,6 +2126,32 @@ function isAddressPostalCodeToken_(token) {
   return /^\d{5}$/.test(token);
 }
 
+function isAddressProvinceToken_(token) {
+  // Province codes are optional only in the trailing province position.
+  return [
+    'ag', 'al', 'an', 'ao', 'ap', 'aq', 'ar', 'at', 'av', 'ba', 'bg', 'bi',
+    'bl', 'bn', 'bo', 'br', 'bs', 'bt', 'bz', 'ca', 'cb', 'ce', 'ch', 'cl',
+    'cn', 'co', 'cr', 'cs', 'ct', 'cz', 'en', 'fc', 'fe', 'fg', 'fi', 'fm',
+    'fr', 'ge', 'go', 'gr', 'im', 'is', 'kr', 'lc', 'le', 'li', 'lo', 'lt',
+    'lu', 'mb', 'mc', 'me', 'mi', 'mn', 'mo', 'ms', 'mt', 'na', 'nu', 'or',
+    'pa', 'pc', 'pd', 'pe', 'pg', 'pi', 'pn', 'po', 'pr', 'pt', 'pu', 'pv',
+    'pz', 'ra', 'rc', 're', 'rg', 'ri', 'rm', 'rn', 'ro', 'sa', 'si', 'so',
+    'sp', 'sr', 'ss', 'su', 'sv', 'ta', 'te', 'tn', 'to', 'tp', 'tr', 'ts',
+    'tv', 'ud', 'va', 'vb', 'vc', 've', 'vi', 'vr', 'vs', 'vt', 'vv'
+  ].indexOf(String(token || '').toLowerCase()) >= 0;
+}
+
+function removeTrailingAddressProvince_(tokens, city) {
+  const provinceIndex = tokens.length - 1;
+  if (city.length && isAddressProvinceToken_(tokens[provinceIndex]) &&
+    city.every(function (token, index) {
+      return tokens[provinceIndex - city.length + index] === token;
+    })) {
+    return tokens.slice(0, provinceIndex);
+  }
+  return tokens;
+}
+
 function hasAddressComponentPlacement_(addressTokens, components,
   requireCompleteIdentity) {
   const MAX_ADDRESS_TOKENS = 64;
@@ -1775,7 +2164,8 @@ function hasAddressComponentPlacement_(addressTokens, components,
   const componentLength = components.reduce(function (total, component) {
     return total + component.length;
   }, 0);
-  if (requireCompleteIdentity && componentLength !== addressTokens.length) {
+  if (requireCompleteIdentity && (componentLength > addressTokens.length ||
+    componentLength + 1 < addressTokens.length)) {
     return false;
   }
   const placements = components.map(function (component) {
@@ -1793,9 +2183,15 @@ function hasAddressComponentPlacement_(addressTokens, components,
   if (placements.some(function (matches) { return !matches.length; })) {
     return false;
   }
-  function placeComponent(index, occupied) {
+  function placeComponent(index, occupied, cityStart) {
     if (index === placements.length) {
-      return true;
+      // A postal code is optional only as one unclaimed token immediately
+      // before the matched city. Never discard digits belonging to a matched
+      // street, civic number or city, even when they look like a postal code.
+      return !requireCompleteIdentity || occupied.every(function (used, tokenIndex) {
+        return used || (tokenIndex === cityStart - 1 &&
+          isAddressPostalCodeToken_(addressTokens[tokenIndex]));
+      });
     }
     return placements[index].some(function (placement) {
       for (let tokenIndex = placement.start; tokenIndex < placement.end;
@@ -1809,7 +2205,8 @@ function hasAddressComponentPlacement_(addressTokens, components,
         tokenIndex += 1) {
         nextOccupied[tokenIndex] = true;
       }
-      return placeComponent(index + 1, nextOccupied);
+      return placeComponent(index + 1, nextOccupied,
+        index === 2 ? placement.start : cityStart);
     });
   }
   return placeComponent(0, Array(addressTokens.length).fill(false));
@@ -1832,10 +2229,10 @@ function validateServiceIdentity_(extracted, expected) {
   const addressComponents = [street, civicNumber, city];
   const configuredAddress = normalizeAddressTokenSequence_(
     configured.service_address
-  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  );
   const evidenceAddress = normalizeAddressTokenSequence_(
     extracted && extracted.address_evidence
-  ).filter(function (token) { return !isAddressPostalCodeToken_(token); });
+  );
   if (!holder || !street.length || !civicNumber.length || !city.length) {
     return invalidExtraction_(
       'The invoice account holder or service address is missing or ambiguous.',
@@ -1848,8 +2245,10 @@ function validateServiceIdentity_(extracted, expected) {
       }
     );
   }
-  const addressMatches = hasAddressComponentPlacement_(configuredAddress,
-    addressComponents, true);
+  // Only a trailing province after the complete city is optional. Street,
+  // city and civic tokens remain identity evidence, including short names.
+  const addressMatches = hasAddressComponentPlacement_(
+    removeTrailingAddressProvince_(configuredAddress, city), addressComponents, true);
   const evidenceMatches = hasAddressComponentPlacement_(evidenceAddress,
     addressComponents, false);
   if (holder !== normalizeNameIdentity_(configured.account_holder) ||
@@ -2204,20 +2603,25 @@ function validateServiceIdentityForInvoice_(extracted) {
   return validateServiceIdentity_(extracted, configured);
 }
 
+function getApplicableSupplierFieldDefaults_(extracted) {
+  if (!extracted || extracted.document_type !== 'Invoice') {
+    return [];
+  }
+  return (getLocalization_().supplierFieldDefaults || []).filter(function (rule) {
+    return rule && rule.header &&
+      normalizeSupplier_(rule.supplier) === normalizeSupplier_(extracted.supplier) &&
+      normalizeSupplyType_(rule.supply_type) === normalizeSupplyType_(extracted.supply_type);
+  });
+}
+
 function applySupplierFieldDefaults_(extracted, availableHeaders) {
   if (!extracted || extracted.document_type !== 'Invoice' ||
     !Array.isArray(availableHeaders)) {
     return;
   }
   const normalizedAvailableHeaders = availableHeaders.map(normalizeHeader_);
-  const defaults = getLocalization_().supplierFieldDefaults || [];
+  const defaults = getApplicableSupplierFieldDefaults_(extracted);
   defaults.forEach(function (defaultValue) {
-    if (!defaultValue ||
-      normalizeSupplier_(defaultValue.supplier) !== normalizeSupplier_(extracted.supplier) ||
-      normalizeSupplyType_(defaultValue.supply_type) !==
-        normalizeSupplyType_(extracted.supply_type) || !defaultValue.header) {
-      return;
-    }
     const defaultHeader = normalizeHeader_(defaultValue.header);
     const headerIsAvailable = normalizedAvailableHeaders.indexOf(defaultHeader) >= 0;
     const explicitAbsence = hasExplicitSupplierFieldAbsence_(extracted.problems,
@@ -2236,11 +2640,18 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
       matching[0].value === undefined ||
       (typeof matching[0].value === 'string' && !matching[0].value.trim());
     if (!valueIsMissing) {
-      if (matching[0].value !== defaultValue.value ||
+      const suppliedValue = matching[0].value;
+      const matchesDefault = suppliedValue === defaultValue.value ||
+        (typeof defaultValue.value === 'number' &&
+          typeof suppliedValue === 'string' &&
+          /^[+-]?\d+(?:[.,]\d+)?$/.test(suppliedValue.trim()) &&
+          Number(suppliedValue.trim().replace(',', '.')) === defaultValue.value);
+      if (!matchesDefault ||
         isPrintedSupplierDefaultValue_(matching[0])) {
         return;
       }
       if (explicitAbsence) {
+        matching[0].value = defaultValue.value;
         extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
           extracted.problems, defaultValue
         );
@@ -2286,15 +2697,41 @@ function removeExplicitSupplierFieldAbsenceProblems_(problems, defaultValue) {
 }
 
 function isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue) {
-  if (!defaultValue.fieldPattern || !defaultValue.explicitAbsencePattern ||
-    !isStandaloneInformationalProblem_(problem)) {
+  if (!defaultValue.fieldPattern || !defaultValue.explicitAbsencePattern) {
     return false;
   }
-  return new RegExp(defaultValue.fieldPattern, 'i').test(String(problem)) &&
-    new RegExp(defaultValue.explicitAbsencePattern, 'i').test(String(problem));
+  const rawProblem = String(problem || '');
+  const fieldPattern = new RegExp(defaultValue.fieldPattern, 'i');
+  if (fieldPattern.test(rawProblem) && defaultValue.explicitAbsenceDiagnosticPattern &&
+    new RegExp(defaultValue.explicitAbsenceDiagnosticPattern, 'i').test(rawProblem)) {
+    return true;
+  }
+  if (isExplicitFieldAbsenceStatement_(rawProblem, defaultValue.fieldPattern,
+    defaultValue.explicitAbsencePattern)) {
+    return true;
+  }
+  // Some model responses explain the reviewed zero fallback in the same
+  // sentence as the absence. Accept only this exact, unambiguous shape; the
+  // fallback still requires the matching configured header and core
+  // reconciliation before it can affect an import.
+  const normalized = normalizeCellText_(rawProblem);
+  const field = normalizeCellText_(defaultValue.header);
+  return new RegExp(
+    '^header ' + escapeRegExp_(field) +
+      ' non (?:trovato|riportato|presente|stampato|indicato) nel documento ' +
+      'applicato zero di default come assenza esplicita$'
+  ).test(normalized) || new RegExp(
+    '^header ' + escapeRegExp_(field) +
+      ' (?:not found|not reported|not present|not printed|not indicated) in the document ' +
+      'applied zero by default as explicit absence$'
+  ).test(normalized);
 }
 
-function normalizeSheetValues_(sheetValues) {
+function escapeRegExp_(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeSheetValues_(sheetValues, deferMonetary) {
   if (!Array.isArray(sheetValues)) {
     return [];
   }
@@ -2312,16 +2749,104 @@ function normalizeSheetValues_(sheetValues) {
     if (typeof normalized.value === 'string') {
       normalized.value = normalized.value.trim();
     }
-    if (isElectricityBandConsumptionHeader_(normalized.header) &&
+    if (isUnitCostHeader_(normalized.header) && normalized.value !== null &&
+      normalized.value !== undefined && normalized.value !== '') {
+      const value = typeof normalized.value === 'string' ?
+        normalized.value.replace(/\s*(?:€|EUR)\s*\/\s*(?:kWh|Smc|m[³3]|mc|mese|month)\s*$/i, '').trim() :
+        normalized.value;
+      const numeric = parseUnambiguousSheetNumber_(value);
+      if (numeric === null) {
+        throw new Error('Gemini extraction has a nonnumeric unit cost value.');
+      }
+      normalized.value = numeric;
+    }
+    if (isConsumptionQuantityHeader_(normalized.header) &&
       normalized.value !== null && normalized.value !== undefined) {
       const quantity = normalizeElectricityBandConsumption_(normalized.value);
       if (quantity === null) {
-        throw new Error('Gemini extraction has a nonnumeric electricity band consumption value.');
+        throw new Error(isElectricityBandConsumptionHeader_(normalized.header) ?
+          'Gemini extraction has a nonnumeric electricity band consumption value.' :
+          'Gemini extraction has a nonnumeric consumption quantity value.');
       }
       normalized.value = quantity;
     }
+    if (!deferMonetary && !isUnitCostHeader_(normalized.header) &&
+      !isConsumptionQuantityHeader_(normalized.header) &&
+      isNumericInvoiceHeader_(normalized.header) && normalized.value !== null &&
+      normalized.value !== undefined) {
+      const numeric = parseUnambiguousSheetNumber_(normalized.value);
+      if (numeric === null) {
+        throw new Error('Gemini extraction has a nonnumeric monetary value.');
+      }
+      normalized.value = numeric;
+    }
     return normalized;
   });
+}
+
+function isNumericInvoiceHeader_(header) {
+  const normalized = normalizeHeader_(header);
+  const registry = getLocalizationRegistry_();
+  return isUnitCostHeader_(header) || isConsumptionQuantityHeader_(header) ||
+    Object.keys(registry).some(function (locale) {
+      const localization = registry[locale];
+      const aliases = localization.headerAliases || {};
+      return ['consumptionCost', 'nonConsumptionCosts', 'vat', 'total'].reduce(
+        function (headers, key) { return headers.concat(aliases[key] || []); },
+        localization.numericSupplementaryHeaders || []
+      ).map(normalizeHeader_).indexOf(normalized) >= 0;
+    });
+}
+
+function parseUnambiguousSheetNumber_(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  let text = value.trim().replace(/^(?:€|EUR)\s*|\s*(?:€|EUR)$/gi, '').trim();
+  // Only complete three-digit space groups establish an unambiguous thousands
+  // separator. Do not erase arbitrary whitespace inside an extracted number.
+  if (/^[+-]?[1-9]\d{0,2}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?$/.test(text)) {
+    text = text.replace(/[ \u00a0\u202f]/g, '');
+  }
+  // A single three-digit suffix is ambiguous between grouping and decimals.
+  // Leading zero cannot be a thousands group; retain rates such as 0.123.
+  if (/^[+-]?[1-9]\d{0,2}[.,]\d{3}$/.test(text)) {
+    return null;
+  }
+  if (/^[+-]?[1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?$/.test(text)) {
+    text = text.replace(/,/g, '');
+  } else if (/^[+-]?[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?$/.test(text)) {
+    text = text.replace(/\./g, '').replace(',', '.');
+  } else if (/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/.test(text)) {
+    text = text.replace(',', '.');
+  } else {
+    return null;
+  }
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function isUnitCostHeader_(header) {
+  const normalizedHeader = normalizeHeader_(header);
+  const registry = typeof getLocalizationRegistry_ === 'function' ?
+    getLocalizationRegistry_() : {};
+  return Object.keys(registry).some(function (locale) {
+    const localization = registry[locale];
+    const aliases = (localization.headerAliases || {}).unitCost || [];
+    const bandCosts = (localization.electricityBandHeaders || []).filter(
+      function (value, index) { return index % 2 === 1; }
+    );
+    return aliases.concat(bandCosts).map(normalizeHeader_).indexOf(normalizedHeader) >= 0;
+  });
+}
+
+function isConsumptionQuantityHeader_(header) {
+  return isElectricityBandConsumptionHeader_(header) ||
+    ['consumption quantity', 'quantità consumi'].map(normalizeHeader_)
+      .indexOf(normalizeHeader_(header)) >= 0;
 }
 
 function isElectricityBandConsumptionHeader_(header) {
@@ -2350,29 +2875,12 @@ function normalizeElectricityBandConsumption_(value) {
   if (typeof value !== 'string') {
     return null;
   }
-  let text = value.trim().replace(/\s+/g, '');
-  text = text.replace(/kwh$/i, '');
-  if (!/^[+]?(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?$/.test(text)) {
+  const text = value.trim().replace(/\s*kwh$/i, '').trim();
+  if (/(?:€|EUR)/i.test(text)) {
     return null;
   }
-  // With only one separator, a three-digit suffix can be either a grouping
-  // separator or a decimal fraction. Reject it rather than silently changing
-  // an invoice quantity such as 1,234 kWh into 1.234 kWh.
-  if (/^[+]?\d{1,3}[.,]\d{3}$/.test(text)) {
-    return null;
-  }
-  if (/^[+]?\d{1,3}(?:[.,]\d{3})+$/.test(text)) {
-    text = text.replace(/[.,]/g, '');
-  } else if (text.indexOf(',') >= 0 && text.indexOf('.') >= 0) {
-    const decimalSeparator = text.lastIndexOf(',') > text.lastIndexOf('.') ?
-      ',' : '.';
-    const groupingSeparator = decimalSeparator === ',' ? /\./g : /,/g;
-    text = text.replace(groupingSeparator, '').replace(decimalSeparator, '.');
-  } else if (text.indexOf(',') >= 0) {
-    text = text.replace(',', '.');
-  }
-  const quantity = Number(text);
-  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
+  const quantity = parseUnambiguousSheetNumber_(text);
+  return quantity !== null && quantity >= 0 ? quantity : null;
 }
 
 function validateExtraction_(extracted) {
@@ -2425,6 +2933,9 @@ function validateExtraction_(extracted) {
     }
     const blockingProblems = extracted.problems.filter(function (problem) {
       return !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
+        !isInformationalElectricityBandAbsenceProblem_(problem, extracted) &&
+        !isInformationalElectricityBandMappingProblem_(problem, extracted) &&
+        !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) &&
         !isInformationalTaxInclusionProblem_(problem, extracted) &&
         classifyConfiguredSecondaryInvoiceProblem_(problem, extracted).disposition !==
           'explicit-absence';
@@ -2550,21 +3061,85 @@ function validateExtraction_(extracted) {
 
 function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
   const text = String(problem || '').toLowerCase();
-  if (!isStandaloneInformationalProblem_(text)) {
+  if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
     return false;
+  }
+  const energygasContractAbsence =
+    isInformationalEnergygasContractAbsenceProblem_(text, extracted);
+  if (!isStandaloneInformationalProblem_(text) && !energygasContractAbsence) {
+    return false;
+  }
+  // The reviewed ENERGYGAS diagnostic mentions the present customer code in
+  // the same sentence as the absent contract number. Do not let that evidence
+  // be mistaken for a second missing identifier.
+  if (energygasContractAbsence) {
+    return true;
   }
   const patterns = getLocalization_().subscriberIdentifierProblemPatterns;
-  if (!new RegExp(patterns.missing).test(text)) {
-    return false;
-  }
-  const contractNumberMissing = new RegExp(patterns.contractNumber).test(text);
-  const customerCodeMissing = new RegExp(patterns.customerCode).test(text);
+  const contractNumberMissing = isExplicitFieldAbsenceStatement_(text,
+    patterns.contractNumber, patterns.missing);
+  const customerCodeMissing = isExplicitFieldAbsenceStatement_(text,
+    patterns.customerCode, patterns.missing);
   if (contractNumberMissing === customerCodeMissing) {
     return false;
   }
   return contractNumberMissing ?
     !extracted.contract_number && Boolean(extracted.customer_code) :
     !extracted.customer_code && Boolean(extracted.contract_number);
+}
+
+function isExplicitFieldAbsenceStatement_(problem, fieldPattern, absencePattern) {
+  // Consume the entire statement: a missing optional field cannot authorize
+  // dropping another problem, even when the model omits clause punctuation.
+  return new RegExp(
+    '^(?:(?:il|la|the)\\s+)?(?:' + fieldPattern + ')' +
+    '(?:\\s*:\\s*|\\s+)(?:(?:is|was|è|e)\\s+)?(?:' + absencePattern + ')' +
+    '(?:\\s+(?:explicitly|esplicitamente))?' +
+    '(?:\\s+(?:from|on|in|nel|nella|sul|sulla)\\s+(?:the\\s+)?' +
+    '(?:supplier\\s+)?(?:invoice|document|fattura|documento))?[.]?$', 'i'
+  ).test(String(problem || '').trim());
+}
+
+function isInformationalEnergygasContractAbsenceProblem_(problem, extracted) {
+  if (!extracted || extracted.contract_number || !extracted.customer_code ||
+    normalizeCellText_(extracted.supplier) !== 'energygas italia') {
+    return false;
+  }
+  const text = normalizeCellText_(problem);
+  const statement = /^(?:il )?numero (?:di )?contratto non (?:e )?presente o non (?:e )?identificabile per energygas italia (cl[0-9]+) e codice cliente$/.exec(text) ||
+    /^(?:the )?contract number (?:is )?not (?:present|identifiable)(?: for energygas italia)? customer code (cl[0-9]+)$/.exec(text);
+  return Boolean(statement) &&
+    statement[1] === normalizeCellText_(extracted.customer_code);
+}
+
+function isInformationalElectricityBandMappingProblem_(problem, extracted) {
+  if (!extracted || !isInvoiceCoreMonetaryReconciled_(extracted) ||
+    ['luce', 'electricity'].indexOf(normalizeCellText_(extracted.supply_type)) < 0) {
+    return false;
+  }
+  const text = normalizeCellText_(problem);
+  if (!isStandaloneInformationalProblem_(problem) ||
+    /(?:ambigu|incert|unclear|unreadable|illeggibil|non leggibil|conflict|contradditt|mismatch|does not match|non corrispond|incoerent|inconsistent)/.test(text)) {
+    return false;
+  }
+  const supportedStatement =
+    /^(?:il )?costo unitario f1 f2 f3 e stato popolato con il costo unitario di vendita(?: del consumo come previsto per un contratto monorario| monorario)$/.test(text) ||
+    /^unit cost f1 f2 f3 (?:(?:is|was) )?(?:filled|populated) (?:from|with) (?:the )?selling unit cost for (?:a )?monorate(?: contract)?$/.test(text);
+  if (!supportedStatement) {
+    return false;
+  }
+  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  if (!rateFields.slice(1).every(function (field) { return field.configured; })) {
+    return false;
+  }
+  const commonRate = parseUnambiguousSheetNumber_(rateFields[1].rawValue);
+  return commonRate !== null && rateFields.every(function (field) {
+    const rate = parseUnambiguousSheetNumber_(field.rawValue);
+    return !field.configured || !field.duplicate && rate !== null &&
+      Math.abs(rate - commonRate) < 1e-9;
+  });
 }
 
 function isInformationalTaxInclusionProblem_(problem, extracted) {
@@ -2589,8 +3164,9 @@ function isInformationalTaxInclusionProblem_(problem, extracted) {
 }
 
 function isAffirmativeInformationalTaxInclusionFact_(text) {
-  return /^(?:gli\s+)?(?:importi|voci|dettagli).*?(?:sono\s+)?(?:riportati|indicati|espressi).*?(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
-    /^(?:the\s+)?(?:line\s+items?|amounts?|charges?|details).*?(?:are\s+)?(?:shown|stated|listed|reported).*?(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+  return /^(?:gli\s+)?(?:importi|voci|dettagli)(?:\s+delle\s+singole\s+voci)?(?:\s+nel\s+dettaglio\s+servizi)?\s+(?:sono\s+)?(?:riportati|indicati|espressi)(?:\s+(?:nel\s+documento|in\s+fattura))?\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:gli\s+)?(?:importi|voci|dettagli)\s+(?:riportati|indicati|espressi)\s+(?:in\s+fattura|nel\s+documento)\s+sono\s+(?:comprensivi|inclusi)\s+di\s+(?:iva|vat)(?:\s+al\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
+    /^(?:the\s+)?(?:line\s+items?(?:\s+amounts?)?|amounts?|charges?|details)\s+(?:(?:is|are|was|were)\s+)?(?:shown|stated|listed|reported)(?:\s+in\s+the\s+(?:invoice|document))?\s+(?:including|inclusive\s+of)\s+vat(?:\s+at\s+\d+(?:[.,]\d+)?\s*%)?[.!?]?$/i.test(text) ||
     /^(?:iva|vat)\s+(?:è|e|is|was)\s+(?:(?:già|already)\s+)?(?:inclus[ao]|included)\s+(?:nel(?:la)?\s+(?:totale|importo)|in\s+(?:the\s+)?(?:total|amount))[.!?]?$/i.test(text);
 }
 
@@ -2601,7 +3177,17 @@ function isStandaloneInformationalProblem_(problem) {
 
 function getExtractionProblemFieldsForRepair_(problems, extracted) {
   const fields = ['problems'];
+  // Problems are validated before monetary reconciliation. Do not freeze
+  // inconsistent totals merely because an earlier diagnostic was reported first.
+  if (extracted.document_type === 'Invoice' &&
+    !isInvoiceCoreMonetaryReconciled_(extracted)) {
+    fields.push('cost_consumption', 'cost_non_consumption', 'vat', 'total');
+  }
   (problems || []).forEach(function (problem) {
+    if (problem === 'Billing frequency evidence is conflicting and was left blank.') {
+      fields.push('frequency', 'period_start', 'period_end',
+        'reference_year', 'reference_month');
+    }
     const classified = classifyConfiguredSecondaryInvoiceProblem_(
       problem, extracted
     );
@@ -2739,7 +3325,8 @@ function findSpreadsheetDuplicates_(extracted) {
   const matches = [];
   for (let index = 0; index < values.length; index += 1) {
     const row = values[index];
-    if (normalizeCellText_(row[supplierColumn - 1]) === normalizeCellText_(extracted.supplier) &&
+    if (supplierIdentitiesMatch_(row[supplierColumn - 1], extracted.supplier,
+      automationConfig) &&
       normalizeCellText_(row[identifierColumn - 1]) === normalizeCellText_(extracted.identifier) &&
       dateMatches_(row[dateColumn - 1], extracted.issue_date, spreadsheet.getSpreadsheetTimeZone())) {
       matches.push({
@@ -3429,7 +4016,9 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('accountHolder'), extracted.account_holder);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('serviceAddress'), extracted.address_evidence);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('customerCode'), extracted.customer_code);
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('year'), extracted.reference_year);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('year'),
+    extracted.reference_year === null || extracted.reference_year === undefined ?
+      extracted.reference_year : String(extracted.reference_year));
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), extracted.reference_month);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('frequency'), extracted.frequency || '');
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('consumptionCost'), extracted.cost_consumption);
@@ -3464,7 +4053,9 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
     if (column && !formulaColumns[column - 1] &&
       values[normalizedHeader] !== null &&
       values[normalizedHeader] !== undefined) {
-      setLiteralSheetValue_(sheet.getRange(row, column), values[normalizedHeader]);
+      const cell = sheet.getRange(row, column);
+      setLiteralSheetValue_(cell, normalizeSheetValueForCell_(
+        cell, values[normalizedHeader], normalizedHeader));
     }
   });
 
@@ -3489,6 +4080,9 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('customerCode'),
     extracted.customer_code);
+  setTextValueForHeaders_(sheet, row, layout, formulaColumns,
+    getHeaderAliases_('year'),
+    extracted.reference_year);
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('month'),
     extracted.reference_month);
@@ -3534,6 +4128,14 @@ function setLiteralSheetValue_(range, value) {
   range.setValue(value);
 }
 
+function normalizeSheetValueForCell_(range, value, header) {
+  if (!isNumericInvoiceHeader_(header) || value === null || value === undefined) {
+    return value;
+  }
+  // The header owns the type contract; user-controlled cell formatting does not.
+  return normalizeSheetValues_([{ header: header, value: value }])[0].value;
+}
+
 function setTextValueForHeaders_(sheet, row, layout, formulaColumns, aliases,
   value) {
   const column = findHeaderIndex_(layout.lookup, aliases);
@@ -3565,6 +4167,7 @@ function getCanonicalInvoiceFieldKeys_() {
     'accountHolder',
     'serviceAddress',
     'customerCode',
+    'year',
     'month'
   ];
 }
@@ -3576,6 +4179,8 @@ function setCanonicalInvoiceFieldValues_(values, lookup, extracted) {
     accountHolder: extracted.account_holder,
     serviceAddress: extracted.address_evidence,
     customerCode: extracted.customer_code,
+    year: extracted.reference_year === null || extracted.reference_year === undefined ?
+      extracted.reference_year : String(extracted.reference_year),
     month: extracted.reference_month
   };
   getCanonicalInvoiceFieldKeys_().forEach(function (key) {
@@ -3599,7 +4204,8 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     extracted.supplier);
   setCanonicalInvoiceFieldValues_(expected, layout.lookup, extracted);
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('year'),
-    extracted.reference_year);
+    extracted.reference_year === null || extracted.reference_year === undefined ?
+      extracted.reference_year : String(extracted.reference_year));
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('frequency'),
     extracted.frequency || '');
   setValueForHeaders_(expected, layout.lookup, getHeaderAliases_('consumptionCost'),
@@ -3621,7 +4227,6 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
     .getFormulas()[0];
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   const totalColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('total'));
-  const monthColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('month'));
   const discrepancies = [];
   let firstVerificationMessage = '';
   const recordDiscrepancy = function (message, discrepancy) {
@@ -3632,34 +4237,40 @@ function verifyImportedRow_(sheet, row, layout, file, extracted) {
   };
   Object.keys(expected).forEach(function (normalizedHeader) {
     const column = layout.lookup[normalizedHeader];
-    const actual = column ? sheet.getRange(row, column).getValue() : null;
-    const matches = column === monthColumn ?
-      referenceMonthValuesMatch_(actual, expected[normalizedHeader]) :
-      sheetValuesMatch_(actual, expected[normalizedHeader], extracted.issue_date);
-    if (column && !rowFormulas[column - 1] && !matches) {
+    if (!column || rowFormulas[column - 1]) {
+      return;
+    }
+    const cell = column ? sheet.getRange(row, column) : null;
+    const actual = cell ? cell.getValue() : null;
+    const expectedValue = cell ? normalizeSheetValueForCell_(
+      cell, expected[normalizedHeader], normalizedHeader) : expected[normalizedHeader];
+    const contract = getSpreadsheetVerificationContract_(expectedValue, normalizedHeader);
+    const displayValue = cell && contract.valueType === 'text' ? cell.getDisplayValue() : null;
+    const matches = sheetValuesMatch_(actual, expectedValue, extracted.issue_date,
+      contract, displayValue);
+    if (!matches) {
       recordDiscrepancy('Spreadsheet value verification failed for: ' +
         layout.headers[column - 1], {
         field: layout.headers[column - 1],
-        expected: expected[normalizedHeader],
+        expected: expectedValue,
         actual: actual,
-        valueType: verificationValueType_(expected[normalizedHeader],
-          normalizedHeader),
-        tolerance: isReconciliationCostHeader_(normalizedHeader) ?
-          CONFIG.MONEY_TOLERANCE : null
+        valueType: contract.valueType,
+        tolerance: contract.tolerance
       });
     }
   });
 
   if (totalColumn && rowFormulas[totalColumn - 1]) {
     const actualTotal = sheet.getRange(row, totalColumn).getValue();
-    if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date)) {
+    const totalContract = { valueType: 'money', tolerance: CONFIG.MONEY_TOLERANCE };
+    if (!sheetValuesMatch_(actualTotal, extracted.total, extracted.issue_date, totalContract)) {
       recordDiscrepancy('Spreadsheet formula total verification failed for: ' +
         layout.headers[totalColumn - 1], {
         field: layout.headers[totalColumn - 1],
         expected: extracted.total,
         actual: actualTotal,
-        valueType: 'money',
-        tolerance: CONFIG.MONEY_TOLERANCE
+        valueType: totalContract.valueType,
+        tolerance: totalContract.tolerance
       });
     }
   }
@@ -3739,33 +4350,35 @@ function verificationValueType_(value, normalizedHeader) {
   if (Object.prototype.toString.call(value) === '[object Date]') {
     return 'date';
   }
+  if (typeof value === 'boolean') {
+    return 'boolean';
+  }
   return 'text';
 }
 
-function sheetValuesMatch_(actual, expected, issueDate) {
-  if (Object.prototype.toString.call(expected) === '[object Date]') {
-    return dateMatches_(actual, issueDate);
-  }
-  if (typeof expected === 'number') {
-    return typeof actual === 'number' &&
-      Math.abs(actual - expected) <= CONFIG.MONEY_TOLERANCE;
-  }
-  if (typeof expected === 'boolean') {
-    return actual === expected;
-  }
-  return String(actual === null || actual === undefined ? '' : actual) ===
-    String(expected === null || expected === undefined ? '' : expected);
+function getSpreadsheetVerificationContract_(expected, normalizedHeader) {
+  const valueType = verificationValueType_(expected, normalizedHeader);
+  return { valueType: valueType,
+    tolerance: valueType === 'money' ? CONFIG.MONEY_TOLERANCE : null };
 }
 
-function referenceMonthValuesMatch_(actual, expected) {
-  const actualText = String(actual === null || actual === undefined ? '' : actual);
-  const expectedText = String(expected === null || expected === undefined ? '' : expected);
-  if (!/^\d{1,2}$/.test(actualText) || !/^\d{2}$/.test(expectedText)) {
-    return false;
+function sheetValuesMatch_(actual, expected, issueDate, contract, displayValue) {
+  if (expected === null || expected === undefined) {
+    return actual === null || actual === undefined || actual === '';
   }
-  const actualMonth = Number(actualText);
-  const expectedMonth = Number(expectedText);
-  return actualMonth >= 1 && actualMonth <= 12 && actualMonth === expectedMonth;
+  if (contract.valueType === 'date') {
+    return Object.prototype.toString.call(actual) === '[object Date]' &&
+      !isNaN(actual) && dateMatches_(actual, issueDate);
+  }
+  if (contract.valueType === 'number' || contract.valueType === 'money') {
+    return typeof actual === 'number' && Number.isFinite(actual) &&
+      Number.isFinite(expected) && (contract.valueType === 'money' ?
+        Math.abs(actual - expected) <= contract.tolerance : actual === expected);
+  }
+  if (contract.valueType === 'boolean') {
+    return actual === expected;
+  }
+  return typeof actual === 'string' && actual === expected && displayValue === expected;
 }
 
 function sha256ForFile_(file) {
@@ -3779,18 +4392,34 @@ function sha256ForFile_(file) {
   }).join('');
 }
 
-function normalizeSupplier_(supplier) {
+function supplierIdentitiesMatch_(left, right, automationConfig) {
+  const leftIdentity = normalizeCellText_(normalizeSupplier_(left, automationConfig));
+  const rightIdentity = normalizeCellText_(normalizeSupplier_(right, automationConfig));
+  return Boolean(leftIdentity) && leftIdentity === rightIdentity;
+}
+
+function normalizeSupplier_(supplier, configuredAutomation) {
   const value = String(supplier || '').trim();
   if (!value) {
     return '';
   }
-  const automationConfig = getAutomationConfig_();
+  const automationConfig = configuredAutomation || getAutomationConfig_();
   const normalized = normalizeCellText_(value);
   const canonical = automationConfig.canonical_suppliers.filter(function (item) {
     return normalizeCellText_(item) === normalized;
   })[0];
   if (canonical) {
     return canonical;
+  }
+  if (normalized === 'energygas') {
+    const energygasCanonical = automationConfig.canonical_suppliers.filter(
+      function (item) {
+        return normalizeCellText_(item) === 'energygas italia';
+      }
+    )[0];
+    if (energygasCanonical) {
+      return energygasCanonical;
+    }
   }
   const aliasKey = Object.keys(automationConfig.supplier_aliases).filter(function (key) {
     return normalizeCellText_(key) === normalized;
@@ -3814,6 +4443,9 @@ function normalizeSupplyType_(supplyType) {
 }
 
 function applyFrequencyOverride_(extracted) {
+  Object.defineProperty(extracted, 'frequency_override_authoritative_', {
+    value: false, enumerable: false, configurable: true
+  });
   const override = (getAutomationConfig_().frequency_overrides || []).filter(function (item) {
     return item.supplier === extracted.supplier && item.supply_type === extracted.supply_type;
   })[0];
@@ -3842,6 +4474,11 @@ function normalizeExtractedInvoiceFrequency_(extracted) {
   if (!frequency || extracted.frequency) {
     return;
   }
+  Object.defineProperty(extracted, 'frequency_provenance_missing_', {
+    value: Boolean(normalizeInferredFrequency_(frequency)),
+    enumerable: false,
+    configurable: true
+  });
   const recognizedAbsence = isRecognizedMissingFrequencyValue_(frequency);
   const problem = recognizedAbsence ? 'Billing frequency is not printed.' :
     'Billing frequency value is unsupported or lacks printed provenance.';
@@ -3881,7 +4518,8 @@ function normalizeExplicitInvoiceFrequency_(value) {
 }
 
 function isMissingFrequencyProblem_(problem) {
-  const text = String(problem || '').trim();
+  const text = String(problem || '').trim()
+    .replace(/\bnon esplicitamente (stampat[oa])\b/ig, 'non $1 esplicitamente');
   if (!text) {
     return false;
   }
@@ -3891,12 +4529,47 @@ function isMissingFrequencyProblem_(problem) {
   if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
     return false;
   }
-  return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+  const normalized = normalizeCellText_(text);
+  const inferredAbsencePatterns = [
+    /^il documento non riporta una frequenza esplicita la frequenza e stata dedotta a (?:mensile|bimestrale|trimestrale) dal periodo fatturato completo$/,
+    /^la frequenza di fatturazione e dedotta dal periodo fatturato non e stampata esplicitamente$/,
+    /^frequenza di fatturazione non trovata o non esplicita nel documento dedotta come (?:mensile|bimestrale|trimestrale) dal periodo di riferimento$/,
+    /^(?:billing )?frequency (?:is )?not (?:printed|present|reported|indicated|explicit) (?:and |but )?(?:is |was )?(?:inferred|derived) (?:as (?:monthly|bimonthly|quarterly) )?from (?:the )?(?:billing |billed )?period$/
+  ];
+  if (inferredAbsencePatterns.some(function (pattern) {
+    return pattern.test(normalized);
+  })) {
+    return true;
+  }
+  return /^(?:(?:la|the)\s+)?(?:frequenza(?:\s+di\s+fatturazione)?|billing\s+frequency|frequency)(?:\s+(?:is|was|è))?\s+(?:missing|absent|unavailable|not\s+(?:explicitly\s+)?(?:printed|present|reported|indicated)|non\s+(?:è\s+)?(?:stampat[oa]|presente|riportat[oa]|indicat[oa]|trovat[oa])(?:\s+esplicitamente)?|assente|mancante)(?:\s+(?:on|in|nel|nella|sul|sulla)\s+(?:the\s+)?(?:supplier\s+)?(?:invoice|document|fattura|documento))?\.?$/i.test(text);
+}
+
+function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
+  const hasAuthoritativeResolution = extracted &&
+    (extracted.frequency_inferred_ === true ||
+      extracted.frequency_override_authoritative_ === true);
+  if (!extracted || extracted.frequency_source_evidence === 'printed' ||
+    !hasAuthoritativeResolution ||
+    (extracted.frequency_override_authoritative_ !== true &&
+      extracted.frequency_provenance_missing_ !== true)) {
+    return false;
+  }
+  const authoritative = extracted.frequency_override_authoritative_ === true;
+  const normalizedFrequency = authoritative ?
+    normalizeExplicitInvoiceFrequency_(extracted.frequency) :
+    normalizeInferredFrequency_(extracted.frequency);
+  if (!normalizedFrequency || !authoritative &&
+    ['monthly', 'bimonthly', 'quarterly'].indexOf(normalizedFrequency) < 0) {
+    return false;
+  }
+  return /^billing frequency value is unsupported or lacks printed provenance\.?$/i
+    .test(String(problem || '').trim());
 }
 
 function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
   extracted.problems = (extracted.problems || []).filter(function (problem) {
-    return !isMissingFrequencyProblem_(problem);
+    return !isMissingFrequencyProblem_(problem) &&
+      !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted);
   });
 }
 
@@ -3911,7 +4584,290 @@ function isInvoiceCoreMonetaryReconciled_(extracted) {
   ) <= CONFIG.MONEY_TOLERANCE;
 }
 
-function getConfiguredSecondaryInvoiceHeaders_(headers) {
+function getSupplierReconciliationGroups_(key) {
+  const registry = getLocalizationRegistry_();
+  const contracts = Object.keys(registry).map(function (locale) {
+    return registry[locale].supplierReconciliation;
+  });
+  const first = contracts[0][key];
+  return (Array.isArray(first) ? first : [first]).map(function (_, index) {
+    return contracts.map(function (contract) {
+      return Array.isArray(contract[key]) ? contract[key][index] : contract[key];
+    });
+  });
+}
+
+function readConfiguredReconciliationField_(extracted, aliases) {
+  const normalizedAliases = aliases.map(normalizeHeader_);
+  const available = extracted.configured_writable_headers ||
+    (extracted.sheet_values || []).map(function (entry) { return entry.header; });
+  const headers = available.filter(function (header) {
+    return normalizedAliases.indexOf(normalizeHeader_(header)) >= 0;
+  });
+  const entries = (extracted.sheet_values || []).filter(function (entry) {
+    return entry && normalizedAliases.indexOf(normalizeHeader_(entry.header)) >= 0;
+  });
+  const header = headers[0] || aliases[0];
+  const missing = !entries.length || entries[0].value === null;
+  const absence = missing && (extracted.problems || []).some(function (problem) {
+    const classification = classifyConfiguredSecondaryInvoiceProblem_(problem, extracted);
+    return classification.disposition === 'explicit-absence' &&
+      normalizeHeader_(classification.field) === normalizeHeader_(header);
+  });
+  return {
+    header: header,
+    configured: headers.length > 0,
+    duplicate: headers.length > 1 || entries.length > 1,
+    present: entries.length > 0,
+    value: entries.length ? parseSheetMoneyValue_(entries[0].value) : null,
+    rawValue: entries.length ? entries[0].value : null,
+    absent: absence
+  };
+}
+
+function validateSupplierNonConsumptionDetails_(extracted, key, code, label) {
+  const details = getSupplierReconciliationGroups_(key).map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  const invalid = details.filter(function (detail) {
+    return detail.configured && (detail.duplicate ||
+      detail.value === null && !detail.absent);
+  });
+  const fields = details.filter(function (detail) { return detail.configured; })
+    .map(function (detail) { return detail.header; }).concat([
+      'cost_consumption', 'cost_non_consumption', 'vat', 'total'
+    ]);
+  if (invalid.length) {
+    return invalidExtraction_(label + ' configured detailed costs are missing or nonnumeric.',
+      'Re-read each configured detail. Resolve absence only through the reviewed default or explicit non-applicability rule; never invent a zero.',
+      { code: code + '_incomplete', repairable: true, fields: fields });
+  }
+  // Simple sheets and formula-backed columns do not expose a complete writable
+  // partition. Verified absence does not disable checks on the remaining costs.
+  if (!details.every(function (detail) {
+    return detail.configured;
+  })) {
+    return { valid: true };
+  }
+  // Sum observed/defaulted numerical members without inserting a value for an
+  // absent member into the extraction or its eventual spreadsheet cell.
+  const total = details.reduce(function (sum, detail) {
+    return detail.value === null ? sum : sum + detail.value;
+  }, 0);
+  if (typeof extracted.cost_non_consumption === 'number' &&
+    Number.isFinite(extracted.cost_non_consumption) &&
+    Math.abs(total - extracted.cost_non_consumption) <= CONFIG.MONEY_TOLERANCE) {
+    return { valid: true };
+  }
+  return invalidExtraction_(label + ' detailed costs do not reconcile with the non-consumption total.',
+    'Re-examine the printed, mutually exclusive detail rows and totals. Do not invent a residual, VAT, total, or balancing detail.',
+    { code: code, repairable: true, fields: fields });
+}
+
+function getEnergygasElectricityConsumptionEvidence_(extracted) {
+  const supplyAliases = getSupplierReconciliationGroups_('electricitySupply')[0]
+    .map(normalizeCellText_);
+  if (!extracted || extracted.document_type !== 'Invoice' ||
+    ['energygas italia', 'energygas'].indexOf(normalizeCellText_(extracted.supplier)) < 0 ||
+    supplyAliases.indexOf(normalizeCellText_(extracted.supply_type)) < 0) {
+    return { valid: true, applicable: false, absentBandHeaders: [] };
+  }
+  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  const quantityField = readConfiguredReconciliationField_(extracted,
+    getSupplierReconciliationGroups_('quantity')[0]);
+  const registry = getLocalizationRegistry_();
+  const bandQuantityFields = [0, 1, 2].map(function (band) {
+    const aliases = Object.keys(registry).reduce(function (all, locale) {
+      return all.concat(registry[locale].electricityDashboard.bandAliases[band]);
+    }, []);
+    return readConfiguredReconciliationField_(extracted, aliases);
+  });
+  const quantityFields = [quantityField].concat(bandQuantityFields);
+  rateFields.forEach(function (field) {
+    field.number = parseUnambiguousSheetNumber_(field.rawValue);
+  });
+  quantityFields.forEach(function (field) {
+    field.number = normalizeElectricityBandConsumption_(field.rawValue);
+  });
+  const fields = rateFields.concat(quantityFields);
+  const active = function (field) { return field.configured || field.present; };
+  const absent = function (field) {
+    return !field.duplicate && field.rawValue === null &&
+      (extracted.problems || []).some(function (problem) {
+        return isExplicitElectricityFieldAbsence_(problem, field.header);
+      });
+  };
+  const bandFields = rateFields.slice(1).concat(bandQuantityFields);
+  const wholeBandsAbsent = bandFields.every(function (field) {
+    return !active(field) || absent(field);
+  });
+  const completeBandQuantities = bandQuantityFields.every(function (field) {
+    return field.number !== null;
+  });
+  const completeBands = completeBandQuantities && rateFields.slice(1).every(function (field) {
+    return field.number !== null;
+  });
+  const aggregateQuantity = extracted.electricity_consumption_quantity;
+  const aggregateRate = extracted.electricity_selling_unit_rate;
+  const hasAggregate = aggregateQuantity !== null && aggregateQuantity !== undefined ||
+    aggregateRate !== null && aggregateRate !== undefined;
+  const completeAggregate = typeof aggregateQuantity === 'number' &&
+    Number.isFinite(aggregateQuantity) && aggregateQuantity >= 0 &&
+    typeof aggregateRate === 'number' && Number.isFinite(aggregateRate);
+  const completeSheetAggregate = quantityField.number !== null && rateFields[0].number !== null;
+  const hasAggregatePair = completeAggregate || completeSheetAggregate;
+  const costs = [];
+  const quantities = quantityField.number === null ? [] : [quantityField.number];
+  if (completeAggregate) {
+    quantities.push(aggregateQuantity);
+    costs.push(aggregateQuantity * aggregateRate);
+  }
+  if (completeSheetAggregate) {
+    costs.push(quantityField.number * rateFields[0].number);
+  }
+  if (completeBandQuantities) {
+    const bandQuantity = bandQuantityFields.reduce(function (sum, field) {
+      return sum + field.number;
+    }, 0);
+    quantities.push(bandQuantity);
+    if (rateFields[0].number !== null) {
+      costs.push(bandQuantity * rateFields[0].number);
+    }
+    if (completeBands) {
+      costs.push(bandQuantityFields.reduce(function (sum, field, index) {
+        return sum + field.number * rateFields[index + 1].number;
+      }, 0));
+    }
+  }
+  // A rates-only sheet can still corroborate an aggregate quantity when all
+  // three reported band rates are equal; partial bands never stand for a bill.
+  if (!completeBandQuantities && quantityField.number !== null &&
+    rateFields.slice(1).every(function (field) {
+      return field.number !== null && Math.abs(field.number - rateFields[1].number) < 1e-9;
+    })) {
+    costs.push(quantityField.number * rateFields[1].number);
+  }
+  const invalidFields = fields.some(function (field) {
+    if (!active(field)) {
+      return false;
+    }
+    if (field.duplicate || field.rawValue !== null && field.number === null) {
+      return true;
+    }
+    if (field.number !== null) {
+      // An absence claim cannot conceal a populated value, including zero.
+      return (extracted.problems || []).some(function (problem) {
+        return isExplicitElectricityFieldAbsence_(problem, field.header);
+      });
+    }
+    return bandFields.indexOf(field) >= 0 ? !wholeBandsAbsent || !hasAggregatePair :
+      !absent(field) || !(completeBands || completeAggregate);
+  });
+  const conflictingAggregateRate = completeAggregate && rateFields[0].number !== null &&
+    Math.abs(aggregateRate - rateFields[0].number) > 1e-9;
+  const valid = !invalidFields && (!hasAggregate || completeAggregate) &&
+    !conflictingAggregateRate && quantities.every(function (quantity) {
+      return Math.abs(quantity - quantities[0]) <= 1e-9;
+    }) && costs.every(function (cost) {
+      return Number.isFinite(cost) && typeof extracted.cost_consumption === 'number' &&
+        Number.isFinite(extracted.cost_consumption) &&
+        Math.abs(cost - extracted.cost_consumption) <= CONFIG.MONEY_TOLERANCE;
+    });
+  return { valid: valid, applicable: true, fields: fields.filter(active).map(function (field) {
+    return field.header;
+  }).concat(['electricity_consumption_quantity', 'electricity_selling_unit_rate',
+    'cost_consumption', 'cost_non_consumption', 'vat', 'total']),
+  absentBandHeaders: valid && wholeBandsAbsent && hasAggregatePair ?
+    bandFields.filter(active).map(function (field) { return field.header; }) : [] };
+}
+
+function isExplicitElectricityFieldAbsence_(problem, header) {
+  return isStandaloneInformationalProblem_(problem) && isExplicitFieldAbsenceStatement_(
+    problem, escapeRegExp_(header),
+    'not\\s+(?:printed|present|reported|indicated|applicable)|missing|absent|' +
+    'non\\s+(?:(?:è|e)\\s+)?(?:stampata|stampato|presente|riportata|riportato|indicata|indicato|applicabile)|assente|mancante'
+  );
+}
+
+function isInformationalElectricityBandAbsenceProblem_(problem, extracted) {
+  if (!isInvoiceCoreMonetaryReconciled_(extracted)) {
+    return false;
+  }
+  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+  return evidence.valid && evidence.absentBandHeaders.some(function (header) {
+    return isExplicitElectricityFieldAbsence_(problem, header);
+  });
+}
+
+function validateEnergygasLuceDetailedReconciliation_(extracted) {
+  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+  if (!evidence.applicable) {
+    return { valid: true };
+  }
+  if (!evidence.valid) {
+    return invalidExtraction_(
+      'The electricity selling rate and quantity are incomplete or do not reconcile with selling consumption cost.',
+      'Re-read the selling consumption summary rate and quantity, not a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
+      {
+        code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
+        fields: evidence.fields
+      }
+    );
+  }
+  const validation = validateSupplierNonConsumptionDetails_(extracted, 'energygasDetails',
+    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity');
+  return validation.valid ? validateSupplierMonetaryOverlays_(extracted,
+    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity') : validation;
+}
+
+function parseSheetMoneyValue_(value) {
+  const numeric = parseUnambiguousSheetNumber_(value);
+  return numeric === null ? null : Math.round(numeric * 100) / 100;
+}
+
+function validateOenergyGasDetailedReconciliation_(extracted) {
+  if (!extracted || extracted.document_type !== 'Invoice' ||
+    normalizeCellText_(extracted.supplier) !== 'oenergy' ||
+    normalizeCellText_(extracted.supply_type) !== 'gas') {
+    return { valid: true };
+  }
+  const validation = validateSupplierNonConsumptionDetails_(extracted, 'oenergyDetails',
+    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
+  if (!validation.valid) {
+    return validation;
+  }
+  return validateSupplierMonetaryOverlays_(extracted,
+    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
+}
+
+function validateSupplierMonetaryOverlays_(extracted, code, label) {
+  const registry = getLocalizationRegistry_();
+  const canonicalFields = {
+    consumptionCost: 'cost_consumption', nonConsumptionCosts: 'cost_non_consumption', vat: 'vat'
+  };
+  for (const key of Object.keys(canonicalFields)) {
+    const aliases = Object.keys(registry).reduce(function (all, locale) {
+      return all.concat(registry[locale].headerAliases[key]);
+    }, []);
+    const field = readConfiguredReconciliationField_(extracted, aliases);
+    // Omission uses the canonical amount. A supplied null would suppress its
+    // write, so it must fail just like a mismatched numerical overlay.
+    if (field.configured && (field.duplicate || field.present &&
+      (field.value === null || typeof extracted[canonicalFields[key]] !== 'number' ||
+        !Number.isFinite(extracted[canonicalFields[key]]) ||
+        Math.abs(field.value - extracted[canonicalFields[key]]) > CONFIG.MONEY_TOLERANCE))) {
+      return invalidExtraction_(label + ' supplementary costs do not reconcile with the extracted totals.',
+        'Re-read the printed consumption, non-consumption, VAT, and total amounts without inventing balancing values.',
+        { code: code, repairable: true,
+          fields: [field.header, 'cost_consumption', 'cost_non_consumption', 'vat', 'total'] });
+    }
+  }
+  return { valid: true };
+}
+
+function getConfiguredSecondaryInvoiceHeaders_(headers, extracted) {
   const localization = getLocalization_();
   const canonicalKeys = [
     'issueDate', 'supplier', 'identifier', 'contractNumber', 'accountHolder',
@@ -3921,7 +4877,7 @@ function getConfiguredSecondaryInvoiceHeaders_(headers) {
   const excluded = canonicalKeys.reduce(function (all, key) {
     return all.concat(getHeaderAliases_(key));
   }, []).concat(localization.electricityBandHeaders || []).concat(
-    (localization.supplierFieldDefaults || []).map(function (item) {
+    getApplicableSupplierFieldDefaults_(extracted).map(function (item) {
       return item.header;
     })
   ).map(normalizeHeader_);
@@ -4094,7 +5050,7 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted) {
     const counts = Object.create(null);
     let independentIdentityUnavailable = false;
     values.forEach(function (row, index) {
-      if (normalizeCellText_(row[supplierColumn - 1]) !== normalizeCellText_(extracted.supplier)) {
+      if (!supplierIdentitiesMatch_(row[supplierColumn - 1], extracted.supplier, config)) {
         return;
       }
       if (normalizeNameIdentity_(row[holderColumn - 1]) !==
@@ -4174,6 +5130,11 @@ function inferInvoiceFrequency_(extracted) {
   extracted.frequency = historyVetoesPeriod ? '' :
     periodFrequency || historicalEvidence.frequency || '';
   if (extracted.frequency) {
+    Object.defineProperty(extracted, 'frequency_inferred_', {
+      value: true,
+      enumerable: false,
+      configurable: true
+    });
     reconcileResolvedInvoiceFrequencyProblems_(extracted);
   } else if (historicalEvidence.state === 'unavailable') {
     extracted.problems = extracted.problems || [];

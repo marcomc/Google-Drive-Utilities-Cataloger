@@ -126,6 +126,240 @@ function migrateCatalogerServiceIdentityFields() {
 }
 
 /**
+ * Normalize imported reference years and months as literal text. This keeps
+ * chart category labels stable for existing rows and is safe to rerun.
+ */
+function migrateCatalogerReferencePeriodText() {
+  assertCatalogConfiguration_();
+  return withCatalogLifecycleLock_('reference-period-text-migration', function () {
+    const automationConfig = getAutomationConfig_();
+    const spreadsheet = SpreadsheetApp.openById(getSpreadsheetId_());
+    const properties = PropertiesService.getScriptProperties();
+    const key = CONFIG.PROPERTY_KEYS.REFERENCE_PERIOD_MIGRATION;
+    const seenSheets = Object.create(null);
+    // Resolve every target before recovering or starting any row mutation.
+    const targets = automationConfig.canonical_supplies.map(function (supply) {
+      const sheetName = automationConfig.sheet_by_supply[supply];
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) {
+        throw new Error('Configured spreadsheet tab is missing: ' + sheetName);
+      }
+      const sheetId = sheet.getSheetId();
+      if (seenSheets[sheetId]) {
+        return null;
+      }
+      seenSheets[sheetId] = true;
+      const layout = getSheetLayout_(sheet);
+      const columns = ['issueDate', 'supplier', 'year', 'month'].map(function (field) {
+        return findHeaderIndex_(layout.lookup, getHeaderAliases_(field));
+      });
+      if (columns.some(function (column) { return !column; }) ||
+        new Set(columns).size !== columns.length) {
+        throw new Error('Reference period migration requires distinct issue date, supplier, year, and month headers.');
+      }
+      return { supply: supply, sheet: sheet, layout: layout, columns: columns, changedRows: 0 };
+    }).filter(Boolean);
+    const pending = properties.getProperty(key);
+    if (pending !== null && pending !== '') {
+      const journal = parseReferencePeriodMigration_(pending);
+      const target = targets.filter(function (candidate) {
+        return candidate.sheet.getSheetId() === journal.sheetId;
+      })[0];
+      if (!target || journal.spreadsheetId !== spreadsheet.getId() ||
+        journal.sheetName !== target.sheet.getName()) {
+        throw new Error('Reference period migration target changed; checkpoint retained.');
+      }
+      resumeReferencePeriodRow_(target, journal, properties, key);
+      target.changedRows += 1;
+    }
+    targets.forEach(function (target) {
+      const sheet = target.sheet;
+      const layout = target.layout;
+      const lastRow = sheet.getLastRow();
+      for (let row = layout.headerRow + 1; row <= lastRow; row += 1) {
+        const state = readReferencePeriodRow_(sheet, row, layout.headers.length);
+        if (!state.values[target.columns[0] - 1] && !state.values[target.columns[1] - 1]) {
+          continue;
+        }
+        const fields = [4, 2].map(function (width, index) {
+          const column = target.columns[index + 2];
+          const value = state.values[column - 1];
+          const expected = normalizeReferencePeriodText_(value, width);
+          const format = state.formats[column - 1];
+          if (!expected || state.formulas[column - 1] ||
+            typeof value === 'string' && value === expected && format === '@') {
+            return null;
+          }
+          return { column: column, width: width, prior: serializeImportedCellValue_(value),
+            priorFormat: format, expected: expected, stage: 'planned' };
+        }).filter(Boolean);
+        if (!fields.length) {
+          continue;
+        }
+        const journal = { version: 1, spreadsheetId: spreadsheet.getId(), sheetId: sheet.getSheetId(),
+          sheetName: sheet.getName(), headerRow: layout.headerRow, row: row,
+          contextHash: referencePeriodRowContextHash_(layout, state, fields), fields: fields };
+        saveReferencePeriodMigration_(properties, key, journal);
+        resumeReferencePeriodRow_(target, journal, properties, key);
+        target.changedRows += 1;
+      }
+    });
+    return { migrated: true, sheets: targets.map(function (target) {
+      return { supply: target.supply, sheet: target.sheet.getName(), changedRows: target.changedRows };
+    }) };
+  });
+}
+
+function readReferencePeriodRow_(sheet, row, width) {
+  const range = sheet.getRange(row, 1, 1, width);
+  return { values: range.getValues()[0], formulas: range.getFormulas()[0],
+    formats: range.getNumberFormats()[0] };
+}
+
+function referencePeriodRowContextHash_(layout, state, fields) {
+  const columns = fields.map(function (field) { return field.column; });
+  const context = state.values.map(function (value, index) {
+    if (columns.indexOf(index + 1) >= 0) {
+      return null;
+    }
+    // Formula results may recalculate when period cells change; the formula
+    // rather than a volatile computed value, identifies that cell. Unrelated
+    // formatting is presentation state that this migration never overwrites.
+    return { value: state.formulas[index] ? null : serializeImportedCellValue_(value),
+      formula: state.formulas[index] };
+  });
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+    JSON.stringify([layout.headerRow, layout.headers, context]), Utilities.Charset.UTF_8)
+    .map(function (byte) { return ('0' + (byte & 255).toString(16)).slice(-2); }).join('');
+}
+
+function saveReferencePeriodMigration_(properties, key, journal) {
+  const serialized = JSON.stringify(journal);
+  // Leave headroom beneath the per-property quota, including UTF-8 text.
+  if (referencePeriodMigrationBytes_(journal, serialized) > 8000) {
+    throw new Error('Reference period migration checkpoint exceeds its size limit.');
+  }
+  properties.setProperty(key, serialized);
+}
+
+function referencePeriodMigrationBytes_(journal, serialized) {
+  // Reserve the longest stage spelling before the first format write too.
+  return Utilities.newBlob(serialized).getBytes().length + journal.fields.reduce(function (bytes, field) {
+    return bytes + 'formatted'.length - field.stage.length;
+  }, 0);
+}
+
+function parseReferencePeriodMigration_(raw) {
+  if (typeof raw !== 'string' || Utilities.newBlob(raw).getBytes().length > 8000) {
+    throw new Error('Invalid reference period migration checkpoint; retained for inspection.');
+  }
+  let journal;
+  try { journal = JSON.parse(raw); } catch (error) {
+    throw new Error('Invalid reference period migration checkpoint; retained for inspection.');
+  }
+  const exactKeys = function (value, keys) {
+    return value && typeof value === 'object' && !Array.isArray(value) &&
+      Object.keys(value).sort().join(',') === keys.slice().sort().join(',');
+  };
+  if (!exactKeys(journal, ['version', 'spreadsheetId', 'sheetId', 'sheetName', 'headerRow',
+    'row', 'contextHash', 'fields']) || journal.version !== 1 ||
+    typeof journal.spreadsheetId !== 'string' || !journal.spreadsheetId ||
+    typeof journal.sheetName !== 'string' || !journal.sheetName ||
+    !Number.isInteger(journal.sheetId) || journal.sheetId < 0 ||
+    !Number.isInteger(journal.headerRow) || journal.headerRow < 1 ||
+    !Number.isInteger(journal.row) || journal.row <= journal.headerRow ||
+    typeof journal.contextHash !== 'string' || !/^[a-f0-9]{64}$/.test(journal.contextHash) ||
+    !Array.isArray(journal.fields) || journal.fields.length < 1 || journal.fields.length > 2 ||
+    journal.fields.some(function (field, index) {
+      if (!exactKeys(field, ['column', 'width', 'prior', 'priorFormat', 'expected', 'stage']) ||
+        !Number.isInteger(field.column) || field.column < 1 || [4, 2].indexOf(field.width) < 0 ||
+        !exactKeys(field.prior, ['type', 'value']) ||
+        typeof field.priorFormat !== 'string' || typeof field.expected !== 'string' || !field.expected ||
+        ['planned', 'formatted', 'written'].indexOf(field.stage) < 0 ||
+        journal.fields.slice(0, index).some(function (previous) {
+          return previous.column === field.column || previous.width === field.width;
+        })) {
+        return true;
+      }
+      const prior = field.prior;
+      const validValue = prior.type === 'date' ? typeof prior.value === 'number' &&
+        Number.isFinite(new Date(prior.value).getTime()) :
+        prior.type === 'value' && (typeof prior.value === 'string' || typeof prior.value === 'boolean' ||
+          typeof prior.value === 'number' && Number.isFinite(prior.value) || prior.value === null);
+      return !validValue || field.expected !== normalizeReferencePeriodText_(
+        deserializeImportedCellValue_(prior), field.width);
+    })) {
+    throw new Error('Invalid reference period migration checkpoint; retained for inspection.');
+  }
+  if (referencePeriodMigrationBytes_(journal, raw) > 8000) {
+    throw new Error('Reference period migration checkpoint exceeds its size limit.');
+  }
+  return journal;
+}
+
+function resumeReferencePeriodRow_(target, journal, properties, key) {
+  const verify = function () {
+    const layout = getSheetLayout_(target.sheet);
+    if (target.sheet.getSheetId() !== journal.sheetId || target.sheet.getName() !== journal.sheetName ||
+      layout.headerRow !== journal.headerRow || journal.row > target.sheet.getLastRow() ||
+      journal.fields.some(function (field) {
+        return field.column !== findHeaderIndex_(layout.lookup,
+          getHeaderAliases_(field.width === 4 ? 'year' : 'month'));
+      })) {
+      throw new Error('Reference period migration row or layout changed; checkpoint retained.');
+    }
+    const state = readReferencePeriodRow_(target.sheet, journal.row, layout.headers.length);
+    if (referencePeriodRowContextHash_(layout, state, journal.fields) !== journal.contextHash) {
+      throw new Error('Reference period migration row contents changed; checkpoint retained.');
+    }
+    journal.fields.forEach(function (field) {
+      const index = field.column - 1;
+      const prior = JSON.stringify(serializeImportedCellValue_(state.values[index])) === JSON.stringify(field.prior);
+      const expected = state.values[index] === field.expected && state.formats[index] === '@';
+      const formatted = prior && state.formats[index] === '@';
+      const original = prior && state.formats[index] === field.priorFormat;
+      if (state.formulas[index] || !(expected || field.stage !== 'written' && formatted ||
+        field.stage === 'planned' && original)) {
+        throw new Error('Reference period migration cell changed; checkpoint retained.');
+      }
+    });
+    return state;
+  };
+  verify();
+  journal.fields.forEach(function (field) {
+    let state = verify();
+    const index = field.column - 1;
+    if (state.values[index] !== field.expected || state.formats[index] !== '@') {
+      const cell = target.sheet.getRange(journal.row, field.column);
+      if (state.formats[index] !== '@') {
+        cell.setNumberFormat('@');
+      }
+      field.stage = 'formatted';
+      saveReferencePeriodMigration_(properties, key, journal);
+      state = verify();
+      if (state.values[index] !== field.expected) {
+        setLiteralSheetValue_(cell, field.expected);
+      }
+    }
+    field.stage = 'written';
+    saveReferencePeriodMigration_(properties, key, journal);
+    verify();
+  });
+  properties.deleteProperty(key);
+}
+
+function normalizeReferencePeriodText_(value, width) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return '';
+  }
+  return width === 2 && /^\d{1,2}$/.test(text) ? text.padStart(2, '0') : text;
+}
+
+/**
  * Reconfigure only the installed time zone without reading the deleted
  * installer handoff or changing triggers and event transport.
  */
@@ -408,6 +642,32 @@ function validateCatalogerInstallation() {
   };
 }
 
+/**
+ * Validate the configured Gemini model against every enabled backend without
+ * exposing the stored API key or performing a document-generation request.
+ * This is owner-controlled operational validation for model migrations.
+ */
+function validateConfiguredGeminiAccess() {
+  const backend = getGeminiBackend_();
+  const autoVertexFallback = isAutomaticVertexFallbackEnabled_();
+  const model = getGeminiModel_();
+  validateInstallerGeminiAccess_({
+    projectId: getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID),
+    geminiBackend: backend,
+    geminiApiKey: getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY),
+    geminiModel: model,
+    autoVertexFallback: autoVertexFallback,
+    vertexLocation: getVertexAiLocation_()
+  });
+  return {
+    applicationVersion: CONFIG.APP_VERSION,
+    geminiBackend: backend,
+    geminiModel: model,
+    geminiApiValidated: backend === 'gemini_api',
+    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback
+  };
+}
+
 function validateInstallerOptions_(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new Error('Installer options must be an object.');
@@ -550,6 +810,45 @@ function readInstallerBootstrapOptions_(options) {
     );
   }
   return privateOptions;
+}
+
+/**
+ * Rotate only the Gemini Developer API credential from a private handoff.
+ *
+ * This owner-only maintenance entrypoint deliberately preserves the existing
+ * installation, transport, triggers, and Vertex fallback configuration.
+ * The secret version contains the cataloger's Cloud project identity so the
+ * existing installation handoff ownership checks remain in force.
+ */
+function rotateGeminiDeveloperApiKeyFromSecret(options) {
+  return withCatalogLifecycleLock_('gemini-api-key-rotation', function () {
+    const properties = PropertiesService.getScriptProperties();
+    const installedProject = properties.getProperty(
+      CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID);
+    if (!installedProject) {
+      throw new Error('Configure the installation Cloud project before key rotation.');
+    }
+    const privateOptions = readInstallerBootstrapOptions_(options);
+    if (privateOptions.projectId !== installedProject) {
+      throw new Error('Credential handoff does not match the installed Cloud project.');
+    }
+    const apiKey = String(privateOptions.geminiApiKey || '').trim();
+    const apiProjectId = String(privateOptions.geminiApiProjectId || '').trim();
+    if (!apiKey) {
+      throw new Error('Gemini Developer API key is missing from the handoff.');
+    }
+    if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(apiProjectId)) {
+      throw new Error('Gemini API project identity is invalid.');
+    }
+    validateInstallerGeminiDeveloperApi_({
+      geminiApiKey: apiKey,
+      geminiModel: getGeminiModel_()
+    });
+    properties.setProperty(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY, apiKey);
+    return Object.assign(getSetupStatus(), {
+      geminiApiProjectId: apiProjectId
+    });
+  });
 }
 
 function validateInstallerGeminiAccess_(options) {

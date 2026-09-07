@@ -35,6 +35,11 @@ Gemini API prepayment credits triggers one Vertex retry and a one-hour
 temporary Vertex route. Other transient network, `408`, generic `429`, and
 selected `5xx` failures receive one bounded retry on the current backend;
 short-lived rate limits do not cause Vertex usage.
+The Interactions API's `quota_exceeded` code identifies daily exhaustion;
+`rate_limit_exceeded` and `too_many_requests` keep the transient retry path.
+Legacy responses require a structured daily-quota violation or the explicit
+prepayment-depletion message. Quota names, shared metrics and documentation
+links alone never activate paid fallback.
 
 ## Script Properties
 
@@ -52,15 +57,52 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | `SPREADSHEET_ID` | Destination spreadsheet ID. |
 | `AUTOMATION_CONFIG_JSON` | Complete contents of `config.local.json`. |
 | `GOOGLE_CLOUD_PROJECT_ID` | Linked standard Cloud project ID, required for Drive events. |
-| `GEMINI_MODEL` | Optional; defaults to `gemini-3.7-flash` for both Gemini Developer API and Vertex AI fallback. |
+| `GEMINI_MODEL` | Optional; defaults to Google's `gemini-flash-latest` alias for both Gemini Developer API and Vertex AI fallback. |
 | `VERTEX_AI_LOCATION` | Optional for `vertex_ai`; defaults to `global`. |
 
-The default `gemini-3.7-flash` request uses `medium` thinking and an
-8,192-token JSON response budget for both backends. A persisted
-`gemini-3.6-flash` value is automatically treated as `gemini-3.7-flash`, so
-source deployment upgrades existing installations without a separate Script
-Properties change. The value is shared by the Developer API primary and Vertex
-fallback.
+The default `gemini-flash-latest` alias follows Google's newest release of the
+Flash model variation. Google documents that this alias is hot-swapped when a
+new Flash release becomes available and provides advance notice for breaking
+changes. The alias does not pin a numeric Flash version; record the provider's
+reported model version when available rather than inferring it from the alias.
+The default Developer API request uses Google's Interactions API with an
+8,192-token output budget, explicit `medium` thinking, structured JSON output,
+and `store:false` so invoice documents are not retained as Interaction state.
+Vertex AI continues to use `generateContent`, the same alias and output budget,
+with an explicit `thinkingBudget: 4096`.
+
+Every saved model identifier, including `gemini-3.6-flash` and
+`gemini-3.7-flash`, remains an explicit pin after source deployment. The moving
+alias is used only when runtime model configuration is absent or blank, or
+when the operator explicitly selects it. To switch an existing installation,
+call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
+Then `validateConfiguredGeminiAccess()` performs a harmless metadata/token count
+validation against every enabled backend. A former default spelling alone
+does not establish that the operator intended to follow future defaults.
+Reasoning controls follow the selected API and documented
+[Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
+and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)
+model capabilities:
+Gemini 2.5 pins use `medium` through Interactions and a 4,096-token thinking
+budget through Vertex; `gemini-3-pro-preview` uses `high` through Interactions.
+Unclassified pins omit unsupported reasoning settings and retain the explicit
+response limit.
+
+Supplier values written to Sheets use the exact configured canonical spelling.
+The built-in `ENERGYGAS` abbreviation is accepted as `Energygas Italia` when
+that canonical supplier is configured. The owner-only
+`migrateCatalogerEnergygasCanonicalSpelling` function updates a single legacy
+canonical value and its references. It rejects a configuration containing both
+legacy and target identities, in either order, before changing any property.
+Existing reference year/month cells can
+be normalized with the owner-only
+`migrateCatalogerReferencePeriodText` maintenance function.
+
+`configureGeminiBackend` is an owner-only maintenance function for selecting
+`gemini_api` or the already configured `vertex_ai` backend. Use it temporarily
+only when an operator has confirmed a Developer API outage and accepts the
+Vertex AI billing path; restore `gemini_api` after the recovery. HTTP status
+alone must not enable paid fallback automatically.
 
 Do not set `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`,
 `WORKSPACE_EVENT_SUBSCRIPTION`, or `WORKSPACE_EVENT_EXPIRES_AT`. The automation
@@ -142,9 +184,10 @@ or formula-backed blank controls also require manual correction. Imported rows
 retain the printed holder and address, so address changes remain visible in the
 historical record.
 
-Comparison ignores case, punctuation, repeated whitespace, line breaks, and
-common Italian street abbreviations. Street, civic number, and city must all
-be present; field order, CAP, and formatting do not have to match. A missing
+Comparison ignores case, punctuation, repeated whitespace, line breaks, common
+Italian street abbreviations, reviewed honorific prefixes, and a trailing
+province code after the complete city. Street-name connectors and qualifiers
+remain significant, as do every civic-number and city token; field order, CAP, and formatting do not have to match. A missing
 control value or mismatch produces `NEEDS REVIEW` without changing Drive or
 Sheets, except for the explicit pristine-tab first-import bootstrap above.
 

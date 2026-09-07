@@ -42,6 +42,25 @@ function loadInstaller(fetchImplementation) {
   return context;
 }
 
+function loadInstallerWithRuntimeConfig(fetchImplementation, stored) {
+  const context = loadInstaller(fetchImplementation);
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (key) => stored[key] || '',
+    setProperty: (key, value) => { stored[key] = value; },
+    setProperties: (values) => { Object.assign(stored, values); },
+    deleteProperty: (key) => { delete stored[key]; }
+  }) };
+  context.Utilities.newBlob = (value) => ({
+    getDataAsString: () => Buffer.from(value).toString('utf8'),
+    getBytes: () => Array.from(Buffer.from(value))
+  });
+  for (const file of ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs']) {
+    vm.runInContext(fs.readFileSync(path.join(projectRoot, file), 'utf8'), context,
+      { filename: file });
+  }
+  return context;
+}
+
 function iteratorFor(items) {
   let index = 0;
   return {
@@ -959,6 +978,238 @@ function createMutableInstallerChartFixture() {
   return { chart, state };
 }
 
+function createReferencePeriodMigrationFixture(locale = 'en', headerRow = 1, sheetCount = 1) {
+  const stored = {};
+  const context = loadInstallerWithRuntimeConfig(() => { throw new Error('Unexpected network'); }, stored);
+  vm.runInContext(fs.readFileSync(path.join(projectRoot, 'UtilitiesCataloging.gs'), 'utf8'), context);
+  const localization = context.getLocalizationRegistry_()[locale];
+  context.getLocalization_ = () => localization;
+  context.getHeaderAliases_ = key => localization.headerAliases[key];
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+  context.getSpreadsheetId_ = () => 'spreadsheet-id';
+  context.Utilities.DigestAlgorithm = { SHA_256: 'sha256' };
+  context.Utilities.Charset = { UTF_8: 'utf8' };
+  context.Utilities.computeDigest = (_algorithm, text) => Array.from(
+    require('node:crypto').createHash('sha256').update(text).digest());
+  const operations = [];
+  let failure;
+  const operation = (name, action) => {
+    operations.push(name);
+    const fails = failure && failure.name === name && --failure.remaining === 0;
+    if (fails && failure.when === 'before') { failure = null; throw new Error('Injected ' + name); }
+    const result = action();
+    if (fails) { failure = null; throw new Error('Injected ' + name); }
+    return result;
+  };
+  context.PropertiesService = { getScriptProperties: () => ({
+    getProperty: key => stored[key] || null,
+    setProperty: (key, value) => operation('checkpoint', () => { stored[key] = value; }),
+    deleteProperty: key => operation('cleanup', () => { delete stored[key]; })
+  }) };
+  const sheets = Array.from({ length: sheetCount }, (_, index) => {
+    const headers = ['issueDate', 'supplier', 'year', 'month'].map(key => localization.headerAliases[key][0])
+      .concat('Derived label');
+    const cells = Array.from({ length: headerRow - 1 }, () => headers.map(() => ''))
+      .concat([headers, [new Date('2026-08-10T00:00:00Z'), 'SUPPLIER-' + index, 2026, 7, 'numeric'],
+        [new Date('2026-09-10T00:00:00Z'), 'SUPPLIER-' + index, 2026, 8, 'numeric']]);
+    const formulas = cells.map(() => headers.map(() => ''));
+    const formats = cells.map(() => ['@', '@', '0', '0', 'General']);
+    const state = { cells, formulas, formats, id: index + 1, name: 'Sheet ' + index, headerRow };
+    state.sheet = {
+      getSheetId: () => state.id, getName: () => state.name, getLastRow: () => cells.length,
+      getRange: (row, column, _rows = 1, width = 1) => {
+        if (width > 1) return {
+          getValues: () => [operation('read', () => cells[row - 1].slice(column - 1, column - 1 + width))],
+          getFormulas: () => [formulas[row - 1].slice(column - 1, column - 1 + width)],
+          getNumberFormats: () => [formats[row - 1].slice(column - 1, column - 1 + width)]
+        };
+        return {
+          setNumberFormat: value => operation('format', () => { formats[row - 1][column - 1] = value; }),
+          setValue: value => operation('value', () => { cells[row - 1][column - 1] = value; }),
+          setRichTextValue: value => operation('value', () => {
+            cells[row - 1][column - 1] = value.text;
+            if (formulas[row - 1][4]) cells[row - 1][4] = typeof cells[row - 1][2] + ':' + cells[row - 1][3];
+          })
+        };
+      }
+    };
+    return state;
+  });
+  const config = { canonical_supplies: sheets.map(s => s.name),
+    sheet_by_supply: Object.fromEntries(sheets.map(s => [s.name, s.name])) };
+  const spreadsheet = { getId: () => 'spreadsheet-id',
+    getSheetByName: name => (sheets.find(s => s.name === name) || {}).sheet };
+  context.SpreadsheetApp = { openById: () => spreadsheet, newRichTextValue: () => ({
+    setText(text) { this.text = text; return this; }, build() { return { text: this.text }; }
+  }) };
+  context.getAutomationConfig_ = () => config;
+  context.getSheetLayout_ = sheet => operation('layout', () => {
+    const state = sheets.find(s => s.sheet === sheet);
+    const headers = state.cells[state.headerRow - 1];
+    return { headerRow: state.headerRow, headers,
+      lookup: Object.fromEntries(headers.map((header, index) => [context.normalizeHeader_(header), index + 1])) };
+  });
+  const key = vm.runInContext('CONFIG.PROPERTY_KEYS.REFERENCE_PERIOD_MIGRATION', context);
+  return { context, stored, key, sheets, config, spreadsheet, operations,
+    fail: (name, remaining = 1, when = 'before') => { failure = { name, remaining, when }; },
+    migrate: () => context.migrateCatalogerReferencePeriodText(),
+    mutationCount: () => operations.filter(name => name === 'format' || name === 'value').length };
+}
+
+function testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas() {
+  for (const locale of ['en', 'it']) {
+    for (const headerRow of [1, 3]) {
+      const f = createReferencePeriodMigrationFixture(locale, headerRow, 2);
+      f.config.canonical_supplies.push('Shared');
+      f.config.sheet_by_supply.Shared = f.sheets[0].name;
+      f.sheets[0].formulas[headerRow][4] = '=TYPE(C' + (headerRow + 1) + ')';
+      f.sheets[1].formulas[headerRow + 1][2] = '=YEAR(A' + (headerRow + 2) + ')';
+      const result = f.migrate();
+      assert.equal(result.sheets.length, 2);
+      assert.deepEqual(Array.from(result.sheets, item => item.changedRows), [2, 2]);
+      assert.equal(f.sheets[0].cells[headerRow][2], '2026');
+      assert.equal(f.sheets[0].cells[headerRow][3], '07');
+      assert.equal(f.sheets[0].cells[headerRow][4], 'string:07', 'Dependent formula result may change');
+      assert.equal(f.sheets[1].cells[headerRow + 1][2], 2026, 'Formula-backed year preserved');
+      assert.equal(f.sheets[1].cells[headerRow + 1][3], '08');
+      assert.equal(f.stored[f.key], undefined);
+      const count = f.mutationCount();
+      assert.deepEqual(Array.from(f.migrate().sheets, item => item.changedRows), [0, 0]);
+      assert.equal(f.mutationCount(), count);
+      f.sheets[0].cells.push(['', '', 2030, 1, '']);
+      f.sheets[0].formulas.push(['', '', '', '', '']);
+      f.sheets[0].formats.push(['@', '@', '0', '0', 'General']);
+      f.migrate();
+      assert.equal(f.sheets[0].cells.at(-1)[2], 2030, 'Rows without imported identity remain untouched');
+      assert.equal(f.mutationCount(), count);
+    }
+  }
+}
+
+function testReferencePeriodMigrationRecoversEveryMutationBoundary() {
+  for (const locale of ['en', 'it']) {
+    for (const name of ['format', 'value', 'checkpoint', 'cleanup']) {
+      const count = name === 'checkpoint' ? 5 : name === 'cleanup' ? 1 : 2;
+      for (let index = 1; index <= count; index += 1) {
+        for (const when of ['before', 'after']) {
+          const f = createReferencePeriodMigrationFixture(locale);
+          f.sheets[0].formulas[1][4] = '=TYPE(C2)';
+          f.fail(name, index, when);
+          assert.throws(f.migrate, /Injected/, [locale, name, index, when].join(':'));
+          if (name === 'checkpoint' && index === 1 && when === 'before') {
+            assert.equal(f.mutationCount(), 0, 'Initial checkpoint must precede mutation');
+          }
+          const before = f.sheets[0].cells.map(row => row.slice());
+          const writes = f.operations.filter(op => op === 'value').length;
+          f.migrate();
+          assert.equal(f.sheets[0].cells[1][2], '2026');
+          assert.equal(f.sheets[0].cells[1][3], '07');
+          assert.equal(f.sheets[0].cells[2][3], '08');
+          assert.equal(f.stored[f.key], undefined);
+          if (before[1][2] === '2026' && before[1][3] === '07') {
+            assert.equal(f.operations.filter(op => op === 'value').length - writes, 2,
+              'Completed first row must not be rewritten while second row advances');
+          }
+        }
+      }
+    }
+    // A failure on the next sheet leaves earlier rows committed.
+    const f = createReferencePeriodMigrationFixture(locale, 1, 2);
+    f.fail('format', 5, 'before');
+    assert.throws(f.migrate, /Injected/);
+    assert.equal(f.sheets[0].cells[2][3], '08');
+    const writes = f.operations.filter(op => op === 'value').length;
+    f.migrate();
+    assert.equal(f.operations.filter(op => op === 'value').length - writes, 4);
+  }
+  const baseline = createReferencePeriodMigrationFixture();
+  baseline.migrate();
+  for (const name of ['read', 'layout']) {
+    const count = baseline.operations.filter(operation => operation === name).length;
+    for (let index = 1; index <= count; index += 1) {
+      const f = createReferencePeriodMigrationFixture();
+      f.fail(name, index);
+      assert.throws(f.migrate, /Injected/);
+      assert.doesNotThrow(f.migrate, `Recovery after ${name} ${index}`);
+      assert.equal(f.sheets[0].cells[2][3], '08');
+      assert.equal(f.stored[f.key], undefined);
+    }
+  }
+}
+
+function testReferencePeriodMigrationRejectsConflictsAndInvalidCheckpoints() {
+  const changes = [
+    f => { f.sheets[0].cells[1][1] = 'CHANGED'; },
+    f => { f.sheets[0].cells[1][2] = 2030; },
+    f => { f.sheets[0].formats[1][2] = '0.00'; },
+    f => { f.sheets[0].formulas[1][2] = '=2026'; },
+    f => { f.sheets[0].formulas[1][4] = '=OTHER()'; },
+    f => { f.sheets[0].cells[0][4] = 'Changed header'; },
+    f => { f.sheets[0].cells.splice(1, 1); f.sheets[0].formulas.splice(1, 1); f.sheets[0].formats.splice(1, 1); },
+    f => { f.sheets[0].id = 12; },
+    f => { f.spreadsheet.getId = () => 'other-spreadsheet'; },
+    f => { f.sheets[0].headerRow = 2; }
+  ];
+  for (const change of changes) {
+    const f = createReferencePeriodMigrationFixture();
+    f.fail('format', 1, 'after');
+    assert.throws(f.migrate, /Injected/);
+    change(f);
+    const pending = f.stored[f.key];
+    const count = f.mutationCount();
+    assert.throws(f.migrate, /migration|requires/i);
+    assert.equal(f.mutationCount(), count, 'Conflicting state cannot be overwritten');
+    assert.equal(f.stored[f.key], pending);
+  }
+  for (const update of [() => '{', () => ' '.repeat(8001), () => 'null',
+    journal => ({ ...journal, version: 2 }), journal => ({ ...journal, extra: true }),
+    journal => ({ ...journal, row: 999 }), journal => ({ ...journal, fields: [] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], expected: '2030' }] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], prior: { type: 'date', value: 1e20 }, expected: 'Invalid Date' }] }),
+    journal => ({ ...journal, fields: [{ ...journal.fields[0], stage: 'unknown' }] })]) {
+    const f = createReferencePeriodMigrationFixture();
+    f.fail('format', 1, 'after');
+    assert.throws(f.migrate, /Injected/);
+    const changed = update(JSON.parse(f.stored[f.key]));
+    f.stored[f.key] = typeof changed === 'string' ? changed : JSON.stringify(changed);
+    const pending = f.stored[f.key];
+    const count = f.mutationCount();
+    assert.throws(f.migrate, /checkpoint|migration/i);
+    assert.equal(f.mutationCount(), count);
+    assert.equal(f.stored[f.key], pending);
+  }
+  const oversized = createReferencePeriodMigrationFixture();
+  oversized.sheets[0].cells[1][2] = '9'.repeat(9000);
+  assert.throws(oversized.migrate, /size limit/);
+  assert.equal(oversized.mutationCount(), 0);
+  assert.equal(oversized.stored[oversized.key], undefined);
+  const missing = createReferencePeriodMigrationFixture('en', 1, 2);
+  missing.sheets[1].cells[0][3] = 'Missing required month';
+  assert.throws(missing.migrate, /requires/);
+  assert.equal(missing.mutationCount(), 0, 'All target headers preflight before first row');
+  const presentation = createReferencePeriodMigrationFixture();
+  presentation.sheets[0].formulas[1][4] = '=TYPE(C2)';
+  presentation.fail('value', 1, 'after');
+  assert.throws(presentation.migrate, /Injected/);
+  presentation.sheets[0].formats[1][0] = 'dd/mm/yyyy';
+  presentation.sheets[0].formats[1][4] = '@';
+  presentation.sheets[0].cells[1][4] = 'recalculated';
+  assert.doesNotThrow(presentation.migrate, 'Unrelated formatting and recalculation preserve row identity');
+  assert.equal(presentation.sheets[0].formats[1][0], 'dd/mm/yyyy');
+  assert.equal(presentation.sheets[0].formats[1][4], '@');
+  const completed = createReferencePeriodMigrationFixture();
+  completed.fail('cleanup');
+  assert.throws(completed.migrate, /Injected/);
+  completed.sheets[0].cells[1][2] = 2026;
+  const count = completed.mutationCount();
+  const pending = completed.stored[completed.key];
+  assert.throws(completed.migrate, /cell changed/,
+    'A completed checkpoint cannot overwrite a later edit back to the prior numeric value');
+  assert.equal(completed.mutationCount(), count);
+  assert.equal(completed.stored[completed.key], pending);
+}
+
 function testServiceIdentityMigrationAddsFieldsAndPreservesCharts() {
   const context = loadInstaller(() => {
     throw new Error('network must not run');
@@ -1871,6 +2122,72 @@ function response(statusCode, body) {
   };
 }
 
+function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
+  for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash']) {
+    for (const [backend, fallback] of [
+      ['gemini_api', false], ['gemini_api', true], ['vertex_ai', false]
+    ]) {
+      const stored = {};
+      const requests = [];
+      const options = {
+        projectId: 'cataloger-project', rootFolderId: 'root-folder-id',
+        spreadsheetTitle: 'Utilities', notificationRecipient: 'owner@example.com',
+        geminiBackend: backend, geminiApiKey: 'developer-secret',
+        geminiModel: ' ' + model + ' ', autoVertexFallback: fallback,
+        vertexLocation: 'global', timeZone: 'Europe/Rome', agentsPolicy: 'policy',
+        automationConfig: JSON.parse(fs.readFileSync(
+          path.join(projectRoot, 'config.example.json'), 'utf8'))
+      };
+      const context = loadInstallerWithRuntimeConfig((url, requestOptions) => {
+        requests.push({ url, options: requestOptions });
+        if (url.includes('secretmanager.googleapis.com')) {
+          return response(200, { payload: { data:
+            Buffer.from(JSON.stringify(options)).toString('base64') } });
+        }
+        assert.ok(url.endsWith('/' + model) || url.endsWith('/' + model + ':countTokens'));
+        if (url.endsWith(':countTokens')) {
+          assert.ok(JSON.parse(requestOptions.payload).model.endsWith('/' + model));
+          return response(200, { totalTokens: 2 });
+        }
+        return response(200, { supportedGenerationMethods: ['generateContent'] });
+      }, stored);
+      context.DriveApp = { getFolderById: () => ({ getUrl: () => 'https://drive.test' }) };
+      context.ensureInstallerPolicyFile_ = () => ({ getUrl: () => 'https://drive.test/policy' });
+      context.ensureInstallerSupplierProfileTemplate_ = () => {};
+      context.ensureInstallerSpreadsheet_ = () => ({
+        getId: () => 'spreadsheet-id', getUrl: () => 'https://sheets.test/spreadsheet-id'
+      });
+      context.ensureInstallerDestinationFolders_ = () => {};
+      context.provisionDriveEventTransportUnlocked_ = () => ({ pubSubConfigured: false });
+      context.installAutomationTriggersUnlocked_ = () => ({
+        geminiBackend: backend, geminiAutoVertexFallbackEnabled: fallback
+      });
+      context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
+
+      assert.equal(context.validateInstallerOptions_(options).geminiModel, model);
+      const installed = context.bootstrapCatalogerInstallation({ bootstrapSecretVersion:
+        'projects/cataloger-project/secrets/drive-utilities-cataloger-test-script-id/versions/1'
+      });
+      assert.equal(installed.installed, true);
+      assert.equal(stored.GEMINI_MODEL, model);
+      assert.equal(context.getSetupStatus().geminiModel, model);
+      const expectedProbes = fallback ? 2 : 1;
+      assert.equal(requests.length, 1 + expectedProbes);
+      const before = { ...stored };
+      const status = context.validateConfiguredGeminiAccess();
+      assert.equal(status.geminiModel, model);
+      assert.equal(status.geminiApiValidated, backend === 'gemini_api');
+      assert.equal(status.vertexAiValidated, backend === 'vertex_ai' || fallback);
+      assert.equal(requests.length, 1 + 2 * expectedProbes);
+      assert.deepEqual(stored, before);
+      assert.equal(JSON.stringify(status).includes('developer-secret'), false);
+      assert.equal(context.configureGeminiBackend('vertex_ai').geminiModel, model);
+      assert.equal(context.configureGeminiFreeTierWithVertexFallback().geminiModel, model);
+      assert.equal(stored.GEMINI_MODEL, model);
+    }
+  }
+}
+
 function testGeminiDeveloperApiValidation() {
   const requests = [];
   const context = loadInstaller((url, options) => {
@@ -1900,6 +2217,79 @@ function testGeminiDeveloperApiValidation() {
     'developer-secret'
   );
   assert.equal(requests[0].url.includes('developer-secret'), false);
+}
+
+function testGeminiDeveloperApiKeyRotationPreservesInstallation() {
+  for (const model of ['gemini-2.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash']) {
+    for (const backend of ['gemini_api', 'vertex_ai']) {
+      for (const fallback of ['false', 'true']) {
+        const stored = {
+          GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project',
+          GEMINI_API_KEY: 'old-secret', GEMINI_MODEL: model,
+          GEMINI_BACKEND: backend, GEMINI_AUTO_VERTEX_FALLBACK: fallback,
+          GEMINI_VERTEX_FALLBACK_UNTIL: '123456789', OTHER: 'unchanged'
+        };
+        const before = { ...stored };
+        const requests = [];
+        let handoffProject = 'cataloger-project';
+        let validationFails = false;
+        let locked = false;
+        const context = loadInstallerWithRuntimeConfig((url) => {
+          assert.equal(locked, true);
+          requests.push(url);
+          if (url.includes('generativelanguage.googleapis.com')) {
+            assert.ok(url.endsWith('/' + model));
+            return response(200, { supportedGenerationMethods: ['generateContent'] });
+          }
+          return response(200, { payload: { data: Buffer.from(JSON.stringify({
+            projectId: handoffProject, geminiApiKey: 'new-developer-secret',
+            geminiModel: 'gemini-flash-latest', geminiApiProjectId: 'example-api-project'
+          })).toString('base64') } });
+        }, stored);
+        const validateDeveloperApi = context.validateInstallerGeminiDeveloperApi_;
+        let validations = 0;
+        context.validateInstallerGeminiDeveloperApi_ = (options) => {
+          validations += 1;
+          assert.equal(locked, true);
+          assert.equal(options.geminiModel, before.GEMINI_MODEL);
+          if (validationFails) throw new Error('Provider validation failed');
+          validateDeveloperApi(options);
+        };
+        context.PropertiesService = { getScriptProperties: () => ({
+          getProperty: (key) => stored[key],
+          setProperty: (key, value) => { stored[key] = value; }
+        }) };
+        context.withCatalogLifecycleLock_ = (_operation, callback) => {
+          locked = true;
+          try { return callback(); } finally { locked = false; }
+        };
+        const options = () => ({ bootstrapSecretVersion:
+          `projects/${handoffProject}/secrets/drive-utilities-cataloger-test-script-id/versions/1` });
+        handoffProject = 'different-project';
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /does not match the installed/);
+        assert.equal(validations, 0);
+        assert.deepEqual(stored, before);
+        handoffProject = 'cataloger-project';
+        delete stored.GOOGLE_CLOUD_PROJECT_ID;
+        const previousRequests = requests.length;
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /Configure the installation/);
+        assert.equal(requests.length, previousRequests);
+        stored.GOOGLE_CLOUD_PROJECT_ID = before.GOOGLE_CLOUD_PROJECT_ID;
+        validationFails = true;
+        assert.throws(() => context.rotateGeminiDeveloperApiKeyFromSecret(options()),
+          /Provider validation failed/);
+        assert.deepEqual(stored, before);
+        validationFails = false;
+        const result = context.rotateGeminiDeveloperApiKeyFromSecret(options());
+        assert.deepEqual(stored, { ...before, GEMINI_API_KEY: 'new-developer-secret' });
+        assert.equal(result.geminiApiProjectId, 'example-api-project');
+        assert.equal(result.geminiModel, model);
+        assert.equal(JSON.stringify(result).includes('new-developer-secret'), false);
+      }
+    }
+  }
 }
 
 function testVertexValidation() {
@@ -1968,6 +2358,41 @@ function testFallbackValidatesBothBackends() {
     requests.some((url) => url.endsWith(':countTokens')),
     true
   );
+}
+
+function testConfiguredGeminiAccessValidationIsRedacted() {
+  let validatedOptions;
+  const context = loadInstaller(() => {
+    throw new Error('network must be delegated to the validation helper');
+  });
+  context.CONFIG = {
+    APP_VERSION: '0.6.0',
+    PROPERTY_KEYS: {
+      GOOGLE_CLOUD_PROJECT_ID: 'GOOGLE_CLOUD_PROJECT_ID',
+      GEMINI_API_KEY: 'GEMINI_API_KEY'
+    }
+  };
+  context.getGeminiBackend_ = () => 'gemini_api';
+  context.isAutomaticVertexFallbackEnabled_ = () => true;
+  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getVertexAiLocation_ = () => 'global';
+  context.getScriptProperty_ = (key) => key === 'GEMINI_API_KEY' ?
+    'developer-secret' : 'cataloger-project';
+  context.validateInstallerGeminiAccess_ = (options) => {
+    validatedOptions = options;
+  };
+
+  const result = context.validateConfiguredGeminiAccess();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    applicationVersion: '0.6.0',
+    geminiBackend: 'gemini_api',
+    geminiModel: 'gemini-flash-latest',
+    geminiApiValidated: true,
+    vertexAiValidated: true
+  });
+  assert.equal(validatedOptions.geminiApiKey, 'developer-secret');
+  assert.equal(JSON.stringify(result).includes('developer-secret'), false);
 }
 
 function testCredentialFailureIsRedacted() {
@@ -2232,6 +2657,9 @@ testSecretManagerScopeIsRestricted();
 testResumedManagedSpreadsheetPlacementIsRepaired();
 testPopulatedSpreadsheetSettingsAreNotChangedSilently();
 testSpreadsheetValidationUsesDetectedHeaderRow();
+testReferencePeriodMigrationWritesLiteralTextAndSkipsFormulas();
+testReferencePeriodMigrationRecoversEveryMutationBoundary();
+testReferencePeriodMigrationRejectsConflictsAndInvalidCheckpoints();
 testServiceIdentityMigrationAddsFieldsAndPreservesCharts();
 testServiceIdentityMigrationPreservesUnownedPreHeaderRow();
 testExistingSheetInitializationUsesDeterministicSupply();
@@ -2250,8 +2678,11 @@ testServiceIdentityMigrationResumesCheckpointedIdentityColumns();
 testServiceIdentityMigrationRestoresCompleteChartState();
 testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
+testInstallerAndConfiguredProbesPreserveFormerDefaultPins();
+testGeminiDeveloperApiKeyRotationPreservesInstallation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
+testConfiguredGeminiAccessValidationIsRedacted();
 testCredentialFailureIsRedacted();
 testTimeZoneReconfigurationPreservesCredentialsAndTriggers();
 testTimeZoneReconfigurationRollsBackRemoteState();

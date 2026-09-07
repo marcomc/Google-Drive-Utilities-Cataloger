@@ -196,6 +196,16 @@ if [[ "${url}" == "${expected_content_url}" ]]; then
   elif [[ "${TEST_DEPLOYMENT_SCENARIO}" == 'content-entrypoint-initializer' ]]; then
     content_source=$'function runDailyUtilitiesCataloging() {}\nfunction retryFailedUtilitiesCataloging() {}\nfunction processSingleIntakeFile() {}\nconst deferredProcessor = function processSingleIntakeFileByName() {}'
   fi
+  content_source+="${TEST_ADDITIONAL_ENTRYPOINTS}"
+  if [[ -n "${TEST_MISSING_ENTRYPOINT}" ]]; then
+    content_source="${content_source//function ${TEST_MISSING_ENTRYPOINT}() \{\}/}"
+  fi
+  if [[ "${TEST_GUARDED_ENTRYPOINT}" == 'yes' ]]; then
+    content_source="${content_source//function processSingleIntakeFileByName()/if (false)$'\n'function processSingleIntakeFileByName()}"
+  fi
+  if [[ "${TEST_GUARDED_ENTRYPOINT}" == 'malformed' ]]; then
+    content_source+='('
+  fi
   jq -n --arg source "${content_source}" --arg other_source "${content_other_source}" \
     '{files: [{name: "UtilitiesCataloging", source: $source}, {name: "Other", source: $other_source}]}'
   printf '\n200'
@@ -387,6 +397,13 @@ run_fixture() {
   local scenario="$6"
   local response_deployment_id="${7:-${listed_deployment_id}}"
 
+  local additional_entrypoints
+  additional_entrypoints="$(node -e '
+    const { requiredEntrypoints } = require(process.argv[1]);
+    console.log("\n" + requiredEntrypoints.slice(4)
+      .map((name) => "function " + name + "() {}").join("\n"));
+  ' "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js")"
+
   mkdir -p "${fixture_dir}/runner/clasp-auth"
   if [[ "${scenario}" != "missing-auth" ]]; then
     jq -n \
@@ -410,11 +427,14 @@ run_fixture() {
       RUNNER_TEMP="${fixture_dir}/runner" \
       APPS_SCRIPT_DEPLOYMENT_ID="${configured_deployment_id}" \
       DEPLOY_COMMIT_SHA="${deploy_sha}" \
+      TEST_ADDITIONAL_ENTRYPOINTS="${additional_entrypoints}" \
       TEST_CURRENT_MAIN_SHA="${current_sha}" \
       TEST_LISTED_DEPLOYMENT_ID="${listed_deployment_id}" \
       TEST_CONFIGURED_DEPLOYMENT_ID="${configured_deployment_id}" \
       TEST_RESPONSE_DEPLOYMENT_ID="${response_deployment_id}" \
       TEST_DEPLOYMENT_SCENARIO="${scenario}" \
+      TEST_MISSING_ENTRYPOINT="${8:-}" \
+      TEST_GUARDED_ENTRYPOINT="${9:-}" \
       TEST_ACCESS_TOKEN="test-access-token-do-not-log" \
       TEST_API_CALL_COUNT_FILE="${fixture_dir}/api-call-count" \
       TEST_CONTENT_CALL_COUNT_FILE="${fixture_dir}/content-call-count" \
@@ -614,6 +634,42 @@ test "${content_missing_commands}" = \
   "clasp-deployments api-get-1 clasp-pull clasp-push clasp-version "
 grep -q 'does not expose the required processing entrypoints' \
   "${content_missing_dir}/output.log"
+
+required_entrypoints="$(node -e 'console.log(require(process.argv[1]).requiredEntrypoints.join("\n"))' \
+  "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js")"
+while IFS= read -r required_entrypoint; do
+  missing_api_dir="${TEST_ROOT}/missing-${required_entrypoint}"
+  require_fixture_failure "Missing public API ${required_entrypoint} was admitted." \
+    "${missing_api_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+    "deployment-1" "deployment-1" valid "deployment-1" "${required_entrypoint}"
+  if grep -q '^clasp-deploy$' "${missing_api_dir}/commands.log" ||
+    grep -q '^sleep-' "${missing_api_dir}/commands.log" ||
+    [[ "$(<"${missing_api_dir}/content-call-count")" != 1 ||
+      "$(<"${missing_api_dir}/api-call-count")" != 1 ]]; then
+    printf 'Missing API %s crossed the promotion boundary or retried.\n' "${required_entrypoint}" >&2
+    exit 1
+  fi
+done <<<"${required_entrypoints}"
+
+malformed_api_dir="${TEST_ROOT}/malformed-api"
+require_fixture_failure 'A malformed artifact with all API names was admitted.' \
+  "${malformed_api_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" valid "deployment-1" '' malformed
+if grep -q '^clasp-deploy$' "${malformed_api_dir}/commands.log" ||
+  [[ "$(<"${malformed_api_dir}/content-call-count")" != 1 ]]; then
+  printf '%s\n' 'Malformed source caused promotion or content retries.' >&2
+  exit 1
+fi
+grep -q 'source failed syntax validation' "${malformed_api_dir}/output.log"
+
+guarded_api_dir="${TEST_ROOT}/guarded-api"
+require_fixture_failure 'A conditionally declared API was admitted.' \
+  "${guarded_api_dir}" "${CURRENT_SHA}" "${CURRENT_SHA}" \
+  "deployment-1" "deployment-1" valid "deployment-1" '' yes
+if grep -q '^clasp-deploy$' "${guarded_api_dir}/commands.log"; then
+  printf '%s\n' 'A guarded API caused deployment promotion.' >&2
+  exit 1
+fi
 
 content_other_dir="${TEST_ROOT}/content-entrypoint-other-file"
 mkdir -p "${content_other_dir}"

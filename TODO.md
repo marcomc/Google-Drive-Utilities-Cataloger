@@ -5,6 +5,28 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
 
 ## Propositions
 
+- [ ] **Evaluate adaptive templates for first-pass invoice extraction**
+  - Assessment: compact, automatically generated format guides may reduce
+    extraction repairs, but adding a template to a full-PDF prompt does not
+    inherently save tokens. Keep AI on every invoice and prioritize Apps Script;
+    adopt templates only after measuring accuracy, latency, and amortized cost.
+  - Proposal: [technical findings and experiment plan](docs/SMART_TEMPLATES_FEASIBILITY.md).
+  - Actions:
+    - Prepare a manually verified corpus grouped by supplier, supply, format,
+      and month, with later invoices held out from template generation.
+    - Measure the current baseline, separating initial extraction, validator
+      repairs, transport retries, and event waiting time.
+    - Compare the baseline with compact guides selected in the same AI call
+      and with preliminary Drive/OCR selection of one guide before that call.
+    - Define declarative JSON templates keyed by supplier, supply, and format,
+      with candidate validation, independent replay, reuse, and version history.
+    - Cover coexisting layouts, supplier/supply mismatches, adjustments,
+      repeated section labels, scans, and missing or contradictory evidence;
+      preserve existing policy, identity, and reconciliation requirements.
+    - Decide adoption from field accuracy, incorrectly accepted imports,
+      calls, input/output/thinking tokens, and median/p95 latency, including
+      template generation, preprocessing, fallback, and maintenance overhead.
+
 - [ ] **Automate adoption of an existing installation**
   - Assessment: the installer currently refuses `.clasp.json` without matching
     installer state because it cannot safely infer resource ownership.

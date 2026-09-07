@@ -104,11 +104,7 @@ if ! read_apps_script_version_content \
   "${version_id}" \
   version_content_json ||
   ! validate_apps_script_version_entrypoints \
-    "${version_content_json}" \
-    runDailyUtilitiesCataloging \
-    retryFailedUtilitiesCataloging \
-    processSingleIntakeFile \
-    processSingleIntakeFileByName; then
+    "${version_content_json}"; then
   printf '%s\n' \
     "The uploaded Apps Script version does not expose the required processing entrypoints; the API deployment was not updated." >&2
   exit 1

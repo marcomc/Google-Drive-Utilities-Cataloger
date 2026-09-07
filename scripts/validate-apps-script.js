@@ -15,33 +15,20 @@ const sourceFiles = [
     .map((fileName) => path.join(projectRoot, 'locales', fileName))
 ];
 
-const requiredEntrypoints = [
-  'runDailyUtilitiesCataloging',
-  'retryFailedUtilitiesCataloging',
-  'processSingleIntakeFile',
-  'processSingleIntakeFileByName'
-];
-
-function hasRequiredEntrypoint(source, entrypoint) {
-  return new RegExp(`^function\\s+${entrypoint}\\s*\\(`, 'm').test(source);
-}
+const { hasRequiredEntrypoint, missingEntrypoints, sourceSyntaxError } = require(
+  './lib/apps-script-entrypoints.js');
 
 function validateSourceFiles(files) {
   const failures = [];
-  const allSource = files.map((sourceFile) =>
-    fs.readFileSync(sourceFile, 'utf8')).join('\n');
-  requiredEntrypoints.forEach((entrypoint) => {
-    if (!hasRequiredEntrypoint(allSource, entrypoint)) {
-      failures.push(`Missing required Apps Script entrypoint: ${entrypoint}`);
-    }
+  const sources = files.map((sourceFile) => fs.readFileSync(sourceFile, 'utf8'));
+  missingEntrypoints(sources).forEach((entrypoint) => {
+    failures.push(`Missing required Apps Script entrypoint: ${entrypoint}`);
   });
 
   for (const sourceFile of files) {
-    try {
-      // Compile without executing Apps Script globals.
-      new Function(fs.readFileSync(sourceFile, 'utf8'));
-    } catch (error) {
-      failures.push(`${path.relative(projectRoot, sourceFile)}: ${error.message}`);
+    const syntaxError = sourceSyntaxError(fs.readFileSync(sourceFile, 'utf8'));
+    if (syntaxError) {
+      failures.push(`${path.relative(projectRoot, sourceFile)}: ${syntaxError}`);
     }
   }
   return failures;

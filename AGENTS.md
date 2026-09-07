@@ -62,6 +62,10 @@
 - When a Gemini model has no verified Vertex price table, keep provider token
   counts in usage telemetry but omit cost-estimate fields; test the caller-level
   event payload as well as the pricing helper.
+- Treat successful provider metadata discovery as distinct from generation
+  readiness. Use a bounded minimal generation probe when inference availability
+  matters, and compare credential identity, endpoint, payload, and observation
+  time before correlating failures from different requests.
 - For structured output from thinking models, set and test explicit thinking
   and response budgets; log the finish reason without logging document data,
   and fail closed unless the provider explicitly reports a successful terminal
@@ -76,6 +80,19 @@
   non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
   remain blocking; a tied historical cadence must fail closed rather than pick
   an arbitrary frequency.
+- For reviewed supplier defaults, normalize a provider's exact numeric string
+  representation only in the target field and only after explicit absence
+  evidence; unreadable or ambiguous evidence remains blocking.
+- In validator-guided repair, preserve only fields that passed their relevant
+  validation. Reopen conflicting monetary or period evidence and cross-check
+  linked quantity, selling-rate, and cost values without inventing a
+  replacement.
+- At the model-to-sheet boundary, enforce each field's type contract: normalize
+  reviewed unit-suffixed localized rates only in numeric unit-cost fields,
+  preserve identifier text, reject ambiguous prose, and verify the resulting
+  Sheets cell type as well as its displayed value. Never infer a field type
+  from cell formatting alone; cover supplementary leading-zero identifiers
+  and ambiguous quantity grouping through writes and verification.
 - Keep a classification decision canonical from admission through every
   downstream guard and final user-visible status. Discard evidence that cannot
   contribute to a decision before evaluating its identity, provenance, or trust
@@ -214,7 +231,14 @@
 - Keep localized diagnostic recognition bounded and table-driven. Cover common
   grammatical wrappers and word-order variants alongside ambiguity and mismatch
   vetoes, and verify the final validator outcome rather than the helper alone.
+  Match the entire diagnostic and retain conflicting suffix sentences even
+  after a recognized prefix.
 - Match localized spreadsheet sentinels in field context rather than as a
   cross-field union, and derive formula-backed presentation state from the
   displayed value used by the sheet. Cover locale changes and partial-field
   sentinel cases.
+- Normalize address qualifiers only in their verified component position;
+  never remove street-name, civic-suffix, or city tokens as global stop words.
+- Credential rotation must bind the handoff to the installed project and change
+  only the credential. Preserve model, backend, paid-fallback opt-in, and
+  cooldown, and test mismatched projects before any provider call or write.

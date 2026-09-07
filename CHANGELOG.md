@@ -5,6 +5,121 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-03 - Gemini Flash latest alias
+
+### Changed
+
+- Use Google's `gemini-flash-latest` alias as the default model for the Gemini
+  Developer API and Vertex AI fallback, following provider-managed Flash
+  releases without pinning a numeric model version.
+- Preserve every configured model identifier, including former default
+  versions; use the latest alias for new or unconfigured installations and
+  explicit operator selection.
+
+### Added
+
+- Add the owner-only `validateConfiguredGeminiAccess` operational check for
+  validating the configured alias against every enabled Gemini backend without
+  exposing the stored API key or processing a document.
+- Add the owner-only `configureGeminiBackend` maintenance switch for an
+  operator-approved temporary move to the configured Vertex AI backend during a
+  Developer API outage.
+- Add an automatic PDF extraction preview using the normal validation and
+  bounded repair pipeline without modifying invoice rows or source files.
+
+### Fixed
+
+- Accept unambiguous leading-zero decimal consumption values through the
+  shared numeric parser while preserving grouping, unit and sign restrictions.
+- Preserve missing provider usage as unavailable, retain reported cached-token
+  counts, and estimate costs only when all required token counts are available.
+- Verify every changed extraction-policy rule against the installed Drive
+  policy and align its secondary-field clause with reviewed supplier-specific
+  zero defaults after explicit absence evidence.
+- Require explicit provider error codes or structured daily-quota violations
+  before automatic paid fallback. Preserve transient retries when quota or
+  credit terminology appears only in messages or documentation, and recognize
+  the Interactions API's daily-quota code.
+- Normalize imported reference years and months as literal text, including an
+  idempotent migration for existing rows, so chart labels remain stable.
+  Checkpoint the migration's pending row before format or value changes and
+  verify its identity and current contents before resuming an interrupted write.
+- Normalize the `ENERGYGAS` supplier abbreviation to the configured
+  `Energygas Italia` spelling and preserve canonical supplier case, including
+  historical duplicate and cadence lookups after configuration migration.
+  Reject ambiguous legacy/target supplier sets before migration, independently
+  of their order.
+- Apply supplier-specific gas and electricity extraction guidance: separate
+  OENERGY selling/network charges, record absent recalculations as zero, and
+  reuse a monoraria electricity selling rate for the printed F1/F2/F3 bands.
+- Validate OENERGY Gas and Energygas Luce detail totals before import, preserving
+  fail-closed behavior when model output confuses aggregate and `di cui` rows.
+- Enable bounded Vertex reasoning for invoice cost extraction and recognize
+  textual zero defaults only with explicit absence evidence. Accept reviewed
+  Italian absence diagnostics without downgrading unreadable identifiers.
+- Keep inconsistent monetary fields and conflicting billing periods eligible
+  for targeted model repair instead of freezing earlier erroneous values.
+- Reconcile Energygas electricity selling cost against printed aggregate
+  consumption/rate or weighted band quantities/rates, including different
+  tariffs per band. Accept aggregate-only invoices on installer-created
+  band-only sheets when band details are explicitly absent; retain checks for
+  incomplete, contradictory, or inconsistent evidence.
+- Leave unprinted billing cadence to deterministic period/history inference
+  without requiring a model-generated absence diagnostic.
+- Normalize recognized euro-per-unit rates in unit-cost columns as numeric
+  values while preserving identifier text and rejecting ambiguous rate prose.
+- Give model-diagnostic repair a specific instruction to remove successful
+  mapping commentary while retaining unresolved document problems.
+- Omit unsupported `thinking_level` from Vertex AI requests using the latest
+  Flash alias while preserving explicit medium thinking on the Developer API.
+- Use Google's Generally Available Interactions API for Developer API PDF
+  extraction, preserving structured JSON output, explicit thinking and output
+  budgets, and stateless processing for invoice documents.
+- Accept the reviewed Energygas ASOS/ARIM aggregate diagnostic as explicit
+  absence evidence for the configured zero `Oneri di sistema` default.
+- Convert the shared extraction contract to Vertex AI's `responseSchema` format
+  so structured PDF extraction remains bounded and schema-constrained.
+- Accept reviewed honorifics and trailing province codes when corroborating
+  supply identity; preserve street qualifiers, civic suffixes, and city tokens
+  so distinct addresses cannot collapse into the same identity.
+- Accept a repeated account-holder name on both sides of a postal `C/O`
+  marker only when both normalized identities are identical.
+- Convert supplementary numeric strings only in recognized quantitative
+  columns, preserve leading-zero identifiers regardless of cell format, and
+  reject ambiguous consumption grouping before import.
+- Preserve only reconciled monetary groups during repair; malformed responses
+  and unresolved fields remain correctable on the final attempt.
+- Keep conflicting or compound diagnostics blocking even when they begin with
+  accepted supplier-default or electricity-band mapping explanations.
+- Bind credential rotation to the installed Cloud project and preserve the
+  configured model, backend, paid-fallback opt-in, and cooldown.
+- Preserve nullable enums and mixed primitive values in Vertex extraction
+  schemas, including the reference-month constraint.
+- Validate configured supplier details in both locales, reject unresolved
+  omissions, and keep conflicting aggregates eligible for model repair.
+- Reject ambiguous grouping in amounts, quantities, and unit-rate strings
+  before import, independently of cell formatting.
+- Preserve substantive five-digit address tokens when recognizing optional
+  postal codes.
+- Apply authoritative annual and custom cadence overrides without retaining
+  resolved provenance errors; preserve unrelated compound diagnostics and
+  reject model-supplied runtime authority flags.
+- Verify imported text cell types and precise numeric rates and quantities;
+  reserve monetary comparison tolerance for cost fields.
+- Preserve the last sanitized extraction when a later repair fails
+  normalization, and match informational diagnostics as complete statements.
+- Preserve ordinary localized absence/VAT wording and strictly grouped spaces
+  in numeric input while retaining ambiguity and contradiction checks.
+- Scope supplier defaults to the current invoice and reconcile remaining
+  configured costs when an optional detail is explicitly absent.
+- Select reasoning controls supported by the configured model and API.
+- Verify the shared public API contract in each exact uploaded version before
+  CI promotion or initial installer deployment.
+- Checkpoint the installer's immutable version before inspection or deployment
+  and reuse it on resume. Reconcile pending creation from complete paginated
+  version/deployment metadata, reject ambiguous candidates, and preserve the
+  source time zone while creation is pending.
+
 ## [0.5.0] - 2026-08-14 - Gemini 3.7 Flash
 
 ### Changed

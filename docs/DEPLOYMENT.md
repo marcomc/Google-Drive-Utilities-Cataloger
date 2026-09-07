@@ -163,14 +163,20 @@ merge commit to the configured Apps Script project:
 | --- | --- |
 | Apps Script source | Uploads root and `locales/` `.gs` files plus `appsscript.json` through `clasp push`. |
 | Apps Script version | Creates a numbered version labelled with the merged commit SHA. |
+| Version admission | Reads that exact version and verifies every required public API function. |
 | API executable | Moves `APPS_SCRIPT_DEPLOYMENT_ID` to the new numbered version. |
 | Manifest time zone | Reads and preserves the target project's current `timeZone` before upload. |
 
 The stable API executable deployment ID is preserved. Before `clasp push`, the
 workflow reads it through the official Deployments API and validates its script
 ID, numbered version, `appsscript` manifest, and `EXECUTION_API`/`MYSELF` entry
-point. After
-`clasp deploy --deploymentId`, it waits two seconds before reading the
+point. Before moving the deployment, it verifies the exact uploaded source
+against the shared [public API contract](../scripts/lib/apps-script-entrypoints.js).
+Fresh installation applies the same check before creating its API deployment;
+planned deployment adoption verifies the candidate's recorded version. The
+check parses source without executing it, using the pinned, bundled Acorn parser
+to recognize top-level function declarations; it needs no npm installation.
+After `clasp deploy --deploymentId`, it waits two seconds before reading the
 deployment again. It retries only the exact version observed in the preflight
 as a temporarily stale response, for up to five checks, and requires the same
 deployment ID, the new version, and an unchanged entry-point structure. A
@@ -218,8 +224,8 @@ and that its stable deployment ID is known.
 The workflow runs when protected `main` advances. It checks out that revision,
 runs `make check`, rejects stale runs, validates the target project and API
 deployment, preserves the live manifest time zone, pushes source with the
-pinned `clasp` version, creates a numbered version, and moves the stable API
-executable to that version.
+pinned `clasp` version, creates a numbered version, verifies its public API
+functions, and moves the stable API executable to that version.
 
 ```mermaid
 flowchart LR
@@ -235,7 +241,8 @@ flowchart LR
   manifest --> push["clasp push to project HEAD"]
   push --> triggers["Installable triggers use HEAD"]
   push --> version["Create numbered version"]
-  version --> deploy["Update stable API executable"]
+  version --> artifact["Verify exact version public API functions"]
+  artifact --> deploy["Update stable API executable"]
   deploy --> postflight["Poll deployment: version and unchanged entry points"]
   postflight --> api["Owner-only installer calls"]
 ```
