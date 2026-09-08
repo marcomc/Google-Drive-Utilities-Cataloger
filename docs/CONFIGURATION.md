@@ -81,9 +81,12 @@ Every saved model identifier, including `gemini-3.6-flash` and
 alias is used only when runtime model configuration is absent or blank, or
 when the operator explicitly selects it. To switch an existing installation,
 call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
-Then `validateConfiguredGeminiAccess()` performs a harmless metadata/token count
-validation against every enabled backend. A former default spelling alone
-does not establish that the operator intended to follow future defaults.
+Then `validateConfiguredGeminiAccess()` performs metadata/token validation and
+a bounded stateless text-generation probe against every enabled backend. The
+probe uses no document data, retains no Interaction state, and distinguishes an
+accessible model from one that can currently serve inference. A former default
+spelling alone does not establish that the operator intended to follow future
+defaults.
 Reasoning controls follow the selected API and documented
 [Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
 and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)

@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
+
+### Fixed
+
+- Make `validateConfiguredGeminiAccess` perform a bounded stateless generation
+  probe on every enabled Gemini backend after metadata and token validation, so
+  an accessible model that cannot currently serve inference no longer produces
+  a false-positive operational check.
+
 ## [0.6.1] - 2026-09-08 - Gemini overload recovery
 
 ### Fixed

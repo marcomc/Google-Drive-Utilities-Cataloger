@@ -651,21 +651,103 @@ function validateConfiguredGeminiAccess() {
   const backend = getGeminiBackend_();
   const autoVertexFallback = isAutomaticVertexFallbackEnabled_();
   const model = getGeminiModel_();
-  validateInstallerGeminiAccess_({
+  const options = {
     projectId: getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID),
     geminiBackend: backend,
     geminiApiKey: getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY),
     geminiModel: model,
     autoVertexFallback: autoVertexFallback,
     vertexLocation: getVertexAiLocation_()
-  });
+  };
+  validateInstallerGeminiAccess_(options);
+  validateConfiguredGeminiGenerationReadiness_(options);
   return {
     applicationVersion: CONFIG.APP_VERSION,
     geminiBackend: backend,
     geminiModel: model,
     geminiApiValidated: backend === 'gemini_api',
-    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback
+    geminiApiGenerationValidated: backend === 'gemini_api',
+    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback,
+    vertexAiGenerationValidated: backend === 'vertex_ai' || autoVertexFallback
   };
+}
+
+function validateConfiguredGeminiGenerationReadiness_(options) {
+  if (options.geminiBackend === 'gemini_api') {
+    validateConfiguredGeminiDeveloperGeneration_(options);
+  }
+  if (options.geminiBackend === 'vertex_ai' || options.autoVertexFallback) {
+    validateConfiguredVertexGeneration_(options);
+  }
+}
+
+function validateConfiguredGeminiDeveloperGeneration_(options) {
+  const response = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': options.geminiApiKey },
+      payload: JSON.stringify({
+        model: options.geminiModel,
+        input: 'Reply with exactly OK.',
+        generation_config: {
+          max_output_tokens: 256,
+          thinking_level: 'low'
+        },
+        store: false
+      }),
+      muteHttpExceptions: true
+    });
+  validateConfiguredGenerationResponse_(response, 'Gemini Developer API', true);
+}
+
+function validateConfiguredVertexGeneration_(options) {
+  const endpoint = 'https://aiplatform.googleapis.com/v1/projects/' +
+    encodeURIComponent(options.projectId) +
+    '/locations/' + encodeURIComponent(options.vertexLocation) +
+    '/publishers/google/models/' + encodeURIComponent(options.geminiModel) +
+    ':generateContent';
+  const response = UrlFetchApp.fetch(endpoint, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
+      generationConfig: {
+        maxOutputTokens: 256,
+        thinkingConfig: { thinkingBudget: 128 }
+      }
+    }),
+    muteHttpExceptions: true
+  });
+  validateConfiguredGenerationResponse_(response, 'Vertex AI', false);
+}
+
+function validateConfiguredGenerationResponse_(response, provider, interactions) {
+  const statusCode = response.getResponseCode();
+  if (statusCode !== 200) {
+    throw new Error(provider +
+      ' generation readiness validation failed (HTTP ' + statusCode + ').');
+  }
+  let body;
+  try {
+    body = JSON.parse(response.getContentText());
+  } catch (error) {
+    throw new Error(provider +
+      ' generation readiness validation returned invalid JSON.');
+  }
+  const completed = interactions ?
+    body.status === 'completed' && Array.isArray(body.steps) &&
+      body.steps.some(function (step) {
+        return step && step.type === 'model_output';
+      }) :
+    Array.isArray(body.candidates) && body.candidates.some(function (candidate) {
+      return candidate && candidate.finishReason === 'STOP';
+    });
+  if (!completed) {
+    throw new Error(provider +
+      ' generation readiness validation did not complete successfully.');
+  }
 }
 
 function validateInstallerOptions_(options) {

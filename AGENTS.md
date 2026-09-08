@@ -101,6 +101,11 @@
   invoking quota-limited AI APIs. Do not rescan and reprocess an entire intake
   folder for each event; retry unchanged failures only through the scheduled
   fallback path.
+- When provider overload recovery exceeds one Apps Script execution budget,
+  persist per-file due state and process only due items from a managed trigger;
+  do not use long `Utilities.sleep` retries. Permit paid provider fallback only
+  after the configured retry schedule is exhausted, with exact request-count
+  coverage.
 - Validate the complete script-scoped Pub/Sub topic and subscription identity
   before every pull or acknowledgement. Treat an entirely absent pair as an
   unconfigured no-op where appropriate, and reject partial or mismatched state.
@@ -174,6 +179,19 @@
   and test each path before it can mutate a deployment.
   Pass complete private bootstrap data through the temporary Secret Manager
   handoff, never through command arguments or installer state.
+- Keep deployment and runtime authorization separate. GitHub Actions uses the
+  isolated `CLASP_AUTH_JSON` profile to push source and update the owner-only
+  versioned deployment; Apps Script triggers and editor executions use the
+  installation owner's authorization and must continue to work when GitHub is
+  unavailable. Do not require CI secrets for the daily run or overload retry.
+  If a remote manual Execution API workflow is added, it must use an isolated
+  owner-only profile, validate the target deployment first, and report the
+  exact function and execution result without exposing credentials.
+- In the Apps Script editor, treat the function selector as contextual to the
+  currently open source file. Open `UtilitiesCataloging.gs` before selecting
+  `runDailyUtilitiesCataloging`, `retryFailedUtilitiesCataloging`, or
+  `processDueGeminiOverloadRetries`; their absence while another file is open
+  is not evidence of a failed deployment or missing project entrypoint.
 - Journal planned ownership before creating a remote resource, then persist its
   exact created identity before metadata, validation, or another fallible step
   so an interruption cannot strand or duplicate it. On resume, adopt a
