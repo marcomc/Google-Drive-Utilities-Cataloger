@@ -5838,6 +5838,19 @@ function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
     status: 'DEFERRED', deferredReason: 'gemini-api-high-demand',
     overloadFailureCount: 5, nextRetryAt: result.nextRetryAt
   }), false);
+  context.markIntakeFileProcessing_(state, file, 1, result.nextRetryAt);
+  assert.equal(state['file-id'].status, 'PROCESSING');
+  assert.equal(state['file-id'].nextRetryAt, result.nextRetryAt);
+  assert.equal(context.isGeminiOverloadRetryState_(state['file-id']), true);
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'drive-event'), false);
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'daily'), false);
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'manual_retry'), false);
+  state['file-id'].updatedAt = Date.now() - 10 * 60 * 1000 - 1;
+  assert.equal(context.shouldProcessIntakeFile_(file, state, 'manual_retry'), false);
+  state['file-id'].updatedAt = result.nextRetryAt;
+  assert.deepEqual(Array.from(context.getDueGeminiOverloadRetryFileIds_(
+    state, result.nextRetryAt + 10 * 60 * 1000 + 1
+  )), ['file-id']);
   let reports = 0;
   context.updateIntakeStateForResult_ = () => {};
   context.queuePendingReports_ = () => { reports += 1; };
@@ -5943,6 +5956,54 @@ function testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted() {
   assert.deepEqual(Array.from(result.results), []);
   assert.ok(logs.some(entry => entry.event === 'gemini-overload-retry-skipped' &&
     entry.details.fileId === 'due-file' && entry.details.reason === 'runtime-budget'));
+}
+
+function testScheduledGeminiOverloadRetryAddsOperatorLinksToTerminalResult() {
+  const context = loadCataloger();
+  const now = Date.now();
+  const file = {
+    getId: () => 'due-file', getName: () => 'due.pdf',
+    getUrl: () => 'https://drive.test/due-file',
+    getLastUpdated: () => new Date(0), getSize: () => 10
+  };
+  const state = {
+    'due-file': {
+      fingerprint: '0:10', status: 'DEFERRED',
+      deferredReason: 'gemini-api-high-demand', overloadFailureCount: 4,
+      nextRetryAt: now - 1
+    }
+  };
+  const persisted = [];
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogProcessingLock_ = (_source, callback) => callback();
+  context.getRootFolderId_ = () => 'root-folder-id';
+  context.DriveApp = {
+    getFolderById: () => ({}),
+    getFileById: () => file
+  };
+  context.flushPendingReports_ = () => {};
+  context.loadIntakeFileState_ = () => state;
+  context.isDirectIntakePdf_ = () => true;
+  context.hasMutationJournal_ = () => false;
+  context.loadTrustedExtractionPolicy_ = () => 'policy';
+  context.saveIntakeFileState_ = () => {};
+  context.finalizeCatalogResults_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.logCatalogEvent_ = () => {};
+  context.processIntakeFile_ = () => ({ status: 'ERROR' });
+  context.addOperatorLinksToResult_ = (result) => {
+    result.retryUrl = 'https://script.test/retry';
+    result.supplierProfilesUrl = 'https://drive.test/supplier-profiles';
+  };
+  context.persistCatalogResult_ = (_state, _file, _root, result) => persisted.push(result);
+
+  context.processDueGeminiOverloadRetries();
+
+  assert.deepEqual(persisted, [{
+    status: 'ERROR',
+    retryUrl: 'https://script.test/retry',
+    supplierProfilesUrl: 'https://drive.test/supplier-profiles'
+  }]);
 }
 
 function testStructuredFileLogsContainOnlyOpaqueId() {
@@ -9171,6 +9232,7 @@ testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback();
 testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports();
 testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles();
 testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted();
+testScheduledGeminiOverloadRetryAddsOperatorLinksToTerminalResult();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();
 testDashboardRefreshWarningIsReported();

@@ -103,7 +103,7 @@ make install
 
 Complete the printed browser handoff and
 [resume the installer](INSTALLATION.md#quick-start). The installer configures
-Script Properties, policy, spreadsheet, Pub/Sub, Drive events, and all three
+Script Properties, policy, spreadsheet, Pub/Sub, Drive events, and all four
 triggers, then validates the resulting state.
 
 Use the [controlled validation](INSTALLATION.md#controlled-validation) before
@@ -438,7 +438,7 @@ link opens the Apps Script project at
 `retryFailedUtilitiesCataloging`; it is deliberately an owner-controlled manual
 execution, not a public retry endpoint.
 
-After a transport repair, run `installAutomationTriggers` to restore all three
+After a transport repair, run `installAutomationTriggers` to restore all four
 triggers. It preserves matching schedules, removes duplicates, and refreshes
 only handlers whose stored cadence differs from the deployed source.
 

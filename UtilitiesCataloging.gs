@@ -66,11 +66,19 @@ function processDueGeminiOverloadRetries() {
       logCatalogEvent_('catalog-file-processing-start', Object.assign(
         describeFileForLog_(file), { triggerSource: 'gemini-overload-retry' }
       ));
-      markIntakeFileProcessing_(state, file, previous.overloadFailureCount);
+      markIntakeFileProcessing_(state, file, previous.overloadFailureCount,
+        previous.nextRetryAt);
       saveIntakeFileState_(state);
       const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
         deadlineAt, { overloadFailureCount: previous.overloadFailureCount });
       results.push(result);
+      try {
+        addOperatorLinksToResult_(result, rootFolder);
+      } catch (error) {
+        logCatalogEvent_('catalog-operator-links-failed', Object.assign(
+          describeFileForLog_(file), { reason: String(error.message || error) }
+        ));
+      }
       persistCatalogResult_(state, file, rootFolder, result);
       logCatalogResult_(file, result);
     });
@@ -155,7 +163,7 @@ function processSingleIntakeFileWithinLock_(fileId, deadlineAt) {
     logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
     const state = loadIntakeFileState_();
     const previous = state[file.getId()];
-    if (isGeminiOverloadDeferredState_(previous) &&
+    if (isGeminiOverloadRetryState_(previous) &&
       previous.fingerprint === intakeFileFingerprint_(file)) {
       throw new Error(
         'The specified file has an active Gemini high-demand retry schedule; wait for it to run.'
@@ -5431,6 +5439,9 @@ function shouldProcessIntakeFile_(file, state, triggerSource) {
     return true;
   }
   if (previous.status === 'PROCESSING') {
+    if (isGeminiOverloadRetryState_(previous)) {
+      return false;
+    }
     return Date.now() - Number(previous.updatedAt || 0) > 10 * 60 * 1000;
   }
   if (previous.status !== 'ERROR') {
@@ -5446,12 +5457,14 @@ function getDueGeminiOverloadRetryFileIds_(state, now) {
   const retryAt = Number(now);
   return Object.keys(state).filter(function (fileId) {
     const entry = state[fileId];
-    return isGeminiOverloadDeferredState_(entry) && entry.nextRetryAt <= retryAt;
+    const isDueDeferredState = isGeminiOverloadDeferredState_(entry);
+    const isExpiredRetryLease = isGeminiOverloadRetryLease_(entry, retryAt);
+    return (isDueDeferredState || isExpiredRetryLease) && entry.nextRetryAt <= retryAt;
   });
 }
 
-function isGeminiOverloadDeferredState_(entry) {
-  return entry && entry.status === 'DEFERRED' &&
+function isGeminiOverloadRetryState_(entry) {
+  return entry && ['DEFERRED', 'PROCESSING'].indexOf(entry.status) >= 0 &&
     entry.deferredReason === 'gemini-api-high-demand' &&
     Number.isInteger(entry.overloadFailureCount) &&
     entry.overloadFailureCount > 0 &&
@@ -5459,15 +5472,29 @@ function isGeminiOverloadDeferredState_(entry) {
     Number.isFinite(entry.nextRetryAt);
 }
 
-function markIntakeFileProcessing_(state, file, overloadFailureCount) {
+function isGeminiOverloadDeferredState_(entry) {
+  return isGeminiOverloadRetryState_(entry) && entry.status === 'DEFERRED';
+}
+
+function isGeminiOverloadRetryLease_(entry, now) {
+  return isGeminiOverloadRetryState_(entry) && entry.status === 'PROCESSING' &&
+    Number(now) - Number(entry.updatedAt || 0) > 10 * 60 * 1000;
+}
+
+function markIntakeFileProcessing_(state, file, overloadFailureCount, nextRetryAt) {
   const count = Number(overloadFailureCount);
-  state[file.getId()] = {
+  const processing = {
     fingerprint: intakeFileFingerprint_(file),
     status: 'PROCESSING',
     attemptDate: intakeStateDate_(),
     updatedAt: Date.now(),
     overloadFailureCount: Number.isInteger(count) && count > 0 ? count : 0
   };
+  if (Number.isFinite(nextRetryAt) && processing.overloadFailureCount > 0) {
+    processing.deferredReason = 'gemini-api-high-demand';
+    processing.nextRetryAt = nextRetryAt;
+  }
+  state[file.getId()] = processing;
 }
 
 function recordIntakeFileOutcome_(state, file, result) {
