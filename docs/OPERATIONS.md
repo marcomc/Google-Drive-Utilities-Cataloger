@@ -252,13 +252,16 @@ separate AI prompt supervisor would add value.
 Transient network, `408`, generic `429`, and selected `5xx` failures receive
 one bounded transport retry. A verified Gemini Developer API daily-quota or
 depleted-prepayment response instead retries once on Vertex when automatic
-fallback is enabled. The explicit Developer API HTTP `500` high-demand signal
-is different: it persists a per-file retry after 1, 5, 15, then 30 minutes.
+fallback is enabled. Explicit Developer API per-model capacity or model-quota
+failures advance through the configured Flash model chain. If every model
+fails, the cataloger persists a per-file retry after 1, 5, 15, then 30 minutes.
 The one-minute managed trigger processes only due file IDs and does not hold an
-Apps Script execution open or rescan intake. If the fifth high-demand response
+Apps Script execution open or rescan intake. If the fifth complete chain round
 also fails, automatic fallback may use Vertex for the existing one-hour
-cooldown. Those outbound provider attempts remain distinct from the three
-logical extraction cycles and are counted at the request boundary.
+cooldown. If the execution budget runs low inside a chain, the next model is
+persisted and the same round resumes without advancing the fallback threshold.
+Those outbound provider attempts remain distinct from the three logical
+extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
@@ -545,10 +548,12 @@ unprovenanced row.
 
 `gemini-generation-request` is emitted once for each outbound model request.
 Count this event by file ID to detect retries or redundant processing; a normal
-file has one request and one `gemini-generation-response` event. A successful
-response also records the provider `finishReason`: Vertex requires `STOP`, and
-Interactions requires root status `completed` (logged as `COMPLETED`). Other
-statuses fail before parsing or mutating Drive and Sheets.
+file has one request and one `gemini-generation-response` event. A capacity or
+model-quota failure can produce one request for each configured Developer API
+model in the same retry round. A successful response also records the provider
+`finishReason`: Vertex requires `STOP`, and Interactions requires root status
+`completed` (logged as `COMPLETED`). Other statuses fail before parsing or
+mutating Drive and Sheets.
 
 Each successful response also emits `gemini-generation-usage`. It records the
 provider-reported `promptTokenCount`, `candidatesTokenCount`,

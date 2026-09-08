@@ -2831,9 +2831,12 @@ function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
     { ...validInvoice(), identifier: 'INV-REPAIRED' }
   ];
   const repairContexts = [];
+  const deadlines = [];
   const events = [];
-  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+  context.extractUtilityData_ = (_file, _policy, repairContext, _retryContext,
+    deadlineAt) => {
     repairContexts.push(repairContext);
+    deadlines.push(deadlineAt);
     return candidates[repairContexts.length - 1];
   };
   context.validateExtractedUtilityDataForImport_ = (candidate) =>
@@ -2859,6 +2862,8 @@ function testExtractionRepairLoopUsesStructuredFeedbackAndStopsWhenValid() {
   assert.equal(result.repairAttemptCount, 1);
   assert.equal(repairContexts[0], null);
   assert.equal(repairContexts[1].attempt, 2);
+  assert.equal(Number.isFinite(deadlines[0]), true);
+  assert.equal(deadlines[1], deadlines[0]);
   assert.equal(repairContexts[1].feedback.version, 1);
   assert.equal(repairContexts[1].feedback.issues[0].stage, 'extraction');
   assert.equal(repairContexts[1].feedback.issues[0].code,
@@ -5350,7 +5355,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.1',
+      applicationVersion: '0.6.2',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5361,7 +5366,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.1',
+      applicationVersion: '0.6.2',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -5727,13 +5732,15 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     getResponseCode: () => status,
     getContentText: () => JSON.stringify(body)
   });
-  const responses = [response(highDemand), response(highDemand), response(highDemand),
-    response(highDemand), response(highDemand), {
+  const modelCount = 5;
+  const responses = [
+    ...Array.from({ length: modelCount * 5 }, () => response(highDemand)), {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
         candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }]
       })
-    }];
+    }
+  ];
   const properties = {
     GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
     GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
@@ -5771,15 +5778,21 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     assert.equal(error.overloadFailureCount, count + 1);
   }
   assert.equal(call(4), '{}');
-  assert.equal(requests.length, 6);
-  assert.ok(requests.slice(0, 5).every(request =>
+  assert.equal(requests.length, modelCount * 5 + 1);
+  assert.ok(requests.slice(0, modelCount * 5).every(request =>
     request.url.includes('generativelanguage.googleapis.com')));
-  assert.match(requests[5].url, /aiplatform\.googleapis\.com/);
+  assert.match(requests[modelCount * 5].url, /aiplatform\.googleapis\.com/);
+  assert.deepEqual(requests.slice(0, modelCount).map(request =>
+    JSON.parse(request.options.payload).model), [
+    'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash'
+  ]);
   assert.deepEqual(sleeps, []);
   assert.deepEqual(writes, ['GEMINI_VERTEX_FALLBACK_UNTIL']);
-  assert.equal(events.filter(event => event.event === 'gemini-generation-request').length, 6);
+  assert.equal(events.filter(event => event.event === 'gemini-generation-request').length,
+    modelCount * 5 + 1);
   assert.equal(events.find(event => event.event === 'gemini-vertex-fallback-activated').details.reason,
-    'gemini-api-overload-retries-exhausted');
+    'gemini-api-model-chain-retries-exhausted');
 
   const noFallback = loadCataloger({
     PropertiesService: { getScriptProperties: () => ({ getProperty: key => ({
@@ -5800,7 +5813,278 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response({
     error: { code: 500, message: 'Internal service error.' }
   })), '');
+  assert.equal(noFallback.getGeminiDeveloperModelFailureReason_(response({
+    error: { code: 500, message: 'Internal service error.' }
+  })), '');
   assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response(highDemand, 503)), '');
+}
+
+function testGeminiModelChainReservesTimeToPersistDeferredState() {
+  const requests = [];
+  const propertyWrites = [];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || '',
+      setProperty: (key, value) => propertyWrites.push({ key, value })
+    }) },
+    UrlFetchApp: { fetch: (_url, options) => {
+      requests.push(JSON.parse(options.payload).model);
+      return {
+        getResponseCode: () => 500,
+        getContentText: () => JSON.stringify({
+          error: { message: 'The model is currently experiencing high demand.' }
+        })
+      };
+    } }
+  });
+  vm.runInContext(
+    'let modelChainClockRead = 0; const modelChainClock = [0, 0, 60000]; ' +
+      'Date.now = () => modelChainClockRead < modelChainClock.length ? ' +
+      'modelChainClock[modelChainClockRead++] : 60000;',
+    context
+  );
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = () => {};
+
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' },
+      null, { overloadFailureCount: 4 }, 100000);
+  } catch (error) {
+    deferred = error;
+  }
+
+  assert.deepEqual(requests, ['gemini-flash-latest']);
+  assert.deepEqual(propertyWrites, []);
+  assert.equal(deferred.geminiOverloadDeferred, true);
+  assert.equal(deferred.geminiModelChainPartial, true);
+  assert.equal(deferred.deferredReason, 'gemini-api-high-demand');
+  assert.equal(deferred.overloadFailureCount, 4);
+  assert.equal(deferred.nextGeminiModel, 'gemini-3.8-flash');
+  const file = {
+    getId: () => 'file-id', getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/file-id',
+    getLastUpdated: () => new Date(0), getSize: () => 10
+  };
+  const result = context.buildGeminiOverloadDeferredResult_(file, deferred);
+  const state = {};
+  context.recordIntakeFileOutcome_(state, file, result);
+  assert.equal(state['file-id'].overloadFailureCount, 4);
+  assert.equal(state['file-id'].nextGeminiModel, 'gemini-3.8-flash');
+  assert.equal(context.isGeminiOverloadDeferredState_(state['file-id']), true);
+
+  const deferredRequests = [];
+  const deferredContext = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => ({
+      GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+      GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'false'
+    })[key] || '' }) },
+    UrlFetchApp: { fetch: request => deferredRequests.push(request) }
+  });
+  vm.runInContext('Date.now = () => 60000;', deferredContext);
+  deferredContext.logCatalogEvent_ = () => {};
+  let preflightDeferred;
+  try {
+    deferredContext.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+      {
+        overloadFailureCount: 1,
+        deferredReason: 'gemini-api-high-demand'
+      }, 100000);
+  } catch (error) {
+    preflightDeferred = error;
+  }
+  assert.deepEqual(deferredRequests, []);
+  assert.equal(preflightDeferred.geminiOverloadDeferred, true);
+  assert.equal(preflightDeferred.geminiModelChainPartial, true);
+  assert.equal(preflightDeferred.overloadFailureCount, 1);
+  assert.equal(preflightDeferred.nextGeminiModel, 'gemini-flash-latest');
+}
+
+function testGeminiPartialModelChainResumesBeforeVertexFallback() {
+  const requests = [];
+  const propertyWrites = [];
+  const highDemand = {
+    getResponseCode: () => 500,
+    getContentText: () => JSON.stringify({
+      error: { message: 'The model is currently experiencing high demand.' }
+    })
+  };
+  const responses = [highDemand, highDemand, highDemand, highDemand, {
+    getResponseCode: () => 200,
+    getContentText: () => JSON.stringify({
+      candidates: [{
+        finishReason: 'STOP', content: { parts: [{ text: '{}' }] }
+      }]
+    })
+  }];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || '',
+      setProperty: (key, value) => propertyWrites.push({ key, value })
+    }) },
+    UrlFetchApp: { fetch: (url, options) => {
+      requests.push({ url, payload: JSON.parse(options.payload) });
+      return responses.shift();
+    } }
+  });
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = () => {};
+
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: 4,
+      deferredReason: 'gemini-api-high-demand',
+      nextGeminiModel: 'gemini-3.8-flash'
+    }
+  ), '{}');
+
+  assert.deepEqual(requests.slice(0, 4).map(request => request.payload.model), [
+    'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash'
+  ]);
+  assert.ok(requests.slice(0, 4).every(request =>
+    request.url.includes('generativelanguage.googleapis.com')));
+  assert.match(requests[4].url, /aiplatform\.googleapis\.com/);
+  assert.equal(propertyWrites.length, 1);
+  assert.equal(propertyWrites[0].key, 'GEMINI_VERTEX_FALLBACK_UNTIL');
+}
+
+function testGeminiModelQuotaMovesToNextKnownFlashModel() {
+  const requests = [];
+  const events = [];
+  const responses = [{
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'too_many_requests',
+        message: 'You exceeded your current quota.\n' +
+          '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: gemini-3.8-flash\n' +
+          'Please retry in 45s.'
+      }
+    })
+  }, mockedInteractionsResponse()];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || ''
+    }) },
+    UrlFetchApp: { fetch: (url, options) => {
+      requests.push({ url, payload: JSON.parse(options.payload) });
+      return responses.shift();
+    } }
+  });
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+  ), '{}');
+  assert.deepEqual(requests.map(request => request.payload.model), [
+    'gemini-flash-latest', 'gemini-3.8-flash'
+  ]);
+  assert.equal(events.find(event =>
+    event.event === 'gemini-developer-model-fallback').details.reason,
+    'model-quota-limited');
+  assert.equal(events.find(event =>
+    event.event === 'gemini-generation-usage').details.model,
+    'gemini-3.8-flash');
+  assert.ok(requests.every(request =>
+    request.url.includes('generativelanguage.googleapis.com')));
+  const wrongCode = {
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'rate_limit_exceeded',
+        message: '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: gemini-3.8-flash\n'
+      }
+    })
+  };
+  assert.equal(context.getGeminiDeveloperModelFailureReason_(
+    wrongCode, 'gemini-flash-latest'), '');
+  const wrongModel = {
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'too_many_requests',
+        message: '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: gemini-3.8-flash\n'
+      }
+    })
+  };
+  assert.equal(context.getGeminiDeveloperModelFailureReason_(
+    wrongModel, 'gemini-3.7-flash'), '');
+
+  const quotaResponse = attemptedModel => ({
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'too_many_requests',
+        message: '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: ' + (attemptedModel === 'gemini-flash-latest' ?
+            'gemini-3.8-flash' : attemptedModel) + '\n'
+      }
+    })
+  });
+  const quotaContext = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'false'
+      })[key] || ''
+    }) },
+    UrlFetchApp: { fetch: (_url, options) =>
+      quotaResponse(JSON.parse(options.payload).model) }
+  });
+  quotaContext.buildExtractionPrompt_ = () => 'test-prompt';
+  quotaContext.logCatalogEvent_ = () => {};
+  let quotaError;
+  try {
+    quotaContext.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' });
+  } catch (error) {
+    quotaError = error;
+  }
+  assert.ok(quotaError);
+  assert.equal(quotaError.geminiOverloadDeferred, true);
+  assert.equal(quotaError.deferredReason, 'gemini-api-model-quota-limited');
+  const quotaFile = {
+    getId: () => 'file-id', getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/file-id',
+    getLastUpdated: () => new Date(0), getSize: () => 10
+  };
+  const quotaResult = quotaContext.buildGeminiOverloadDeferredResult_(
+    quotaFile, quotaError);
+  assert.equal(quotaResult.deferredReason, 'gemini-api-model-quota-limited');
+  const quotaState = {};
+  quotaContext.recordIntakeFileOutcome_(quotaState, quotaFile, quotaResult);
+  assert.equal(quotaState['file-id'].deferredReason,
+    'gemini-api-model-quota-limited');
+  assert.equal(quotaContext.isGeminiOverloadDeferredState_(
+    quotaState['file-id']), true);
+  assert.equal(quotaContext.getGeminiModelChainDeferredReason_([
+    { geminiDeveloperFailureReason: 'high-demand' },
+    { geminiDeveloperFailureReason: 'model-quota-limited' }
+  ]), 'gemini-api-model-chain-unavailable');
 }
 
 function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
@@ -5873,7 +6157,7 @@ function testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles() {
     'due-file': {
       fingerprint: '0:10', status: 'DEFERRED',
       deferredReason: 'gemini-api-high-demand', overloadFailureCount: 1,
-      nextRetryAt: now - 1
+      nextRetryAt: now - 1, nextGeminiModel: 'gemini-3.8-flash'
     },
     'not-due-file': {
       fingerprint: '0:10', status: 'DEFERRED',
@@ -5917,6 +6201,7 @@ function testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles() {
   assert.equal(processed.length, 1);
   assert.equal(processed[0].policy, 'policy');
   assert.equal(processed[0].retryContext.overloadFailureCount, 1);
+  assert.equal(processed[0].retryContext.nextGeminiModel, 'gemini-3.8-flash');
   assert.equal(result.results.length, 1);
   assert.equal(state['changed-file'], undefined);
   assert.ok(logs.some(entry => entry.event === 'gemini-overload-retry-reset' &&
@@ -5927,7 +6212,9 @@ function testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted() {
   const context = loadCataloger();
   const logs = [];
   vm.runInContext(
-    'let overloadRetryClockReads = 0; Date.now = () => overloadRetryClockReads++ === 0 ? 0 : CONFIG.MAX_RUNTIME_MS;',
+    'let overloadRetryClockReads = 0; ' +
+      'Date.now = () => overloadRetryClockReads++ === 0 ? 0 : ' +
+      'CONFIG.MAX_RUNTIME_MS - CONFIG.GEMINI_REQUEST_MIN_REMAINING_MS + 1;',
     context
   );
   const state = {
@@ -5954,8 +6241,43 @@ function testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted() {
   const result = context.processDueGeminiOverloadRetries();
 
   assert.deepEqual(Array.from(result.results), []);
+  assert.equal(state['due-file'].status, 'DEFERRED');
+  assert.equal(state['due-file'].overloadFailureCount, 1);
   assert.ok(logs.some(entry => entry.event === 'gemini-overload-retry-skipped' &&
     entry.details.fileId === 'due-file' && entry.details.reason === 'runtime-budget'));
+}
+
+function testChangedPdfDoesNotInheritGeminiRetryRound() {
+  const captured = [];
+  const context = loadCataloger();
+  const file = {
+    getId: () => 'file-id', getName: () => 'invoice.pdf',
+    getUrl: () => 'https://drive.test/file-id',
+    getLastUpdated: () => new Date(2000), getSize: () => 20
+  };
+  const state = {
+    'file-id': {
+      fingerprint: '0:10', status: 'DEFERRED',
+      deferredReason: 'gemini-api-high-demand', overloadFailureCount: 4,
+      nextRetryAt: 0
+    }
+  };
+  context.loadIntakeFileState_ = () => state;
+  context.loadTrustedExtractionPolicy_ = () => 'policy';
+  context.saveIntakeFileState_ = () => {};
+  context.persistCatalogResult_ = () => {};
+  context.logCatalogEvent_ = () => {};
+  context.logCatalogResult_ = () => {};
+  context.addOperatorLinksToResult_ = result => result;
+  context.processIntakeFile_ = (_file, _root, _policy, _deadline, retryContext) => {
+    captured.push(retryContext);
+    return { status: 'IMPORTED' };
+  };
+
+  context.processEligibleIntakeFiles_([file], {}, 'event');
+
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].overloadFailureCount, 0);
 }
 
 function testScheduledGeminiOverloadRetryAddsOperatorLinksToTerminalResult() {
@@ -9229,9 +9551,13 @@ testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testDestinationFolderCreationCheckpointsEachCreatedPath();
 testTerminalQuotaClassificationAndPaidRouting();
 testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback();
+testGeminiModelChainReservesTimeToPersistDeferredState();
+testGeminiPartialModelChainResumesBeforeVertexFallback();
+testGeminiModelQuotaMovesToNextKnownFlashModel();
 testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports();
 testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles();
 testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted();
+testChangedPdfDoesNotInheritGeminiRetryRound();
 testScheduledGeminiOverloadRetryAddsOperatorLinksToTerminalResult();
 testStructuredFileLogsContainOnlyOpaqueId();
 testReportFieldsCannotInjectExtraLines();

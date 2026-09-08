@@ -644,28 +644,180 @@ function validateCatalogerInstallation() {
 
 /**
  * Validate the configured Gemini model against every enabled backend without
- * exposing the stored API key or performing a document-generation request.
- * This is owner-controlled operational validation for model migrations.
+ * exposing the stored API key or sending document data. This is
+ * owner-controlled operational validation for model migrations.
  */
 function validateConfiguredGeminiAccess() {
   const backend = getGeminiBackend_();
   const autoVertexFallback = isAutomaticVertexFallbackEnabled_();
   const model = getGeminiModel_();
-  validateInstallerGeminiAccess_({
+  const options = {
     projectId: getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID),
     geminiBackend: backend,
     geminiApiKey: getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY),
     geminiModel: model,
     autoVertexFallback: autoVertexFallback,
     vertexLocation: getVertexAiLocation_()
-  });
+  };
+  const geminiApi = validateConfiguredGeminiBackend_(
+    'gemini_api', backend === 'gemini_api', options);
+  const vertexAi = validateConfiguredGeminiBackend_(
+    'vertex_ai', backend === 'vertex_ai' || autoVertexFallback, options);
   return {
     applicationVersion: CONFIG.APP_VERSION,
     geminiBackend: backend,
     geminiModel: model,
-    geminiApiValidated: backend === 'gemini_api',
-    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback
+    ready: (!geminiApi.enabled || geminiApi.available) &&
+      (!vertexAi.enabled || vertexAi.available),
+    geminiApiValidated: geminiApi.metadataValidated,
+    geminiApiGenerationValidated: geminiApi.generationValidated,
+    vertexAiValidated: vertexAi.metadataValidated,
+    vertexAiGenerationValidated: vertexAi.generationValidated,
+    backends: {
+      gemini_api: geminiApi,
+      vertex_ai: vertexAi
+    }
   };
+}
+
+function validateConfiguredGeminiBackend_(backend, enabled, options) {
+  const result = {
+    enabled: enabled,
+    metadataValidated: false,
+    generationValidated: false,
+    available: false
+  };
+  if (!enabled) {
+    return result;
+  }
+  try {
+    if (backend === 'gemini_api') {
+      validateInstallerGeminiDeveloperApi_(options);
+    } else {
+      validateInstallerVertexAi_(options);
+    }
+    result.metadataValidated = true;
+  } catch (error) {
+    return addConfiguredGeminiFailure_(result, 'metadata', error);
+  }
+  try {
+    if (backend === 'gemini_api') {
+      validateConfiguredGeminiDeveloperGeneration_(options);
+    } else {
+      validateConfiguredVertexGeneration_(options);
+    }
+    result.generationValidated = true;
+    result.available = true;
+    return result;
+  } catch (error) {
+    return addConfiguredGeminiFailure_(result, 'generation', error);
+  }
+}
+
+function addConfiguredGeminiFailure_(result, stage, error) {
+  result.failureStage = stage;
+  const statusMatch = String(error && error.message || error).match(/HTTP ([0-9]{3})/);
+  if (statusMatch) {
+    result.httpStatus = Number(statusMatch[1]);
+  }
+  result.reason = error && error.geminiHighDemand === true ?
+    'high-demand' : 'validation-failed';
+  return result;
+}
+
+function validateConfiguredGeminiDeveloperGeneration_(options) {
+  const generationConfig = Object.assign({ max_output_tokens: 256 },
+    getGeminiReasoningConfig_(options.geminiModel, 'gemini_api'));
+  const response = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': options.geminiApiKey },
+      payload: JSON.stringify({
+        model: options.geminiModel,
+        input: 'Reply with exactly OK.',
+        generation_config: generationConfig,
+        store: false
+      }),
+      muteHttpExceptions: true
+    });
+  validateConfiguredGenerationResponse_(response, 'Gemini Developer API', true);
+}
+
+function validateConfiguredVertexGeneration_(options) {
+  const endpoint = 'https://aiplatform.googleapis.com/v1/projects/' +
+    encodeURIComponent(options.projectId) +
+    '/locations/' + encodeURIComponent(options.vertexLocation) +
+    '/publishers/google/models/' + encodeURIComponent(options.geminiModel) +
+    ':generateContent';
+  const productionReasoning = getGeminiReasoningConfig_(
+    options.geminiModel, 'vertex_ai');
+  const generationConfig = { maxOutputTokens: 256 };
+  if (productionReasoning.thinkingConfig) {
+    generationConfig.thinkingConfig = {
+      thinkingBudget: Math.min(
+        productionReasoning.thinkingConfig.thinkingBudget, 128)
+    };
+  }
+  const response = UrlFetchApp.fetch(endpoint, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
+      generationConfig: generationConfig
+    }),
+    muteHttpExceptions: true
+  });
+  validateConfiguredGenerationResponse_(response, 'Vertex AI', false);
+}
+
+function validateConfiguredGenerationResponse_(response, provider, interactions) {
+  const statusCode = response.getResponseCode();
+  if (statusCode !== 200) {
+    const failure = new Error(provider +
+      ' generation readiness validation failed (HTTP ' + statusCode + ').');
+    failure.geminiHighDemand = interactions && statusCode === 500 &&
+      isConfiguredGeminiHighDemandResponse_(response);
+    throw failure;
+  }
+  let body;
+  try {
+    body = JSON.parse(response.getContentText());
+  } catch (error) {
+    throw new Error(provider +
+      ' generation readiness validation returned invalid JSON.');
+  }
+  const completed = interactions ?
+    body.status === 'completed' && Array.isArray(body.steps) &&
+      body.steps.some(function (step) {
+        return step && step.type === 'model_output' &&
+          Array.isArray(step.content) && step.content.some(function (content) {
+            return content && content.type === 'text' &&
+              String(content.text || '').trim() === 'OK';
+          });
+      }) :
+    Array.isArray(body.candidates) && body.candidates.some(function (candidate) {
+      const parts = candidate && candidate.content && candidate.content.parts;
+      return candidate && candidate.finishReason === 'STOP' &&
+        Array.isArray(parts) && parts.some(function (part) {
+          return part && String(part.text || '').trim() === 'OK';
+        });
+    });
+  if (!completed) {
+    throw new Error(provider +
+      ' generation readiness validation did not complete successfully.');
+  }
+}
+
+function isConfiguredGeminiHighDemandResponse_(response) {
+  try {
+    const body = JSON.parse(response.getContentText());
+    return Boolean(body && body.error && typeof body.error.message === 'string' &&
+      /\bcurrently\s+experiencing\s+high\s+demand\b/i.test(body.error.message));
+  } catch (error) {
+    return false;
+  }
 }
 
 function validateInstallerOptions_(options) {

@@ -1,8 +1,17 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.6.1',
+  APP_VERSION: '0.6.2',
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
+  // Keep the moving alias separate from the latest explicitly verified Flash
+  // releases. Add new releases here without changing the fallback algorithm.
+  GEMINI_DEVELOPER_FALLBACK_MODELS: Object.freeze([
+    'gemini-flash-latest',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash'
+  ]),
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -32,6 +41,8 @@ const CONFIG = Object.freeze({
   GEMINI_VERTEX_THINKING_BUDGET: 4096,
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
+  // Keep enough execution time to persist a retry after a model call returns.
+  GEMINI_REQUEST_MIN_REMAINING_MS: 45 * 1000,
   // Reserve time to persist the per-file outcome instead of starting a repair
   // that is already too close to the Apps Script execution deadline.
   EXTRACTION_REPAIR_MIN_REMAINING_MS: 45 * 1000,
@@ -176,6 +187,28 @@ function getGeminiModel_() {
 function normalizeGeminiModel_(model) {
   const normalizedModel = String(model || '').trim();
   return normalizedModel || CONFIG.DEFAULT_MODEL;
+}
+
+function getGeminiReasoningConfig_(model, backend) {
+  const gemini25Models = [
+    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
+  ];
+  if (backend === 'vertex_ai') {
+    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
+      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
+    } : {};
+  }
+  if (model === 'gemini-3-pro-preview') {
+    return { thinking_level: 'high' };
+  }
+  const mediumLevelModels = gemini25Models.concat([
+    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
+  ]);
+  return mediumLevelModels.indexOf(model) !== -1 ? {
+    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
+  } : {};
 }
 
 /**

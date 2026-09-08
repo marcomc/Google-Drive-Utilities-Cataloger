@@ -2144,11 +2144,24 @@ function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
           return response(200, { payload: { data:
             Buffer.from(JSON.stringify(options)).toString('base64') } });
         }
-        assert.ok(url.endsWith('/' + model) || url.endsWith('/' + model + ':countTokens'));
         if (url.endsWith(':countTokens')) {
           assert.ok(JSON.parse(requestOptions.payload).model.endsWith('/' + model));
           return response(200, { totalTokens: 2 });
         }
+        if (url.endsWith('/v1beta/interactions')) {
+          const payload = JSON.parse(requestOptions.payload);
+          assert.equal(payload.model, model);
+          return response(200, {
+            status: 'completed',
+            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'OK' }] }]
+          });
+        }
+        if (url.endsWith('/' + model + ':generateContent')) {
+          return response(200, {
+            candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+          });
+        }
+        assert.ok(url.endsWith('/' + model));
         return response(200, { supportedGenerationMethods: ['generateContent'] });
       }, stored);
       context.DriveApp = { getFolderById: () => ({ getUrl: () => 'https://drive.test' }) };
@@ -2177,8 +2190,10 @@ function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
       const status = context.validateConfiguredGeminiAccess();
       assert.equal(status.geminiModel, model);
       assert.equal(status.geminiApiValidated, backend === 'gemini_api');
+      assert.equal(status.geminiApiGenerationValidated, backend === 'gemini_api');
       assert.equal(status.vertexAiValidated, backend === 'vertex_ai' || fallback);
-      assert.equal(requests.length, 1 + 2 * expectedProbes);
+      assert.equal(status.vertexAiGenerationValidated, backend === 'vertex_ai' || fallback);
+      assert.equal(requests.length, 1 + 3 * expectedProbes);
       assert.deepEqual(stored, before);
       assert.equal(JSON.stringify(status).includes('developer-secret'), false);
       assert.equal(context.configureGeminiBackend('vertex_ai').geminiModel, model);
@@ -2361,7 +2376,7 @@ function testFallbackValidatesBothBackends() {
 }
 
 function testConfiguredGeminiAccessValidationIsRedacted() {
-  let validatedOptions;
+  const calls = [];
   const context = loadInstaller(() => {
     throw new Error('network must be delegated to the validation helper');
   });
@@ -2378,8 +2393,14 @@ function testConfiguredGeminiAccessValidationIsRedacted() {
   context.getVertexAiLocation_ = () => 'global';
   context.getScriptProperty_ = (key) => key === 'GEMINI_API_KEY' ?
     'developer-secret' : 'cataloger-project';
-  context.validateInstallerGeminiAccess_ = (options) => {
-    validatedOptions = options;
+  context.validateConfiguredGeminiBackend_ = (backend, enabled, options) => {
+    calls.push({ backend, enabled, options });
+    return {
+      enabled: enabled,
+      metadataValidated: enabled,
+      generationValidated: enabled,
+      available: enabled
+    };
   };
 
   const result = context.validateConfiguredGeminiAccess();
@@ -2388,10 +2409,171 @@ function testConfiguredGeminiAccessValidationIsRedacted() {
     applicationVersion: '0.6.0',
     geminiBackend: 'gemini_api',
     geminiModel: 'gemini-flash-latest',
+    ready: true,
     geminiApiValidated: true,
-    vertexAiValidated: true
+    geminiApiGenerationValidated: true,
+    vertexAiValidated: true,
+    vertexAiGenerationValidated: true,
+    backends: {
+      gemini_api: {
+        enabled: true, metadataValidated: true,
+        generationValidated: true, available: true
+      },
+      vertex_ai: {
+        enabled: true, metadataValidated: true,
+        generationValidated: true, available: true
+      }
+    }
   });
-  assert.equal(validatedOptions.geminiApiKey, 'developer-secret');
+  assert.deepEqual(calls.map(call => [call.backend, call.enabled]), [
+    ['gemini_api', true], ['vertex_ai', true]
+  ]);
+  assert.equal(calls[0].options, calls[1].options);
+  assert.equal(calls[0].options.geminiApiKey, 'developer-secret');
+  assert.equal(JSON.stringify(result).includes('developer-secret'), false);
+}
+
+function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
+  const requests = [];
+  const context = loadInstaller((url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/v1beta/interactions')) {
+      return response(200, {
+        status: 'completed',
+        steps: [{ type: 'model_output', content: [{ type: 'text', text: 'OK' }] }]
+      });
+    }
+    return response(200, {
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+    });
+  });
+  const options = {
+    projectId: 'cataloger-project', geminiBackend: 'gemini_api',
+    geminiApiKey: 'developer-secret', geminiModel: 'gemini-flash-latest',
+    autoVertexFallback: true, vertexLocation: 'global'
+  };
+  context.getGeminiReasoningConfig_ = (_model, backend) => backend === 'gemini_api' ?
+    { thinking_level: 'medium' } :
+    { thinkingConfig: { thinkingBudget: 4096 } };
+
+  context.validateConfiguredGeminiDeveloperGeneration_(options);
+  context.validateConfiguredVertexGeneration_(options);
+
+  assert.equal(requests.length, 2);
+  const developerPayload = JSON.parse(requests[0].options.payload);
+  assert.deepEqual(JSON.parse(JSON.stringify(developerPayload)), {
+    model: 'gemini-flash-latest',
+    input: 'Reply with exactly OK.',
+    generation_config: { max_output_tokens: 256, thinking_level: 'medium' },
+    store: false
+  });
+  assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
+  assert.equal(requests[0].url.includes('developer-secret'), false);
+  const vertexPayload = JSON.parse(requests[1].options.payload);
+  assert.equal(vertexPayload.generationConfig.maxOutputTokens, 256);
+  assert.equal(vertexPayload.generationConfig.thinkingConfig.thinkingBudget, 128);
+  assert.equal(vertexPayload.contents[0].parts[0].text, 'Reply with exactly OK.');
+
+  const overloaded = loadInstaller(() => response(500, {
+    error: { message: 'developer-secret is currently experiencing high demand' }
+  }));
+  overloaded.getGeminiReasoningConfig_ = () => ({ thinking_level: 'medium' });
+  assert.throws(
+    () => overloaded.validateConfiguredGeminiDeveloperGeneration_(options),
+    (error) => {
+      assert.match(error.message, /generation readiness validation failed \(HTTP 500\)/);
+      assert.equal(error.message.includes('developer-secret'), false);
+      return true;
+    }
+  );
+
+  for (const emptyResponse of [
+    response(200, {
+      status: 'completed',
+      steps: [{ type: 'model_output', content: [] }]
+    }),
+    response(200, {
+      candidates: [{ finishReason: 'STOP', content: { parts: [] } }]
+    })
+  ]) {
+    assert.throws(
+      () => context.validateConfiguredGenerationResponse_(
+        emptyResponse, 'Gemini test backend',
+        emptyResponse.getContentText().includes('steps')),
+      /did not complete successfully/
+    );
+  }
+
+  const unclassifiedRequests = [];
+  const unclassified = loadInstaller((_url, requestOptions) => {
+    unclassifiedRequests.push(JSON.parse(requestOptions.payload));
+    return response(200, {
+      status: 'completed',
+      steps: [{
+        type: 'model_output', content: [{ type: 'text', text: 'OK' }]
+      }]
+    });
+  });
+  unclassified.getGeminiReasoningConfig_ = () => ({});
+  unclassified.validateConfiguredGeminiDeveloperGeneration_(Object.assign(
+    {}, options, { geminiModel: 'gemini-unclassified-pin' }));
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    unclassifiedRequests[0].generation_config)), {
+    max_output_tokens: 256
+  });
+}
+
+function testConfiguredAccessReportsBackendFailuresIndependently() {
+  const requests = [];
+  const context = loadInstallerWithRuntimeConfig((url) => {
+    requests.push(url);
+    if (url.endsWith('/gemini-flash-latest')) {
+      return response(200, { supportedGenerationMethods: ['generateContent'] });
+    }
+    if (url.endsWith('/v1beta/interactions')) {
+      return response(500, {
+        error: { message: 'gemini-flash-latest is currently experiencing high demand.' }
+      });
+    }
+    if (url.endsWith(':countTokens')) {
+      return response(200, { totalTokens: 2 });
+    }
+    if (url.endsWith(':generateContent')) {
+      return response(200, {
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+      });
+    }
+    throw new Error('Unexpected request: ' + url);
+  }, {
+    GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project',
+    GEMINI_API_KEY: 'developer-secret',
+    GEMINI_MODEL: 'gemini-flash-latest',
+    GEMINI_BACKEND: 'gemini_api',
+    GEMINI_AUTO_VERTEX_FALLBACK: 'true'
+  });
+
+  const result = context.validateConfiguredGeminiAccess();
+
+  assert.equal(result.ready, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.backends)), {
+    gemini_api: {
+      enabled: true,
+      metadataValidated: true,
+      generationValidated: false,
+      available: false,
+      failureStage: 'generation',
+      httpStatus: 500,
+      reason: 'high-demand'
+    },
+    vertex_ai: {
+      enabled: true,
+      metadataValidated: true,
+      generationValidated: true,
+      available: true
+    }
+  });
+  assert.equal(requests.length, 4);
+  assert.equal(requests.some(url => url.endsWith(':generateContent')), true);
   assert.equal(JSON.stringify(result).includes('developer-secret'), false);
 }
 
@@ -2683,6 +2865,8 @@ testGeminiDeveloperApiKeyRotationPreservesInstallation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
 testConfiguredGeminiAccessValidationIsRedacted();
+testConfiguredGenerationReadinessProbesAreBoundedAndRedacted();
+testConfiguredAccessReportsBackendFailuresIndependently();
 testCredentialFailureIsRedacted();
 testTimeZoneReconfigurationPreservesCredentialsAndTriggers();
 testTimeZoneReconfigurationRollsBackRemoteState();

@@ -30,18 +30,21 @@ Developer API key, then run the owner-only
 `configureGeminiFreeTierWithVertexFallback` function once. It keeps
 `gemini_api` as the primary backend.
 
-Only a `429` response explicitly identifying a daily request quota or depleted
-Gemini API prepayment credits triggers one immediate Vertex retry and a
-one-hour temporary Vertex route. An HTTP `500` is deferred only when the
-Developer API explicitly says the configured model is currently experiencing
-high demand: the unchanged PDF is retried after 1, 5, 15, and 30 minutes by a
-managed trigger. A fifth such response can activate the same temporary Vertex
-route when automatic fallback is enabled. Other transient network, `408`,
-generic `429`, and selected `5xx` failures receive one bounded retry on the
-current backend; short-lived rate limits and bare HTTP status codes do not
-cause Vertex usage.
+Only a `429` response explicitly identifying a terminal daily request quota or
+depleted Gemini API prepayment credits triggers one immediate Vertex retry and
+a one-hour temporary Vertex route. An explicit per-model capacity or model
+quota failure advances through the configured Developer API model chain. If
+the whole chain fails, the unchanged PDF is retried after 1, 5, 15, and 30
+minutes by a managed trigger. A fifth failed chain round can activate the same
+temporary Vertex route when automatic fallback is enabled. Other transient
+network, `408`, generic `429`, and selected `5xx` failures receive one bounded
+retry on the current backend; short-lived rate limits and bare HTTP status
+codes do not cause Vertex usage.
 The Interactions API's `quota_exceeded` code identifies daily exhaustion;
-`rate_limit_exceeded` and `too_many_requests` keep the transient retry path.
+`rate_limit_exceeded` keeps the transient retry path. A `too_many_requests`
+response advances to the next Developer API model only when its structured
+message identifies a concrete Gemini model quota; other responses with that
+code keep the transient retry path.
 Legacy responses require a structured daily-quota violation or the explicit
 prepayment-depletion message. Quota names, shared metrics and documentation
 links alone never activate paid fallback.
@@ -81,9 +84,32 @@ Every saved model identifier, including `gemini-3.6-flash` and
 alias is used only when runtime model configuration is absent or blank, or
 when the operator explicitly selects it. To switch an existing installation,
 call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
-Then `validateConfiguredGeminiAccess()` performs a harmless metadata/token count
-validation against every enabled backend. A former default spelling alone
-does not establish that the operator intended to follow future defaults.
+Then `validateConfiguredGeminiAccess()` performs metadata/token validation and
+a bounded stateless text-generation probe against every enabled backend. The
+probe uses no document data, retains no Interaction state, and distinguishes an
+accessible model from one that can currently serve inference. It probes every
+enabled backend independently, so a Developer API outage does not hide Vertex
+AI readiness. The result reports each backend's metadata and generation state,
+failure stage, sanitized HTTP status, and explicit high-demand reason. A former
+default spelling alone does not establish that the operator intended to follow
+future defaults.
+
+For document extraction, the configured Developer API model is tried first.
+The default configuration then tries these distinct identifiers in order,
+skipping duplicates:
+
+1. `gemini-flash-latest`
+2. `gemini-3.8-flash`
+3. `gemini-3.7-flash`
+4. `gemini-3.6-flash`
+5. `gemini-3.5-flash`
+
+Explicit capacity and model-quota failures advance to the next model. If the
+whole list remains unavailable, the existing persisted 1/5/15/30-minute retry
+rounds apply; the configured temporary Vertex AI fallback starts only after the
+rounds are exhausted. An explicit terminal daily-quota or depleted-credit
+signal still moves directly to Vertex AI when automatic fallback is enabled.
+
 Reasoning controls follow the selected API and documented
 [Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
 and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)

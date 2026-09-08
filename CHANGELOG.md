@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
+
+### Fixed
+
+- Make `validateConfiguredGeminiAccess` perform a bounded stateless generation
+  probe on every enabled Gemini backend after metadata and token validation, so
+  an accessible model that cannot currently serve inference no longer produces
+  a false-positive operational check. Probe the Developer API and Vertex AI
+  independently and return each backend's availability, failure stage, HTTP
+  status, and explicit high-demand classification without exposing provider
+  response text or credentials.
+- Try the configured Gemini Developer API model followed by the independently
+  named Flash fallback list (`gemini-flash-latest`, 3.8, 3.7, 3.6, and 3.5),
+  deduplicating entries and moving to the next model on explicit capacity or
+  model-quota failures. Preserve the persisted 1/5/15/30-minute retry rounds
+  when the complete list is unavailable. If the execution reserve is reached
+  mid-chain, persist the next model without consuming the current round, then
+  use the configured temporary Vertex AI fallback only after all rounds are
+  exhausted.
+
 ## [0.6.1] - 2026-09-08 - Gemini overload recovery
 
 ### Fixed
