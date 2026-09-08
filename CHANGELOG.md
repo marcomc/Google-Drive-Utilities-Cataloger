@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-09-08 - Release metadata synchronization
+
+### Fixed
+
+- Synchronize the runtime `CONFIG.APP_VERSION` with the current release
+  changelog so setup status, structured logs, and per-file reports identify the
+  deployed software version correctly.
+- Confirm the classification, validator-guided repair, and localized
+  diagnostic guidance already present in `AGENTS.md` is retained on `main`.
+
 ## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
 
 ### Fixed

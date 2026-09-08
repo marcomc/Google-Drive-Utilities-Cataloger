@@ -5299,6 +5299,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     Logger: { log: (payload) => cloudPayloads.push(payload) },
     console: { error: (message) => consoleErrors.push(message) }
   });
+  const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
   vm.runInContext(
     fs.readFileSync(path.join(projectRoot, 'locales/en.gs'), 'utf8'),
     context,
@@ -5355,7 +5356,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.2',
+      applicationVersion,
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5366,7 +5367,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.2',
+      applicationVersion,
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
