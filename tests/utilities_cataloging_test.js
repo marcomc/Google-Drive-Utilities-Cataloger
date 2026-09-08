@@ -5727,13 +5727,15 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     getResponseCode: () => status,
     getContentText: () => JSON.stringify(body)
   });
-  const responses = [response(highDemand), response(highDemand), response(highDemand),
-    response(highDemand), response(highDemand), {
+  const modelCount = 5;
+  const responses = [
+    ...Array.from({ length: modelCount * 5 }, () => response(highDemand)), {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
         candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }]
       })
-    }];
+    }
+  ];
   const properties = {
     GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
     GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
@@ -5771,15 +5773,21 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     assert.equal(error.overloadFailureCount, count + 1);
   }
   assert.equal(call(4), '{}');
-  assert.equal(requests.length, 6);
-  assert.ok(requests.slice(0, 5).every(request =>
+  assert.equal(requests.length, modelCount * 5 + 1);
+  assert.ok(requests.slice(0, modelCount * 5).every(request =>
     request.url.includes('generativelanguage.googleapis.com')));
-  assert.match(requests[5].url, /aiplatform\.googleapis\.com/);
+  assert.match(requests[modelCount * 5].url, /aiplatform\.googleapis\.com/);
+  assert.deepEqual(requests.slice(0, modelCount).map(request =>
+    JSON.parse(request.options.payload).model), [
+    'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash'
+  ]);
   assert.deepEqual(sleeps, []);
   assert.deepEqual(writes, ['GEMINI_VERTEX_FALLBACK_UNTIL']);
-  assert.equal(events.filter(event => event.event === 'gemini-generation-request').length, 6);
+  assert.equal(events.filter(event => event.event === 'gemini-generation-request').length,
+    modelCount * 5 + 1);
   assert.equal(events.find(event => event.event === 'gemini-vertex-fallback-activated').details.reason,
-    'gemini-api-overload-retries-exhausted');
+    'gemini-api-model-chain-retries-exhausted');
 
   const noFallback = loadCataloger({
     PropertiesService: { getScriptProperties: () => ({ getProperty: key => ({
@@ -5800,7 +5808,67 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response({
     error: { code: 500, message: 'Internal service error.' }
   })), '');
+  assert.equal(noFallback.getGeminiDeveloperModelFailureReason_(response({
+    error: { code: 500, message: 'Internal service error.' }
+  })), '');
   assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response(highDemand, 503)), '');
+}
+
+function testGeminiModelQuotaMovesToNextKnownFlashModel() {
+  const requests = [];
+  const events = [];
+  const responses = [{
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'too_many_requests',
+        message: 'You exceeded your current quota.\n' +
+          '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: gemini-3.8-flash\n' +
+          'Please retry in 45s.'
+      }
+    })
+  }, mockedInteractionsResponse()];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || ''
+    }) },
+    UrlFetchApp: { fetch: (url, options) => {
+      requests.push({ url, payload: JSON.parse(options.payload) });
+      return responses.shift();
+    } }
+  });
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+  ), '{}');
+  assert.deepEqual(requests.map(request => request.payload.model), [
+    'gemini-flash-latest', 'gemini-3.8-flash'
+  ]);
+  assert.equal(events.find(event =>
+    event.event === 'gemini-developer-model-fallback').details.reason,
+    'model-quota-limited');
+  assert.ok(requests.every(request =>
+    request.url.includes('generativelanguage.googleapis.com')));
+  const wrongCode = {
+    getResponseCode: () => 429,
+    getContentText: () => JSON.stringify({
+      error: {
+        code: 'rate_limit_exceeded',
+        message: '* Quota exceeded for metric: ' +
+          'generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+          'limit: 20, model: gemini-3.8-flash\n'
+      }
+    })
+  };
+  assert.equal(context.getGeminiDeveloperModelFailureReason_(wrongCode), '');
 }
 
 function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
@@ -9229,6 +9297,7 @@ testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testDestinationFolderCreationCheckpointsEachCreatedPath();
 testTerminalQuotaClassificationAndPaidRouting();
 testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback();
+testGeminiModelQuotaMovesToNextKnownFlashModel();
 testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports();
 testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles();
 testScheduledGeminiOverloadRetryDoesNotStartWhenRuntimeIsExhausted();

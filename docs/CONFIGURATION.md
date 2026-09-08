@@ -84,9 +84,29 @@ call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
 Then `validateConfiguredGeminiAccess()` performs metadata/token validation and
 a bounded stateless text-generation probe against every enabled backend. The
 probe uses no document data, retains no Interaction state, and distinguishes an
-accessible model from one that can currently serve inference. A former default
-spelling alone does not establish that the operator intended to follow future
-defaults.
+accessible model from one that can currently serve inference. It probes every
+enabled backend independently, so a Developer API outage does not hide Vertex
+AI readiness. The result reports each backend's metadata and generation state,
+failure stage, sanitized HTTP status, and explicit high-demand reason. A former
+default spelling alone does not establish that the operator intended to follow
+future defaults.
+
+For document extraction, the configured Developer API model is tried first.
+The default configuration then tries these distinct identifiers in order,
+skipping duplicates:
+
+1. `gemini-flash-latest`
+2. `gemini-3.8-flash`
+3. `gemini-3.7-flash`
+4. `gemini-3.6-flash`
+5. `gemini-3.5-flash`
+
+Explicit capacity and model-quota failures advance to the next model. If the
+whole list remains unavailable, the existing persisted 1/5/15/30-minute retry
+rounds apply; the configured temporary Vertex AI fallback starts only after the
+rounds are exhausted. An explicit terminal daily-quota or depleted-credit
+signal still moves directly to Vertex AI when automatic fallback is enabled.
+
 Reasoning controls follow the selected API and documented
 [Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
 and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)

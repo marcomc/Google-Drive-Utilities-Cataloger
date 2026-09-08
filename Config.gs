@@ -3,6 +3,15 @@ const CONFIG = Object.freeze({
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
+  // Keep the moving alias separate from the latest explicitly verified Flash
+  // releases. Add new releases here without changing the fallback algorithm.
+  GEMINI_DEVELOPER_FALLBACK_MODELS: Object.freeze([
+    'gemini-flash-latest',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash'
+  ]),
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,

@@ -1303,9 +1303,80 @@ function isModelExtractionNormalizationError_(error) {
 
 function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
   repairContext, retryContext) {
+  const backend = getEffectiveGeminiBackend_();
+  if (backend === 'gemini_api') {
+    return callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
+      driveAgentsPolicy, file, repairContext, retryContext);
+  }
   return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
-    driveAgentsPolicy, file,
-    getEffectiveGeminiBackend_(), '', repairContext, retryContext);
+    driveAgentsPolicy, file, backend, '', repairContext, retryContext);
+}
+
+function getGeminiDeveloperModelCandidates_() {
+  const candidates = [];
+  function add(model) {
+    const normalized = String(model || '').trim();
+    if (normalized && candidates.indexOf(normalized) === -1) {
+      candidates.push(normalized);
+    }
+  }
+  add(getGeminiModel_());
+  CONFIG.GEMINI_DEVELOPER_FALLBACK_MODELS.forEach(add);
+  return candidates;
+}
+
+function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
+  driveAgentsPolicy, file, repairContext, retryContext) {
+  const models = getGeminiDeveloperModelCandidates_();
+  const failures = [];
+  for (let index = 0; index < models.length; index += 1) {
+    const model = models[index];
+    try {
+      return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
+        driveAgentsPolicy, file, 'gemini_api', '', repairContext, retryContext,
+        model, true);
+    } catch (error) {
+      if (!error || error.geminiDeveloperModelFailure !== true) {
+        throw error;
+      }
+      if (error.geminiDeveloperFailureTerminalQuota === true) {
+        if (!isAutomaticVertexFallbackEnabled_()) {
+          throw error;
+        }
+        const quotaReason = error.geminiDeveloperFailureReason;
+        activateTemporaryVertexFallback_(file, quotaReason);
+        return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
+          driveAgentsPolicy, file, 'vertex_ai', quotaReason, repairContext,
+          retryContext);
+      }
+      failures.push(error);
+      if (index + 1 < models.length) {
+        logCatalogEvent_('gemini-developer-model-fallback', Object.assign(
+          describeFileForLog_(file), {
+            failedModel: model,
+            nextModel: models[index + 1],
+            reason: error.geminiDeveloperFailureReason
+          }));
+      }
+    }
+  }
+
+  const overloadFailureCount = getGeminiOverloadFailureCount_(retryContext) + 1;
+  if (overloadFailureCount > CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length) {
+    const exhaustedReason = 'gemini-api-model-chain-retries-exhausted';
+    if (isAutomaticVertexFallbackEnabled_()) {
+      activateTemporaryVertexFallback_(file, exhaustedReason);
+      return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
+        driveAgentsPolicy, file, 'vertex_ai', exhaustedReason, repairContext,
+        { overloadFailureCount: overloadFailureCount });
+    }
+    throw new Error(failures[failures.length - 1].message +
+      ' Automatic Vertex fallback is disabled after the scheduled model-chain retries.');
+  }
+  const deferred = new Error(failures[failures.length - 1].message);
+  deferred.geminiOverloadDeferred = true;
+  deferred.overloadFailureCount = overloadFailureCount;
+  throw deferred;
 }
 
 function getGeminiReasoningConfig_(model, backend) {
@@ -1336,11 +1407,11 @@ function getGeminiReasoningConfig_(model, backend) {
 
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
   driveAgentsPolicy, file, backend, fallbackReason, repairContext,
-  retryContext) {
+  retryContext, modelOverride, developerModelFallbackEnabled) {
   const isVertexAi = backend === 'vertex_ai';
   const isGeminiInteractionsApi = !isVertexAi;
   const extractionAttempt = repairContext ? Number(repairContext.attempt) : 1;
-  const model = getGeminiModel_();
+  const model = modelOverride || getGeminiModel_();
   const endpoint = isVertexAi ? getVertexAiEndpoint_() : getGeminiApiEndpoint_();
   const pdfPart = isVertexAi ? {
     inlineData: {
@@ -1463,6 +1534,16 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     }
     const overloadReason = backend === 'gemini_api' ?
       getGeminiDeveloperOverloadReason_(response) : '';
+    if (developerModelFallbackEnabled && backend === 'gemini_api') {
+      const modelFailureReason = getGeminiDeveloperModelFailureReason_(
+        response);
+      if (modelFailureReason) {
+        responseLog.modelFailureReason = modelFailureReason;
+        logCatalogEvent_('gemini-generation-response', responseLog);
+        throw buildGeminiDeveloperModelFailure_(
+          response, model, modelFailureReason);
+      }
+    }
     if (overloadReason) {
       const overloadFailureCount = getGeminiOverloadFailureCount_(retryContext) + 1;
       responseLog.overloadFailureCount = overloadFailureCount;
@@ -1860,6 +1941,46 @@ function getGeminiDeveloperOverloadReason_(response) {
   } catch (error) {
     return '';
   }
+}
+
+function getGeminiDeveloperModelFailureReason_(response) {
+  if (getGeminiDeveloperOverloadReason_(response)) {
+    return 'high-demand';
+  }
+  const statusCode = response.getResponseCode();
+  const terminalQuotaReason = getGeminiVertexFallbackReason_(response);
+  if (terminalQuotaReason) {
+    return terminalQuotaReason;
+  }
+  if (statusCode === 429) {
+    try {
+      const body = JSON.parse(response.getContentText());
+      const apiError = body && body.error;
+      const message = String(apiError && apiError.message || '');
+      if (apiError && apiError.code === 'too_many_requests' &&
+        new RegExp('(?:^|\\n)\\* Quota exceeded for metric: ' +
+        'generativelanguage\\.googleapis\\.com\\/[a-z][a-z0-9_]*, ' +
+        'limit: [0-9]+, model: gemini-[a-z0-9][a-z0-9.-]*(?:\\n|$)')
+          .test(message)) {
+        return 'model-quota-limited';
+      }
+    } catch (error) {
+      return '';
+    }
+    return '';
+  }
+  return '';
+}
+
+function buildGeminiDeveloperModelFailure_(response, model, reason) {
+  const error = new Error(describeGeminiHttpError_(response, 'gemini_api'));
+  error.geminiDeveloperModelFailure = true;
+  error.geminiDeveloperModel = model;
+  error.geminiDeveloperFailureReason = reason;
+  error.geminiDeveloperFailureTerminalQuota =
+    reason === 'gemini-api-daily-quota-exhausted' ||
+    reason === 'gemini-api-prepayment-credits-depleted';
+  return error;
 }
 
 function getGeminiOverloadFailureCount_(retryContext) {

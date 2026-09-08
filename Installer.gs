@@ -659,26 +659,70 @@ function validateConfiguredGeminiAccess() {
     autoVertexFallback: autoVertexFallback,
     vertexLocation: getVertexAiLocation_()
   };
-  validateInstallerGeminiAccess_(options);
-  validateConfiguredGeminiGenerationReadiness_(options);
+  const geminiApi = validateConfiguredGeminiBackend_(
+    'gemini_api', backend === 'gemini_api', options);
+  const vertexAi = validateConfiguredGeminiBackend_(
+    'vertex_ai', backend === 'vertex_ai' || autoVertexFallback, options);
   return {
     applicationVersion: CONFIG.APP_VERSION,
     geminiBackend: backend,
     geminiModel: model,
-    geminiApiValidated: backend === 'gemini_api',
-    geminiApiGenerationValidated: backend === 'gemini_api',
-    vertexAiValidated: backend === 'vertex_ai' || autoVertexFallback,
-    vertexAiGenerationValidated: backend === 'vertex_ai' || autoVertexFallback
+    ready: (!geminiApi.enabled || geminiApi.available) &&
+      (!vertexAi.enabled || vertexAi.available),
+    geminiApiValidated: geminiApi.metadataValidated,
+    geminiApiGenerationValidated: geminiApi.generationValidated,
+    vertexAiValidated: vertexAi.metadataValidated,
+    vertexAiGenerationValidated: vertexAi.generationValidated,
+    backends: {
+      gemini_api: geminiApi,
+      vertex_ai: vertexAi
+    }
   };
 }
 
-function validateConfiguredGeminiGenerationReadiness_(options) {
-  if (options.geminiBackend === 'gemini_api') {
-    validateConfiguredGeminiDeveloperGeneration_(options);
+function validateConfiguredGeminiBackend_(backend, enabled, options) {
+  const result = {
+    enabled: enabled,
+    metadataValidated: false,
+    generationValidated: false,
+    available: false
+  };
+  if (!enabled) {
+    return result;
   }
-  if (options.geminiBackend === 'vertex_ai' || options.autoVertexFallback) {
-    validateConfiguredVertexGeneration_(options);
+  try {
+    if (backend === 'gemini_api') {
+      validateInstallerGeminiDeveloperApi_(options);
+    } else {
+      validateInstallerVertexAi_(options);
+    }
+    result.metadataValidated = true;
+  } catch (error) {
+    return addConfiguredGeminiFailure_(result, 'metadata', error);
   }
+  try {
+    if (backend === 'gemini_api') {
+      validateConfiguredGeminiDeveloperGeneration_(options);
+    } else {
+      validateConfiguredVertexGeneration_(options);
+    }
+    result.generationValidated = true;
+    result.available = true;
+    return result;
+  } catch (error) {
+    return addConfiguredGeminiFailure_(result, 'generation', error);
+  }
+}
+
+function addConfiguredGeminiFailure_(result, stage, error) {
+  result.failureStage = stage;
+  const statusMatch = String(error && error.message || error).match(/HTTP ([0-9]{3})/);
+  if (statusMatch) {
+    result.httpStatus = Number(statusMatch[1]);
+  }
+  result.reason = error && error.geminiHighDemand === true ?
+    'high-demand' : 'validation-failed';
+  return result;
 }
 
 function validateConfiguredGeminiDeveloperGeneration_(options) {
@@ -726,8 +770,11 @@ function validateConfiguredVertexGeneration_(options) {
 function validateConfiguredGenerationResponse_(response, provider, interactions) {
   const statusCode = response.getResponseCode();
   if (statusCode !== 200) {
-    throw new Error(provider +
+    const failure = new Error(provider +
       ' generation readiness validation failed (HTTP ' + statusCode + ').');
+    failure.geminiHighDemand = interactions && statusCode === 500 &&
+      isConfiguredGeminiHighDemandResponse_(response);
+    throw failure;
   }
   let body;
   try {
@@ -747,6 +794,16 @@ function validateConfiguredGenerationResponse_(response, provider, interactions)
   if (!completed) {
     throw new Error(provider +
       ' generation readiness validation did not complete successfully.');
+  }
+}
+
+function isConfiguredGeminiHighDemandResponse_(response) {
+  try {
+    const body = JSON.parse(response.getContentText());
+    return Boolean(body && body.error && typeof body.error.message === 'string' &&
+      /\bcurrently\s+experiencing\s+high\s+demand\b/i.test(body.error.message));
+  } catch (error) {
+    return false;
   }
 }
 
