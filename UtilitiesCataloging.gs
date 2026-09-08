@@ -15,7 +15,7 @@ function retryFailedUtilitiesCataloging() {
 }
 
 /**
- * Process only persisted Gemini Developer API high-demand retries that are
+ * Process only persisted Gemini Developer API model-chain retries that are
  * due. The managed one-minute trigger calls this entrypoint; it never scans
  * the intake folder or sleeps through the backoff schedule.
  */
@@ -31,7 +31,7 @@ function processDueGeminiOverloadRetries() {
     let driveAgentsPolicy = '';
 
     dueFileIds.forEach(function (fileId) {
-      if (Date.now() >= deadlineAt) {
+      if (Date.now() + CONFIG.GEMINI_REQUEST_MIN_REMAINING_MS >= deadlineAt) {
         logCatalogEvent_('gemini-overload-retry-skipped', {
           fileId: fileId,
           reason: 'runtime-budget'
@@ -67,10 +67,15 @@ function processDueGeminiOverloadRetries() {
         describeFileForLog_(file), { triggerSource: 'gemini-overload-retry' }
       ));
       markIntakeFileProcessing_(state, file, previous.overloadFailureCount,
-        previous.nextRetryAt);
+        previous.nextRetryAt, previous.deferredReason,
+        previous.nextGeminiModel);
       saveIntakeFileState_(state);
       const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
-        deadlineAt, { overloadFailureCount: previous.overloadFailureCount });
+        deadlineAt, {
+          overloadFailureCount: previous.overloadFailureCount,
+          deferredReason: previous.deferredReason,
+          nextGeminiModel: previous.nextGeminiModel
+        });
       results.push(result);
       try {
         addOperatorLinksToResult_(result, rootFolder);
@@ -370,9 +375,12 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource, deadlineA
     }
 
     logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
+    const previous = state[file.getId()];
+    const unchangedFingerprint = previous &&
+      previous.fingerprint === intakeFileFingerprint_(file);
     const retryContext = {
-      overloadFailureCount: state[file.getId()] &&
-        state[file.getId()].overloadFailureCount
+      overloadFailureCount: unchangedFingerprint ?
+        previous.overloadFailureCount : 0
     };
     markIntakeFileProcessing_(state, file, retryContext.overloadFailureCount);
     saveIntakeFileState_(state);
@@ -983,7 +991,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt,
     }
     try {
       extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext,
-        retryContext);
+        retryContext, repairDeadlineAt);
       lastValidExtraction = buildExtractionRepairSnapshot_(extracted);
       validation = validateExtractedUtilityDataForImport_(extracted);
     } catch (error) {
@@ -1202,11 +1210,11 @@ function buildExtractionRepairSnapshot_(extracted) {
 }
 
 function extractUtilityData_(file, driveAgentsPolicy, repairContext,
-  retryContext) {
+  retryContext, deadlineAt) {
   const blob = file.getBlob();
   const headersBySupply = getSheetHeadersBySupply_();
   const response = callGeminiForPdf_(blob, headersBySupply, driveAgentsPolicy,
-    file, repairContext, retryContext);
+    file, repairContext, retryContext, deadlineAt);
   let extracted;
   try {
     extracted = parseGeminiJson_(response);
@@ -1302,11 +1310,11 @@ function isModelExtractionNormalizationError_(error) {
 }
 
 function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
-  repairContext, retryContext) {
+  repairContext, retryContext, deadlineAt) {
   const backend = getEffectiveGeminiBackend_();
   if (backend === 'gemini_api') {
     return callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
-      driveAgentsPolicy, file, repairContext, retryContext);
+      driveAgentsPolicy, file, repairContext, retryContext, deadlineAt);
   }
   return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     driveAgentsPolicy, file, backend, '', repairContext, retryContext);
@@ -1326,10 +1334,40 @@ function getGeminiDeveloperModelCandidates_() {
 }
 
 function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
-  driveAgentsPolicy, file, repairContext, retryContext) {
+  driveAgentsPolicy, file, repairContext, retryContext, deadlineAt) {
   const models = getGeminiDeveloperModelCandidates_();
   const failures = [];
-  for (let index = 0; index < models.length; index += 1) {
+  const requestedStartModel = String(
+    retryContext && retryContext.nextGeminiModel || '').trim();
+  const requestedStartIndex = models.indexOf(requestedStartModel);
+  const startIndex = requestedStartIndex >= 0 ? requestedStartIndex : 0;
+  const persistedRetryRound = getGeminiOverloadFailureCount_(retryContext) > 0 &&
+    isGeminiModelChainDeferredReason_(
+      retryContext && retryContext.deferredReason);
+  for (let index = startIndex; index < models.length; index += 1) {
+    if (Number(deadlineAt) > 0 &&
+      Date.now() + CONFIG.GEMINI_REQUEST_MIN_REMAINING_MS >= deadlineAt) {
+      if (failures.length === 0 && requestedStartIndex < 0 &&
+        !persistedRetryRound) {
+        throw new Error(
+          'Gemini generation was not started because execution time is nearly exhausted.');
+      }
+      logCatalogEvent_('gemini-developer-model-fallback-deferred', Object.assign(
+        describeFileForLog_(file), {
+          nextModel: models[index],
+          reason: 'runtime-budget'
+        }));
+      const partial = new Error(failures.length > 0 ?
+        failures[failures.length - 1].message :
+        'Gemini model-chain retry was deferred because execution time is nearly exhausted.');
+      partial.geminiOverloadDeferred = true;
+      partial.geminiModelChainPartial = true;
+      partial.overloadFailureCount = getGeminiOverloadFailureCount_(retryContext);
+      partial.deferredReason = getGeminiModelChainDeferredReason_(
+        failures, retryContext && retryContext.deferredReason);
+      partial.nextGeminiModel = models[index];
+      throw partial;
+    }
     const model = models[index];
     try {
       return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
@@ -1376,33 +1414,29 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
   const deferred = new Error(failures[failures.length - 1].message);
   deferred.geminiOverloadDeferred = true;
   deferred.overloadFailureCount = overloadFailureCount;
+  deferred.deferredReason = getGeminiModelChainDeferredReason_(
+    failures, retryContext && retryContext.deferredReason);
   throw deferred;
 }
 
-function getGeminiReasoningConfig_(model, backend) {
-  const gemini25Models = [
-    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
-  ];
-  if (backend === 'vertex_ai') {
-    // Vertex generateContent uses token budgets for Gemini 2.5. Preserve the
-    // verified budget contract for our mutable default alias as well.
-    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
-      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
-    } : {};
+function getGeminiModelChainDeferredReason_(failures, priorReason) {
+  const reasons = failures.map(function (failure) {
+    return failure.geminiDeveloperFailureReason;
+  });
+  if (priorReason === 'gemini-api-high-demand') {
+    reasons.push('high-demand');
+  } else if (priorReason === 'gemini-api-model-quota-limited') {
+    reasons.push('model-quota-limited');
+  } else if (priorReason === 'gemini-api-model-chain-unavailable') {
+    reasons.push('mixed');
   }
-  // Interactions accepts levels even for 2.5; its controls differ from Vertex.
-  // https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking
-  if (model === 'gemini-3-pro-preview') {
-    return { thinking_level: 'high' };
+  if (reasons.every(function (reason) { return reason === 'high-demand'; })) {
+    return 'gemini-api-high-demand';
   }
-  const mediumLevelModels = gemini25Models.concat([
-    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
-    'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
-    'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
-  ]);
-  return mediumLevelModels.indexOf(model) !== -1 ? {
-    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
-  } : {};
+  if (reasons.every(function (reason) { return reason === 'model-quota-limited'; })) {
+    return 'gemini-api-model-quota-limited';
+  }
+  return 'gemini-api-model-chain-unavailable';
 }
 
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
@@ -1536,7 +1570,7 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       getGeminiDeveloperOverloadReason_(response) : '';
     if (developerModelFallbackEnabled && backend === 'gemini_api') {
       const modelFailureReason = getGeminiDeveloperModelFailureReason_(
-        response);
+        response, model);
       if (modelFailureReason) {
         responseLog.modelFailureReason = modelFailureReason;
         logCatalogEvent_('gemini-generation-response', responseLog);
@@ -1600,8 +1634,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     throw new Error('Gemini did not return a usable response.');
   }
 
-  logGeminiUsage_(getGeminiUsageMetadata_(body, isGeminiInteractionsApi), file, backend, fallbackReason,
-    extractionAttempt);
+  logGeminiUsage_(getGeminiUsageMetadata_(body, isGeminiInteractionsApi), file,
+    backend, fallbackReason, extractionAttempt, model);
   const finishReason = isGeminiInteractionsApi ?
     getGeminiInteractionsFinishReason_(body) :
     String(candidate && candidate.finishReason || 'UNSPECIFIED');
@@ -1840,7 +1874,7 @@ function convertExtractionSchemaToVertex_(schema) {
  * exports and the Cloud Billing console remain the financial source of truth.
  */
 function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
-  extractionAttempt) {
+  extractionAttempt, modelOverride) {
   const usageMetadataPresent = hasGeminiUsageMetadata_(usageMetadata);
   const usage = usageMetadataPresent ? usageMetadata : {};
   const promptTokenCount = normalizeGeminiTokenCount_(usage.promptTokenCount);
@@ -1848,9 +1882,10 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   const thoughtsTokenCount = normalizeGeminiTokenCount_(usage.thoughtsTokenCount);
   const totalTokenCount = normalizeGeminiTokenCount_(usage.totalTokenCount);
   const cachedContentTokenCount = normalizeGeminiTokenCount_(usage.cachedContentTokenCount);
+  const model = modelOverride || getGeminiModel_();
   const payload = Object.assign(describeFileForLog_(file), {
     backend: backend,
-    model: getGeminiModel_(),
+    model: model,
     extractionAttempt: Number(extractionAttempt) || 1,
     usageMetadataPresent: usageMetadataPresent,
     promptTokenCount: promptTokenCount,
@@ -1862,7 +1897,7 @@ function logGeminiUsage_(usageMetadata, file, backend, fallbackReason,
   if (fallbackReason) {
     payload.fallbackReason = fallbackReason;
   }
-  const estimate = estimateGeminiUsageCostUsd_(backend, getGeminiModel_(), usageMetadata);
+  const estimate = estimateGeminiUsageCostUsd_(backend, model, usageMetadata);
   if (estimate) {
     Object.assign(payload, estimate);
   }
@@ -1943,7 +1978,7 @@ function getGeminiDeveloperOverloadReason_(response) {
   }
 }
 
-function getGeminiDeveloperModelFailureReason_(response) {
+function getGeminiDeveloperModelFailureReason_(response, attemptedModel) {
   if (getGeminiDeveloperOverloadReason_(response)) {
     return 'high-demand';
   }
@@ -1957,11 +1992,16 @@ function getGeminiDeveloperModelFailureReason_(response) {
       const body = JSON.parse(response.getContentText());
       const apiError = body && body.error;
       const message = String(apiError && apiError.message || '');
-      if (apiError && apiError.code === 'too_many_requests' &&
+      const quotaMatch = message.match(
         new RegExp('(?:^|\\n)\\* Quota exceeded for metric: ' +
         'generativelanguage\\.googleapis\\.com\\/[a-z][a-z0-9_]*, ' +
-        'limit: [0-9]+, model: gemini-[a-z0-9][a-z0-9.-]*(?:\\n|$)')
-          .test(message)) {
+        'limit: [0-9]+, model: (gemini-[a-z0-9][a-z0-9.-]*)(?:\\n|$)'));
+      const quotaModel = quotaMatch && quotaMatch[1];
+      const attempted = String(attemptedModel || '').trim();
+      const aliasResolvedModel = attempted === 'gemini-flash-latest' &&
+        /^gemini-[0-9]+(?:\.[0-9]+)*-flash$/.test(quotaModel || '');
+      if (apiError && apiError.code === 'too_many_requests' && quotaModel &&
+        (quotaModel === attempted || aliasResolvedModel)) {
         return 'model-quota-limited';
       }
     } catch (error) {
@@ -5586,9 +5626,10 @@ function getDueGeminiOverloadRetryFileIds_(state, now) {
 
 function isGeminiOverloadRetryState_(entry) {
   return entry && ['DEFERRED', 'PROCESSING'].indexOf(entry.status) >= 0 &&
-    entry.deferredReason === 'gemini-api-high-demand' &&
+    isGeminiModelChainDeferredReason_(entry.deferredReason) &&
     Number.isInteger(entry.overloadFailureCount) &&
-    entry.overloadFailureCount > 0 &&
+    (entry.overloadFailureCount > 0 || isGeminiRetryModel_(entry.nextGeminiModel)) &&
+    entry.overloadFailureCount >= 0 &&
     entry.overloadFailureCount <= CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length &&
     Number.isFinite(entry.nextRetryAt);
 }
@@ -5602,7 +5643,17 @@ function isGeminiOverloadRetryLease_(entry, now) {
     Number(now) - Number(entry.updatedAt || 0) > 10 * 60 * 1000;
 }
 
-function markIntakeFileProcessing_(state, file, overloadFailureCount, nextRetryAt) {
+function isGeminiModelChainDeferredReason_(reason) {
+  return ['gemini-api-high-demand', 'gemini-api-model-quota-limited',
+    'gemini-api-model-chain-unavailable'].indexOf(reason) >= 0;
+}
+
+function isGeminiRetryModel_(model) {
+  return /^gemini-[a-z0-9][a-z0-9._-]+$/.test(String(model || ''));
+}
+
+function markIntakeFileProcessing_(state, file, overloadFailureCount, nextRetryAt,
+  deferredReason, nextGeminiModel) {
   const count = Number(overloadFailureCount);
   const processing = {
     fingerprint: intakeFileFingerprint_(file),
@@ -5611,9 +5662,14 @@ function markIntakeFileProcessing_(state, file, overloadFailureCount, nextRetryA
     updatedAt: Date.now(),
     overloadFailureCount: Number.isInteger(count) && count > 0 ? count : 0
   };
-  if (Number.isFinite(nextRetryAt) && processing.overloadFailureCount > 0) {
-    processing.deferredReason = 'gemini-api-high-demand';
+  if (Number.isFinite(nextRetryAt) &&
+    (processing.overloadFailureCount > 0 || isGeminiRetryModel_(nextGeminiModel))) {
+    processing.deferredReason = isGeminiModelChainDeferredReason_(deferredReason) ?
+      deferredReason : 'gemini-api-high-demand';
     processing.nextRetryAt = nextRetryAt;
+    if (isGeminiRetryModel_(nextGeminiModel)) {
+      processing.nextGeminiModel = nextGeminiModel;
+    }
   }
   state[file.getId()] = processing;
 }
@@ -5626,9 +5682,12 @@ function recordIntakeFileOutcome_(state, file, result) {
     updatedAt: Date.now()
   };
   if (isGeminiOverloadDeferredResult_(result)) {
-    outcome.deferredReason = 'gemini-api-high-demand';
+    outcome.deferredReason = result.deferredReason;
     outcome.overloadFailureCount = result.overloadFailureCount;
     outcome.nextRetryAt = result.nextRetryAt;
+    if (isGeminiRetryModel_(result.nextGeminiModel)) {
+      outcome.nextGeminiModel = result.nextGeminiModel;
+    }
   }
   state[file.getId()] = outcome;
 }
@@ -6246,15 +6305,26 @@ function buildErrorResult_(file, problem, action, originalName, state) {
 
 function buildGeminiOverloadDeferredResult_(file, error) {
   const overloadFailureCount = Number(error && error.overloadFailureCount);
-  const delay = CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS[overloadFailureCount - 1];
-  if (!Number.isInteger(overloadFailureCount) || overloadFailureCount < 1 ||
+  const partialRound = error && error.geminiModelChainPartial === true;
+  const nextGeminiModel = String(error && error.nextGeminiModel || '').trim();
+  const deferredReason = isGeminiModelChainDeferredReason_(
+    error && error.deferredReason) ? error.deferredReason :
+    'gemini-api-high-demand';
+  const delay = partialRound ? CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS[0] :
+    CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS[overloadFailureCount - 1];
+  if (!Number.isInteger(overloadFailureCount) || overloadFailureCount < 0 ||
+    overloadFailureCount > CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length ||
+    (!partialRound && overloadFailureCount < 1) ||
+    (partialRound && !isGeminiRetryModel_(nextGeminiModel)) ||
     !Number.isFinite(delay)) {
     throw new Error('Invalid deferred Gemini overload retry state.');
   }
   const nextRetryAt = Date.now() + delay;
   logCatalogEvent_('gemini-overload-retry-scheduled', Object.assign(
     describeFileForLog_(file), {
+      deferredReason: deferredReason,
       overloadFailureCount: overloadFailureCount,
+      nextGeminiModel: partialRound ? nextGeminiModel : '',
       nextRetryAt: new Date(nextRetryAt).toISOString()
     }
   ));
@@ -6269,18 +6339,24 @@ function buildGeminiOverloadDeferredResult_(file, error) {
     sheetLink: '',
     failureStage: 'extracting-document-data',
     actions: 'No Drive or spreadsheet mutation was started.',
-    problem: 'Gemini Developer API reported high demand. The document is queued for a scheduled retry.',
+    problem: deferredReason === 'gemini-api-high-demand' ?
+      'Gemini Developer API reported high demand. The document is queued for a scheduled retry.' :
+      'Every configured Gemini Developer API model is unavailable because of capacity or model quota. The document is queued for a scheduled retry.',
     recommendedAction: 'Wait for the scheduled retry; manual retry does not bypass this backoff.',
-    deferredReason: 'gemini-api-high-demand',
+    deferredReason: deferredReason,
     overloadFailureCount: overloadFailureCount,
-    nextRetryAt: nextRetryAt
+    nextRetryAt: nextRetryAt,
+    nextGeminiModel: partialRound ? nextGeminiModel : ''
   };
 }
 
 function isGeminiOverloadDeferredResult_(result) {
   return result && result.status === 'DEFERRED' &&
-    result.deferredReason === 'gemini-api-high-demand' &&
+    isGeminiModelChainDeferredReason_(result.deferredReason) &&
     Number.isInteger(result.overloadFailureCount) &&
+    result.overloadFailureCount >= 0 &&
+    (result.overloadFailureCount > 0 ||
+      isGeminiRetryModel_(result.nextGeminiModel)) &&
     Number.isFinite(result.nextRetryAt);
 }
 

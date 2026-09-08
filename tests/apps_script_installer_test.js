@@ -2452,6 +2452,9 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
     geminiApiKey: 'developer-secret', geminiModel: 'gemini-flash-latest',
     autoVertexFallback: true, vertexLocation: 'global'
   };
+  context.getGeminiReasoningConfig_ = (_model, backend) => backend === 'gemini_api' ?
+    { thinking_level: 'medium' } :
+    { thinkingConfig: { thinkingBudget: 4096 } };
 
   context.validateConfiguredGeminiDeveloperGeneration_(options);
   context.validateConfiguredVertexGeneration_(options);
@@ -2461,7 +2464,7 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
   assert.deepEqual(JSON.parse(JSON.stringify(developerPayload)), {
     model: 'gemini-flash-latest',
     input: 'Reply with exactly OK.',
-    generation_config: { max_output_tokens: 256, thinking_level: 'low' },
+    generation_config: { max_output_tokens: 256, thinking_level: 'medium' },
     store: false
   });
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
@@ -2474,6 +2477,7 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
   const overloaded = loadInstaller(() => response(500, {
     error: { message: 'developer-secret is currently experiencing high demand' }
   }));
+  overloaded.getGeminiReasoningConfig_ = () => ({ thinking_level: 'medium' });
   assert.throws(
     () => overloaded.validateConfiguredGeminiDeveloperGeneration_(options),
     (error) => {
@@ -2482,6 +2486,41 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
       return true;
     }
   );
+
+  for (const emptyResponse of [
+    response(200, {
+      status: 'completed',
+      steps: [{ type: 'model_output', content: [] }]
+    }),
+    response(200, {
+      candidates: [{ finishReason: 'STOP', content: { parts: [] } }]
+    })
+  ]) {
+    assert.throws(
+      () => context.validateConfiguredGenerationResponse_(
+        emptyResponse, 'Gemini test backend',
+        emptyResponse.getContentText().includes('steps')),
+      /did not complete successfully/
+    );
+  }
+
+  const unclassifiedRequests = [];
+  const unclassified = loadInstaller((_url, requestOptions) => {
+    unclassifiedRequests.push(JSON.parse(requestOptions.payload));
+    return response(200, {
+      status: 'completed',
+      steps: [{
+        type: 'model_output', content: [{ type: 'text', text: 'OK' }]
+      }]
+    });
+  });
+  unclassified.getGeminiReasoningConfig_ = () => ({});
+  unclassified.validateConfiguredGeminiDeveloperGeneration_(Object.assign(
+    {}, options, { geminiModel: 'gemini-unclassified-pin' }));
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    unclassifiedRequests[0].generation_config)), {
+    max_output_tokens: 256
+  });
 }
 
 function testConfiguredAccessReportsBackendFailuresIndependently() {

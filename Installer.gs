@@ -644,8 +644,8 @@ function validateCatalogerInstallation() {
 
 /**
  * Validate the configured Gemini model against every enabled backend without
- * exposing the stored API key or performing a document-generation request.
- * This is owner-controlled operational validation for model migrations.
+ * exposing the stored API key or sending document data. This is
+ * owner-controlled operational validation for model migrations.
  */
 function validateConfiguredGeminiAccess() {
   const backend = getGeminiBackend_();
@@ -726,6 +726,8 @@ function addConfiguredGeminiFailure_(result, stage, error) {
 }
 
 function validateConfiguredGeminiDeveloperGeneration_(options) {
+  const generationConfig = Object.assign({ max_output_tokens: 256 },
+    getGeminiReasoningConfig_(options.geminiModel, 'gemini_api'));
   const response = UrlFetchApp.fetch(
     'https://generativelanguage.googleapis.com/v1beta/interactions', {
       method: 'post',
@@ -734,10 +736,7 @@ function validateConfiguredGeminiDeveloperGeneration_(options) {
       payload: JSON.stringify({
         model: options.geminiModel,
         input: 'Reply with exactly OK.',
-        generation_config: {
-          max_output_tokens: 256,
-          thinking_level: 'low'
-        },
+        generation_config: generationConfig,
         store: false
       }),
       muteHttpExceptions: true
@@ -751,16 +750,22 @@ function validateConfiguredVertexGeneration_(options) {
     '/locations/' + encodeURIComponent(options.vertexLocation) +
     '/publishers/google/models/' + encodeURIComponent(options.geminiModel) +
     ':generateContent';
+  const productionReasoning = getGeminiReasoningConfig_(
+    options.geminiModel, 'vertex_ai');
+  const generationConfig = { maxOutputTokens: 256 };
+  if (productionReasoning.thinkingConfig) {
+    generationConfig.thinkingConfig = {
+      thinkingBudget: Math.min(
+        productionReasoning.thinkingConfig.thinkingBudget, 128)
+    };
+  }
   const response = UrlFetchApp.fetch(endpoint, {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
     payload: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
-      generationConfig: {
-        maxOutputTokens: 256,
-        thinkingConfig: { thinkingBudget: 128 }
-      }
+      generationConfig: generationConfig
     }),
     muteHttpExceptions: true
   });
@@ -786,10 +791,18 @@ function validateConfiguredGenerationResponse_(response, provider, interactions)
   const completed = interactions ?
     body.status === 'completed' && Array.isArray(body.steps) &&
       body.steps.some(function (step) {
-        return step && step.type === 'model_output';
+        return step && step.type === 'model_output' &&
+          Array.isArray(step.content) && step.content.some(function (content) {
+            return content && content.type === 'text' &&
+              String(content.text || '').trim() === 'OK';
+          });
       }) :
     Array.isArray(body.candidates) && body.candidates.some(function (candidate) {
-      return candidate && candidate.finishReason === 'STOP';
+      const parts = candidate && candidate.content && candidate.content.parts;
+      return candidate && candidate.finishReason === 'STOP' &&
+        Array.isArray(parts) && parts.some(function (part) {
+          return part && String(part.text || '').trim() === 'OK';
+        });
     });
   if (!completed) {
     throw new Error(provider +

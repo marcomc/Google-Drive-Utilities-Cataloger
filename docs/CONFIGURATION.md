@@ -30,18 +30,21 @@ Developer API key, then run the owner-only
 `configureGeminiFreeTierWithVertexFallback` function once. It keeps
 `gemini_api` as the primary backend.
 
-Only a `429` response explicitly identifying a daily request quota or depleted
-Gemini API prepayment credits triggers one immediate Vertex retry and a
-one-hour temporary Vertex route. An HTTP `500` is deferred only when the
-Developer API explicitly says the configured model is currently experiencing
-high demand: the unchanged PDF is retried after 1, 5, 15, and 30 minutes by a
-managed trigger. A fifth such response can activate the same temporary Vertex
-route when automatic fallback is enabled. Other transient network, `408`,
-generic `429`, and selected `5xx` failures receive one bounded retry on the
-current backend; short-lived rate limits and bare HTTP status codes do not
-cause Vertex usage.
+Only a `429` response explicitly identifying a terminal daily request quota or
+depleted Gemini API prepayment credits triggers one immediate Vertex retry and
+a one-hour temporary Vertex route. An explicit per-model capacity or model
+quota failure advances through the configured Developer API model chain. If
+the whole chain fails, the unchanged PDF is retried after 1, 5, 15, and 30
+minutes by a managed trigger. A fifth failed chain round can activate the same
+temporary Vertex route when automatic fallback is enabled. Other transient
+network, `408`, generic `429`, and selected `5xx` failures receive one bounded
+retry on the current backend; short-lived rate limits and bare HTTP status
+codes do not cause Vertex usage.
 The Interactions API's `quota_exceeded` code identifies daily exhaustion;
-`rate_limit_exceeded` and `too_many_requests` keep the transient retry path.
+`rate_limit_exceeded` keeps the transient retry path. A `too_many_requests`
+response advances to the next Developer API model only when its structured
+message identifies a concrete Gemini model quota; other responses with that
+code keep the transient retry path.
 Legacy responses require a structured daily-quota violation or the explicit
 prepayment-depletion message. Quota names, shared metrics and documentation
 links alone never activate paid fallback.

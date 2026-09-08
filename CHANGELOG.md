@@ -20,8 +20,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   named Flash fallback list (`gemini-flash-latest`, 3.8, 3.7, 3.6, and 3.5),
   deduplicating entries and moving to the next model on explicit capacity or
   model-quota failures. Preserve the persisted 1/5/15/30-minute retry rounds
-  when the complete list is unavailable, then use the configured temporary
-  Vertex AI fallback after those rounds are exhausted.
+  when the complete list is unavailable. If the execution reserve is reached
+  mid-chain, persist the next model without consuming the current round, then
+  use the configured temporary Vertex AI fallback only after all rounds are
+  exhausted.
 
 ## [0.6.1] - 2026-09-08 - Gemini overload recovery
 

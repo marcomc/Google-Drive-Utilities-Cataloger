@@ -288,7 +288,10 @@ subscription, publisher IAM binding, and Apps Script triggers.
 For the fallback mode, Gemini Developer API remains primary. A verified daily
 quota exhaustion or depleted prepayment-credit response routes the current PDF
 and the following hour to Vertex AI. Generic short-lived rate limits stay on
-the Developer API and receive the normal bounded retry.
+the Developer API and receive the normal bounded retry. Explicit per-model
+capacity or model-quota failures advance through the configured Flash model
+chain. Only after the complete chain fails in the initial round and all four
+scheduled retry rounds may the automatic fallback route the PDF to Vertex AI.
 
 The cataloger Cloud project must have billing for Workspace Events. That does
 not require the Gemini API key to belong to the same project. To preserve a
