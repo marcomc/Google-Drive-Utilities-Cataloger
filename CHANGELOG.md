@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-09-08 - Gemini overload recovery
+
+### Fixed
+
+- Persist the explicit Gemini Developer API high-demand signal and retry the
+  unchanged intake PDF after 1, 5, 15, and 30 minutes through a managed
+  one-minute trigger, without holding an Apps Script execution open or sending
+  a terminal error report while recovery remains pending.
+- After the fifth consecutive high-demand response, use the existing temporary
+  Vertex AI fallback only when it is enabled. Preserve immediate fallback for
+  verified daily quota exhaustion or depleted prepayment credits, and retain
+  the bounded current-backend retry for generic transient failures.
+
 ## [0.6.0] - 2026-09-03 - Gemini Flash latest alias
 
 ### Changed

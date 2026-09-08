@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.6.0',
+  APP_VERSION: '0.6.1',
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
@@ -37,6 +37,15 @@ const CONFIG = Object.freeze({
   EXTRACTION_REPAIR_MIN_REMAINING_MS: 45 * 1000,
   GEMINI_MAX_TRANSIENT_ATTEMPTS: 2,
   GEMINI_INITIAL_RETRY_DELAY_MS: 1000,
+  // High-demand responses need enough time for provider capacity to recover.
+  // These waits are persisted per file and served by a one-minute trigger;
+  // never sleep through them inside a single Apps Script execution.
+  GEMINI_OVERLOAD_RETRY_DELAYS_MS: Object.freeze([
+    1 * 60 * 1000,
+    5 * 60 * 1000,
+    15 * 60 * 1000,
+    30 * 60 * 1000
+  ]),
   GEMINI_VERTEX_FALLBACK_COOLDOWN_MS: 60 * 60 * 1000,
   // Update this only after checking the Vertex AI list-price page. This is an
   // operational estimate; Cloud Billing remains the accounting source of truth.

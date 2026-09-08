@@ -619,7 +619,8 @@ The owner-only bootstrap:
 - creates or validates `AGENTS.md` and the spreadsheet;
 - stores Script Properties without returning the Gemini key;
 - creates destination folders, Pub/Sub, and the Drive subscription;
-- installs the daily, 15-minute poll, and six-hour renewal triggers.
+- installs the daily, 15-minute poll, one-minute overload-retry, and six-hour
+  renewal triggers.
 
 After success, the installer removes its local custom `clasp` authorization
 profiles and the temporary bootstrap secret.
@@ -633,7 +634,7 @@ AI. Removing that scope requires splitting the runtime architecture.
 Do not disable an existing automation yet.
 
 1. Open the URLs printed at installation completion.
-2. Confirm the three Apps Script triggers exist.
+2. Confirm the four Apps Script triggers exist.
 3. Add one known, non-duplicate PDF directly to the intake root.
 4. Wait up to 15 minutes.
 5. Verify the renamed Drive file, one spreadsheet row and source link, and one

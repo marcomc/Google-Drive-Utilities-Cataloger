@@ -7,10 +7,76 @@ function runDailyUtilitiesCataloging() {
 
 /**
  * Owner-controlled recovery for direct-intake PDFs whose latest outcome was
- * ERROR. It deliberately bypasses the once-per-day error retry throttle.
+ * ERROR. It deliberately bypasses the once-per-day error retry throttle, but
+ * never bypasses an active Gemini high-demand backoff.
  */
 function retryFailedUtilitiesCataloging() {
   return runUtilitiesCataloging_('manual_retry');
+}
+
+/**
+ * Process only persisted Gemini Developer API high-demand retries that are
+ * due. The managed one-minute trigger calls this entrypoint; it never scans
+ * the intake folder or sleeps through the backoff schedule.
+ */
+function processDueGeminiOverloadRetries() {
+  const deadlineAt = Date.now() + CONFIG.MAX_RUNTIME_MS;
+  assertCatalogConfiguration_();
+  return withCatalogProcessingLock_('gemini-overload-retry', function () {
+    const rootFolder = DriveApp.getFolderById(getRootFolderId_());
+    flushPendingReports_();
+    const state = loadIntakeFileState_();
+    const dueFileIds = getDueGeminiOverloadRetryFileIds_(state, Date.now());
+    const results = [];
+    let driveAgentsPolicy = '';
+
+    dueFileIds.forEach(function (fileId) {
+      if (Date.now() >= deadlineAt) {
+        logCatalogEvent_('gemini-overload-retry-skipped', {
+          fileId: fileId,
+          reason: 'runtime-budget'
+        });
+        return;
+      }
+      let file;
+      try {
+        file = DriveApp.getFileById(fileId);
+      } catch (error) {
+        delete state[fileId];
+        logCatalogEvent_('gemini-overload-retry-reset', {
+          fileId: fileId,
+          reason: 'file-unavailable'
+        });
+        return;
+      }
+      const previous = state[fileId];
+      if (!previous || previous.fingerprint !== intakeFileFingerprint_(file) ||
+        !isDirectIntakePdf_(file, rootFolder) || hasMutationJournal_(fileId)) {
+        delete state[fileId];
+        logCatalogEvent_('gemini-overload-retry-reset', {
+          fileId: fileId,
+          reason: !previous || previous.fingerprint !== intakeFileFingerprint_(file) ?
+            'changed-file' : 'ineligible-file'
+        });
+        return;
+      }
+      if (!driveAgentsPolicy) {
+        driveAgentsPolicy = loadTrustedExtractionPolicy_(rootFolder);
+      }
+      logCatalogEvent_('catalog-file-processing-start', Object.assign(
+        describeFileForLog_(file), { triggerSource: 'gemini-overload-retry' }
+      ));
+      markIntakeFileProcessing_(state, file, previous.overloadFailureCount);
+      saveIntakeFileState_(state);
+      const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
+        deadlineAt, { overloadFailureCount: previous.overloadFailureCount });
+      results.push(result);
+      persistCatalogResult_(state, file, rootFolder, result);
+      logCatalogResult_(file, result);
+    });
+    finalizeCatalogResults_(state, results);
+    return { triggerSource: 'gemini-overload-retry', results: results };
+  });
 }
 
 /** Run the normal model/validation path without changing an invoice or row. */
@@ -88,6 +154,16 @@ function processSingleIntakeFileWithinLock_(fileId, deadlineAt) {
     const driveAgentsPolicy = loadTrustedExtractionPolicy_(rootFolder);
     logCatalogEvent_('single-file-processing-start', describeFileForLog_(file));
     const state = loadIntakeFileState_();
+    const previous = state[file.getId()];
+    if (isGeminiOverloadDeferredState_(previous) &&
+      previous.fingerprint === intakeFileFingerprint_(file)) {
+      throw new Error(
+        'The specified file has an active Gemini high-demand retry schedule; wait for it to run.'
+      );
+    }
+    if (previous && previous.fingerprint !== intakeFileFingerprint_(file)) {
+      delete state[file.getId()];
+    }
     markIntakeFileProcessing_(state, file);
     saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
@@ -286,10 +362,14 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource, deadlineA
     }
 
     logCatalogEvent_('catalog-file-processing-start', describeFileForLog_(file));
-    markIntakeFileProcessing_(state, file);
+    const retryContext = {
+      overloadFailureCount: state[file.getId()] &&
+        state[file.getId()].overloadFailureCount
+    };
+    markIntakeFileProcessing_(state, file, retryContext.overloadFailureCount);
     saveIntakeFileState_(state);
     const result = processIntakeFile_(file, rootFolder, driveAgentsPolicy,
-      processingDeadlineAt);
+      processingDeadlineAt, retryContext);
     results.push(result);
     try {
       addOperatorLinksToResult_(result, rootFolder);
@@ -305,7 +385,8 @@ function processEligibleIntakeFiles_(files, rootFolder, triggerSource, deadlineA
   return { results: results, state: state };
 }
 
-function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
+function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt,
+  retryContext) {
   const processingDeadlineAt = Number(deadlineAt) ||
     Date.now() + CONFIG.MAX_RUNTIME_MS;
   const originalName = file.getName();
@@ -336,7 +417,7 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
 
     const binaryHash = sha256ForFile_(file);
     const extractionResult = extractUtilityDataWithRepair_(
-      file, driveAgentsPolicy, processingDeadlineAt);
+      file, driveAgentsPolicy, processingDeadlineAt, retryContext);
     const extracted = extractionResult.extracted;
     state.extracted = extracted;
     const validation = extractionResult.validation;
@@ -454,6 +535,9 @@ function processIntakeFile_(file, rootFolder, driveAgentsPolicy, deadlineAt) {
       file.getId()
     );
   } catch (error) {
+    if (error && error.geminiOverloadDeferred === true) {
+      return buildGeminiOverloadDeferredResult_(file, error);
+    }
     rollbackProcessingMutations_(file, rootFolder, originalName, state);
     state.verificationDiscrepancies = error.verificationDiscrepancies ||
       (error.formulaVerification ? [error.formulaVerification] : []);
@@ -874,7 +958,8 @@ function addOperatorLinksToResult_(result, rootFolder) {
   return result;
 }
 
-function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
+function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt,
+  retryContext) {
   const repairDeadlineAt = Number(deadlineAt) ||
     Date.now() + CONFIG.MAX_RUNTIME_MS;
   const history = [];
@@ -889,7 +974,8 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt) {
       assertExtractionRepairBudget_(file, repairDeadlineAt, attempt, validation);
     }
     try {
-      extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext);
+      extracted = extractUtilityData_(file, driveAgentsPolicy, repairContext,
+        retryContext);
       lastValidExtraction = buildExtractionRepairSnapshot_(extracted);
       validation = validateExtractedUtilityDataForImport_(extracted);
     } catch (error) {
@@ -1107,11 +1193,12 @@ function buildExtractionRepairSnapshot_(extracted) {
   }, {});
 }
 
-function extractUtilityData_(file, driveAgentsPolicy, repairContext) {
+function extractUtilityData_(file, driveAgentsPolicy, repairContext,
+  retryContext) {
   const blob = file.getBlob();
   const headersBySupply = getSheetHeadersBySupply_();
   const response = callGeminiForPdf_(blob, headersBySupply, driveAgentsPolicy,
-    file, repairContext);
+    file, repairContext, retryContext);
   let extracted;
   try {
     extracted = parseGeminiJson_(response);
@@ -1207,10 +1294,10 @@ function isModelExtractionNormalizationError_(error) {
 }
 
 function callGeminiForPdf_(blob, sheetHeadersBySupply, driveAgentsPolicy, file,
-  repairContext) {
+  repairContext, retryContext) {
   return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     driveAgentsPolicy, file,
-    getEffectiveGeminiBackend_(), '', repairContext);
+    getEffectiveGeminiBackend_(), '', repairContext, retryContext);
 }
 
 function getGeminiReasoningConfig_(model, backend) {
@@ -1240,7 +1327,8 @@ function getGeminiReasoningConfig_(model, backend) {
 }
 
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
-  driveAgentsPolicy, file, backend, fallbackReason, repairContext) {
+  driveAgentsPolicy, file, backend, fallbackReason, repairContext,
+  retryContext) {
   const isVertexAi = backend === 'vertex_ai';
   const isGeminiInteractionsApi = !isVertexAi;
   const extractionAttempt = repairContext ? Number(repairContext.attempt) : 1;
@@ -1365,6 +1453,32 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       logCatalogEvent_('gemini-generation-response', responseLog);
       break;
     }
+    const overloadReason = backend === 'gemini_api' ?
+      getGeminiDeveloperOverloadReason_(response) : '';
+    if (overloadReason) {
+      const overloadFailureCount = getGeminiOverloadFailureCount_(retryContext) + 1;
+      responseLog.overloadFailureCount = overloadFailureCount;
+      logCatalogEvent_('gemini-generation-response', responseLog);
+      if (overloadFailureCount > CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length) {
+        const exhaustedReason = 'gemini-api-overload-retries-exhausted';
+        if (isAutomaticVertexFallbackEnabled_()) {
+          activateTemporaryVertexFallback_(file, exhaustedReason);
+          return callGeminiForPdfWithBackend_(
+            blob,
+            sheetHeadersBySupply,
+            driveAgentsPolicy,
+            file,
+            'vertex_ai',
+            exhaustedReason,
+            repairContext,
+            { overloadFailureCount: overloadFailureCount }
+          );
+        }
+        throw new Error(describeGeminiHttpError_(response, backend) +
+          ' Automatic Vertex fallback is disabled after the scheduled overload retries.');
+      }
+      throw buildGeminiOverloadDeferredError_(response, overloadFailureCount);
+    }
     logCatalogEvent_('gemini-generation-response', responseLog);
     const vertexFallbackReason = backend === 'gemini_api' ?
       getGeminiVertexFallbackReason_(response) : '';
@@ -1378,7 +1492,8 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         file,
         'vertex_ai',
         vertexFallbackReason,
-        repairContext
+        repairContext,
+        retryContext
       );
     }
     if (vertexFallbackReason || !isTransientGeminiResponse_(code) ||
@@ -1714,6 +1829,41 @@ function getVertexAiEndpoint_() {
 
 function isTransientGeminiResponse_(statusCode) {
   return [408, 429, 500, 502, 503, 504].indexOf(statusCode) >= 0;
+}
+
+/**
+ * Identify the provider's explicit high-demand signal. A generic 500/503 or
+ * an unrelated message is still a normal bounded transient failure and cannot
+ * authorize delayed retries or paid fallback.
+ */
+function getGeminiDeveloperOverloadReason_(response) {
+  if (response.getResponseCode() !== 500) {
+    return '';
+  }
+  try {
+    const body = JSON.parse(response.getContentText());
+    const error = body && body.error;
+    if (!error || typeof error !== 'object' || Array.isArray(error) ||
+      typeof error.message !== 'string') {
+      return '';
+    }
+    return /\bcurrently\s+experiencing\s+high\s+demand\b/i.test(error.message) ?
+      'gemini-api-high-demand' : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function getGeminiOverloadFailureCount_(retryContext) {
+  const count = Number(retryContext && retryContext.overloadFailureCount);
+  return Number.isInteger(count) && count >= 0 ? count : 0;
+}
+
+function buildGeminiOverloadDeferredError_(response, overloadFailureCount) {
+  const error = new Error(describeGeminiHttpError_(response, 'gemini_api'));
+  error.geminiOverloadDeferred = true;
+  error.overloadFailureCount = overloadFailureCount;
+  return error;
 }
 
 function getGeminiVertexFallbackReason_(response) {
@@ -5292,27 +5442,54 @@ function shouldProcessIntakeFile_(file, state, triggerSource) {
   return triggerSource === 'daily' && previous.attemptDate !== intakeStateDate_();
 }
 
-function markIntakeFileProcessing_(state, file) {
+function getDueGeminiOverloadRetryFileIds_(state, now) {
+  const retryAt = Number(now);
+  return Object.keys(state).filter(function (fileId) {
+    const entry = state[fileId];
+    return isGeminiOverloadDeferredState_(entry) && entry.nextRetryAt <= retryAt;
+  });
+}
+
+function isGeminiOverloadDeferredState_(entry) {
+  return entry && entry.status === 'DEFERRED' &&
+    entry.deferredReason === 'gemini-api-high-demand' &&
+    Number.isInteger(entry.overloadFailureCount) &&
+    entry.overloadFailureCount > 0 &&
+    entry.overloadFailureCount <= CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length &&
+    Number.isFinite(entry.nextRetryAt);
+}
+
+function markIntakeFileProcessing_(state, file, overloadFailureCount) {
+  const count = Number(overloadFailureCount);
   state[file.getId()] = {
     fingerprint: intakeFileFingerprint_(file),
     status: 'PROCESSING',
     attemptDate: intakeStateDate_(),
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    overloadFailureCount: Number.isInteger(count) && count > 0 ? count : 0
   };
 }
 
 function recordIntakeFileOutcome_(state, file, result) {
-  state[file.getId()] = {
+  const outcome = {
     fingerprint: intakeFileFingerprint_(file),
     status: result.status,
     attemptDate: intakeStateDate_(),
     updatedAt: Date.now()
   };
+  if (isGeminiOverloadDeferredResult_(result)) {
+    outcome.deferredReason = 'gemini-api-high-demand';
+    outcome.overloadFailureCount = result.overloadFailureCount;
+    outcome.nextRetryAt = result.nextRetryAt;
+  }
+  state[file.getId()] = outcome;
 }
 
 function persistCatalogResult_(state, file, rootFolder, result) {
   updateIntakeStateForResult_(state, file, rootFolder, result);
-  queuePendingReports_([result]);
+  if (!isGeminiOverloadDeferredResult_(result)) {
+    queuePendingReports_([result]);
+  }
   saveIntakeFileState_(state);
   if (result.mutationJournalFileId && !result.keepMutationJournal) {
     clearMutationJournal_(result.mutationJournalFileId);
@@ -5917,6 +6094,46 @@ function buildErrorResult_(file, problem, action, originalName, state) {
       ' ' + rollbackProblems.join(' ') : ''),
     recommendedAction: action
   };
+}
+
+function buildGeminiOverloadDeferredResult_(file, error) {
+  const overloadFailureCount = Number(error && error.overloadFailureCount);
+  const delay = CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS[overloadFailureCount - 1];
+  if (!Number.isInteger(overloadFailureCount) || overloadFailureCount < 1 ||
+    !Number.isFinite(delay)) {
+    throw new Error('Invalid deferred Gemini overload retry state.');
+  }
+  const nextRetryAt = Date.now() + delay;
+  logCatalogEvent_('gemini-overload-retry-scheduled', Object.assign(
+    describeFileForLog_(file), {
+      overloadFailureCount: overloadFailureCount,
+      nextRetryAt: new Date(nextRetryAt).toISOString()
+    }
+  ));
+  return {
+    status: 'DEFERRED',
+    originalName: file.getName(),
+    assignedName: '',
+    fileUrl: file.getUrl(),
+    destination: '',
+    supplySupplier: '',
+    extracted: {},
+    sheetLink: '',
+    failureStage: 'extracting-document-data',
+    actions: 'No Drive or spreadsheet mutation was started.',
+    problem: 'Gemini Developer API reported high demand. The document is queued for a scheduled retry.',
+    recommendedAction: 'Wait for the scheduled retry; manual retry does not bypass this backoff.',
+    deferredReason: 'gemini-api-high-demand',
+    overloadFailureCount: overloadFailureCount,
+    nextRetryAt: nextRetryAt
+  };
+}
+
+function isGeminiOverloadDeferredResult_(result) {
+  return result && result.status === 'DEFERRED' &&
+    result.deferredReason === 'gemini-api-high-demand' &&
+    Number.isInteger(result.overloadFailureCount) &&
+    Number.isFinite(result.nextRetryAt);
 }
 
 function sendReportEmail_(results) {

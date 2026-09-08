@@ -252,8 +252,13 @@ separate AI prompt supervisor would add value.
 Transient network, `408`, generic `429`, and selected `5xx` failures receive
 one bounded transport retry. A verified Gemini Developer API daily-quota or
 depleted-prepayment response instead retries once on Vertex when automatic
-fallback is enabled. Those outbound provider attempts remain distinct from the
-three logical extraction cycles and are counted at the request boundary.
+fallback is enabled. The explicit Developer API HTTP `500` high-demand signal
+is different: it persists a per-file retry after 1, 5, 15, then 30 minutes.
+The one-minute managed trigger processes only due file IDs and does not hold an
+Apps Script execution open or rescan intake. If the fifth high-demand response
+also fails, automatic fallback may use Vertex for the existing one-hour
+cooldown. Those outbound provider attempts remain distinct from the three
+logical extraction cycles and are counted at the request boundary.
 Unchanged completed, duplicate, or review documents are not resubmitted on
 each event. Both model backends receive the same JSON Schema in addition to the
 JSON MIME type; application validation still checks dates, totals, configured
@@ -316,7 +321,8 @@ reason, and recommended action rather than inventing a comparison.
 | Function | When to use it | Effect |
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
-| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today. |
+| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today; it does not bypass an active Gemini high-demand backoff. |
+| `processDueGeminiOverloadRetries` | Managed one-minute trigger. | Processes only due persisted high-demand retries by file ID; do not run it manually to bypass the schedule. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
 | `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
@@ -574,12 +580,13 @@ Until a verified Vertex price is added to `Config.gs`, usage events for the
 alias and other unpriced models retain provider token counts but intentionally
 omit cost-estimate fields; Cloud Billing remains authoritative.
 
-If the Developer API returns a transient outage such as HTTP 503 and imports
-must be recovered immediately, an owner may use `configureGeminiBackend` to
-select the configured Vertex AI backend and run the controlled retry. Restore
-`gemini_api` after temporary recovery unless the owner explicitly authorizes
-keeping Vertex AI active with usage-based billing. Do not turn a status code
-alone into automatic paid-backend fallback.
+If the Developer API returns a transient outage that is not the explicit
+high-demand response and imports must be recovered immediately, an owner may
+use `configureGeminiBackend` to select the configured Vertex AI backend and
+run a controlled retry. The high-demand path retries automatically before its
+configured fallback threshold. Restore `gemini_api` after temporary recovery
+unless the owner explicitly authorizes keeping Vertex AI active with usage-based
+billing. Do not turn a status code alone into automatic paid-backend fallback.
 
 ```bash
 gcloud logging read \
