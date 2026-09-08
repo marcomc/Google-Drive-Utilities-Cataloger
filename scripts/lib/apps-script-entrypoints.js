@@ -24,7 +24,8 @@ const requiredEntrypoints = Object.freeze([
   "reconfigureCatalogerTimeZone",
   "rollbackCatalogerTimeZoneReconfiguration",
   "finishCatalogerTimeZoneReconfiguration",
-  "rotateGeminiDeveloperApiKeyFromSecret"
+  "rotateGeminiDeveloperApiKeyFromSecret",
+  "processDueGeminiOverloadRetries"
 ]);
 
 function parseSource(source) {

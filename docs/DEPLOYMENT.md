@@ -147,7 +147,7 @@ The update has two related but distinct effects:
 
 | Runtime path | Source used after deployment |
 | --- | --- |
-| Daily, Pub/Sub poll, and subscription-renewal installable triggers | Project HEAD uploaded by `clasp push`. |
+| Daily, Pub/Sub poll, Gemini-overload retry, and subscription-renewal installable triggers | Project HEAD uploaded by `clasp push`. |
 | Owner-only installer calls through the Apps Script Execution API | The numbered version selected by `APPS_SCRIPT_DEPLOYMENT_ID`. |
 
 The deployment ID does not control the installable triggers. They execute the
