@@ -106,6 +106,11 @@
   do not use long `Utilities.sleep` retries. Permit paid provider fallback only
   after the configured retry schedule is exhausted, with exact request-count
   coverage.
+- Persist interrupted provider fallback as a file-fingerprint-bound round,
+  next-model cursor, and canonical reason. Carry one absolute deadline through
+  provider calls, increment retries only after a completed round, reserve time
+  before scheduled mutations, and reset stale progress when the fingerprint
+  changes; test interruption before and during each external-call sequence.
 - Validate the complete script-scoped Pub/Sub topic and subscription identity
   before every pull or acknowledgement. Treat an entirely absent pair as an
   unconfigured no-op where appropriate, and reject partial or mismatched state.

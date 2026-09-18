@@ -5734,7 +5734,7 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   });
   const modelCount = 5;
   const responses = [
-    ...Array.from({ length: modelCount * 5 }, () => response(highDemand)), {
+    ...Array.from({ length: modelCount * 5 }, () => response(highDemand, 503)), {
       getResponseCode: () => 200,
       getContentText: () => JSON.stringify({
         candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }]
@@ -5816,7 +5816,8 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   assert.equal(noFallback.getGeminiDeveloperModelFailureReason_(response({
     error: { code: 500, message: 'Internal service error.' }
   })), '');
-  assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response(highDemand, 503)), '');
+  assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response(highDemand, 503)),
+    'gemini-api-high-demand');
 }
 
 function testGeminiModelChainReservesTimeToPersistDeferredState() {

@@ -1961,7 +1961,7 @@ function isTransientGeminiResponse_(statusCode) {
  * authorize delayed retries or paid fallback.
  */
 function getGeminiDeveloperOverloadReason_(response) {
-  if (response.getResponseCode() !== 500) {
+  if ([500, 503].indexOf(response.getResponseCode()) < 0) {
     return '';
   }
   try {
