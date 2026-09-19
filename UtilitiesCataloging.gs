@@ -1402,11 +1402,18 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
   const overloadFailureCount = getGeminiOverloadFailureCount_(retryContext) + 1;
   if (overloadFailureCount > CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS.length) {
     const exhaustedReason = 'gemini-api-model-chain-retries-exhausted';
-    if (isAutomaticVertexFallbackEnabled_()) {
+    const deferredReason = getGeminiModelChainDeferredReason_(
+      failures, retryContext && retryContext.deferredReason);
+    if (deferredReason !== 'gemini-api-incomplete-response' &&
+      isAutomaticVertexFallbackEnabled_()) {
       activateTemporaryVertexFallback_(file, exhaustedReason);
       return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
         driveAgentsPolicy, file, 'vertex_ai', exhaustedReason, repairContext,
         { overloadFailureCount: overloadFailureCount });
+    }
+    if (deferredReason === 'gemini-api-incomplete-response') {
+      throw new Error(failures[failures.length - 1].message +
+        ' Scheduled retries for incomplete Gemini responses are exhausted.');
     }
     throw new Error(failures[failures.length - 1].message +
       ' Automatic Vertex fallback is disabled after the scheduled model-chain retries.');
@@ -1429,6 +1436,13 @@ function getGeminiModelChainDeferredReason_(failures, priorReason) {
     reasons.push('model-quota-limited');
   } else if (priorReason === 'gemini-api-model-chain-unavailable') {
     reasons.push('mixed');
+  } else if (priorReason === 'gemini-api-incomplete-response') {
+    reasons.push('incomplete-response');
+  }
+  if (reasons.length > 0 && reasons.every(function (reason) {
+    return reason === 'incomplete-response';
+  })) {
+    return 'gemini-api-incomplete-response';
   }
   if (reasons.every(function (reason) { return reason === 'high-demand'; })) {
     return 'gemini-api-high-demand';
@@ -1641,6 +1655,9 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     String(candidate && candidate.finishReason || 'UNSPECIFIED');
   const successfulFinishReason = isGeminiInteractionsApi ? 'COMPLETED' : 'STOP';
   if (finishReason !== successfulFinishReason) {
+    if (developerModelFallbackEnabled && backend === 'gemini_api') {
+      throw buildGeminiDeveloperIncompleteResponse_(model, finishReason);
+    }
     throw new Error('Gemini extraction was incomplete (finish reason: ' +
       finishReason + ').');
   }
@@ -2020,6 +2037,18 @@ function buildGeminiDeveloperModelFailure_(response, model, reason) {
   error.geminiDeveloperFailureTerminalQuota =
     reason === 'gemini-api-daily-quota-exhausted' ||
     reason === 'gemini-api-prepayment-credits-depleted';
+  return error;
+}
+
+function buildGeminiDeveloperIncompleteResponse_(model, finishReason) {
+  const error = new Error(
+    'Gemini returned an incomplete extraction response (finish reason: ' +
+    finishReason + ').'
+  );
+  error.geminiDeveloperModelFailure = true;
+  error.geminiDeveloperModel = model;
+  error.geminiDeveloperFailureReason = 'incomplete-response';
+  error.geminiDeveloperIncompleteResponse = true;
   return error;
 }
 
@@ -5645,7 +5674,8 @@ function isGeminiOverloadRetryLease_(entry, now) {
 
 function isGeminiModelChainDeferredReason_(reason) {
   return ['gemini-api-high-demand', 'gemini-api-model-quota-limited',
-    'gemini-api-model-chain-unavailable'].indexOf(reason) >= 0;
+    'gemini-api-model-chain-unavailable', 'gemini-api-incomplete-response']
+    .indexOf(reason) >= 0;
 }
 
 function isGeminiRetryModel_(model) {
@@ -6341,7 +6371,9 @@ function buildGeminiOverloadDeferredResult_(file, error) {
     actions: 'No Drive or spreadsheet mutation was started.',
     problem: deferredReason === 'gemini-api-high-demand' ?
       'Gemini Developer API reported high demand. The document is queued for a scheduled retry.' :
-      'Every configured Gemini Developer API model is unavailable because of capacity or model quota. The document is queued for a scheduled retry.',
+      deferredReason === 'gemini-api-incomplete-response' ?
+        'Every configured Gemini Developer API model returned an incomplete extraction response. The document is queued for a scheduled retry.' :
+        'Every configured Gemini Developer API model is unavailable because of capacity or model quota. The document is queued for a scheduled retry.',
     recommendedAction: 'Wait for the scheduled retry; manual retry does not bypass this backoff.',
     deferredReason: deferredReason,
     overloadFailureCount: overloadFailureCount,

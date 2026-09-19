@@ -324,8 +324,8 @@ reason, and recommended action rather than inventing a comparison.
 | Function | When to use it | Effect |
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
-| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today; it does not bypass an active Gemini high-demand backoff. |
-| `processDueGeminiOverloadRetries` | Managed one-minute trigger. | Processes only due persisted high-demand retries by file ID; do not run it manually to bypass the schedule. |
+| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today; it does not bypass an active Gemini high-demand or incomplete-response backoff. |
+| `processDueGeminiOverloadRetries` | Managed one-minute trigger. | Processes only due persisted high-demand or incomplete-response retries by file ID; do not run it manually to bypass the schedule. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
 | `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
