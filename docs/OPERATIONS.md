@@ -250,8 +250,10 @@ logged. These events provide the evidence needed to decide later whether a
 separate AI prompt supervisor would add value.
 
 Transient network, `408`, generic `429`, and selected `5xx` failures receive
-bounded transport retries and then advance through the configured Flash model
-chain. Provider error codes and quota metadata distinguish short-window rate
+bounded transport retries. A failed Developer API model then persists the next
+configured Flash model for the managed one-minute trigger, so every model runs
+in a fresh Apps Script execution rather than consuming one shared runtime
+budget. Provider error codes and quota metadata distinguish short-window rate
 limits from model-specific and project-wide quota exhaustion. A verified
 Gemini Developer API daily-quota or depleted-prepayment response can retry once
 on Vertex when automatic fallback is enabled; a transient failure cannot

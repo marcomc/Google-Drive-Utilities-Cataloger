@@ -5745,23 +5745,56 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
   const file = { getId: () => 'file-id' };
-  const call = failureCount => context.callGeminiForPdf_(
-    { getBytes: () => [1] }, {}, 'policy', file, null,
-    { overloadFailureCount: failureCount }
-  );
-
-  for (let count = 0; count < 4; count += 1) {
+  let retryContext = { overloadFailureCount: 0 };
+  for (let round = 0; round < 4; round += 1) {
+    for (let index = 0; index < modelCount; index += 1) {
+      let error;
+      try {
+        context.callGeminiForPdf_(
+          { getBytes: () => [1] }, {}, 'policy', file, null, retryContext
+        );
+      } catch (caught) {
+        error = caught;
+      }
+      assert.ok(error);
+      assert.equal(error.geminiOverloadDeferred, true);
+      if (index + 1 < modelCount) {
+        assert.equal(error.geminiModelChainPartial, true);
+        retryContext = {
+          overloadFailureCount: error.overloadFailureCount,
+          deferredReason: error.deferredReason,
+          nextGeminiModel: error.nextGeminiModel
+        };
+      } else {
+        assert.equal(error.geminiModelChainPartial, undefined);
+        assert.equal(error.overloadFailureCount, round + 1);
+        retryContext = {
+          overloadFailureCount: error.overloadFailureCount,
+          deferredReason: error.deferredReason
+        };
+      }
+    }
+  }
+  for (let index = 0; index < modelCount - 1; index += 1) {
     let error;
     try {
-      call(count);
+      context.callGeminiForPdf_(
+        { getBytes: () => [1] }, {}, 'policy', file, null, retryContext
+      );
     } catch (caught) {
       error = caught;
     }
     assert.ok(error);
-    assert.equal(error.geminiOverloadDeferred, true);
-    assert.equal(error.overloadFailureCount, count + 1);
+    assert.equal(error.geminiModelChainPartial, true);
+    retryContext = {
+      overloadFailureCount: error.overloadFailureCount,
+      deferredReason: error.deferredReason,
+      nextGeminiModel: error.nextGeminiModel
+    };
   }
-  assert.equal(call(4), '{}');
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', file, null, retryContext
+  ), '{}');
   assert.equal(requests.length, modelCount * 5 + 1);
   assert.ok(requests.slice(0, modelCount * 5).every(request =>
     request.url.includes('generativelanguage.googleapis.com')));
@@ -5788,9 +5821,29 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
   });
   noFallback.buildExtractionPrompt_ = () => 'test-prompt';
   noFallback.logCatalogEvent_ = () => {};
+  let disabledRetryContext = {
+    overloadFailureCount: 4,
+    deferredReason: 'gemini-api-high-demand'
+  };
+  for (let index = 0; index < modelCount - 1; index += 1) {
+    let error;
+    try {
+      noFallback.callGeminiForPdf_(
+        { getBytes: () => [1] }, {}, 'policy', file, null,
+        disabledRetryContext
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    disabledRetryContext = {
+      overloadFailureCount: error.overloadFailureCount,
+      deferredReason: error.deferredReason,
+      nextGeminiModel: error.nextGeminiModel
+    };
+  }
   assert.throws(() => noFallback.callGeminiForPdf_(
     { getBytes: () => [1] }, {}, 'policy', file, null,
-    { overloadFailureCount: 4 }
+    disabledRetryContext
   ), /Automatic Vertex fallback is disabled/);
   assert.equal(noFallback.getGeminiDeveloperOverloadReason_(response(highDemand)),
     'gemini-api-high-demand');
@@ -5827,12 +5880,27 @@ function testGeminiIncompleteResponseFallsBackBeforeRepairAttempt() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+  assert.equal(deferred.geminiModelChainPartial, true);
+  assert.equal(deferred.nextGeminiModel, 'gemini-3.8-flash');
   assert.equal(context.callGeminiForPdf_(
-    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: deferred.overloadFailureCount,
+      deferredReason: deferred.deferredReason,
+      nextGeminiModel: deferred.nextGeminiModel
+    }
   ), '{}');
   assert.deepEqual(requests, ['gemini-flash-latest', 'gemini-3.8-flash']);
   assert.equal(events.find(event =>
-    event.event === 'gemini-developer-model-fallback').details.reason,
+    event.event === 'gemini-developer-model-fallback-deferred').details.reason,
   'incomplete-response');
 }
 
@@ -5859,7 +5927,12 @@ function testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback() {
   let deferred;
   try {
     context.callGeminiForPdf_(
-      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+      {
+        overloadFailureCount: 0,
+        deferredReason: 'gemini-api-incomplete-response',
+        nextGeminiModel: 'gemini-3.5-flash'
+      }
     );
   } catch (error) {
     deferred = error;
@@ -5869,10 +5942,7 @@ function testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback() {
   assert.equal(deferred.geminiOverloadDeferred, true);
   assert.equal(deferred.overloadFailureCount, 1);
   assert.equal(deferred.deferredReason, 'gemini-api-incomplete-response');
-  assert.deepEqual(requests, [
-    'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
-    'gemini-3.6-flash', 'gemini-3.5-flash'
-  ]);
+  assert.deepEqual(requests, ['gemini-3.5-flash']);
   assert.deepEqual(writes, []);
 }
 
@@ -5904,12 +5974,27 @@ function testGeminiModelSpecific429FallsBackToNextModel() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+  assert.equal(deferred.geminiModelChainPartial, true);
+  assert.equal(deferred.nextGeminiModel, 'gemini-3.8-flash');
   assert.equal(context.callGeminiForPdf_(
-    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: deferred.overloadFailureCount,
+      deferredReason: deferred.deferredReason,
+      nextGeminiModel: deferred.nextGeminiModel
+    }
   ), '{}');
   assert.deepEqual(requests, ['gemini-flash-latest', 'gemini-3.8-flash']);
   assert.equal(events.find(event =>
-    event.event === 'gemini-developer-model-fallback').details.reason,
+    event.event === 'gemini-developer-model-fallback-deferred').details.reason,
   'model-quota-limited');
 }
 
@@ -5939,15 +6024,80 @@ function testGeminiTransientResponseFallsBackBeforeTerminalError() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+  assert.equal(deferred.geminiModelChainPartial, true);
   assert.equal(context.callGeminiForPdf_(
-    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: deferred.overloadFailureCount,
+      deferredReason: deferred.deferredReason,
+      nextGeminiModel: deferred.nextGeminiModel
+    }
   ), '{}');
   assert.deepEqual(requests, [
     'gemini-flash-latest', 'gemini-flash-latest',
     'gemini-3.8-flash', 'gemini-3.8-flash'
   ]);
   assert.equal(events.find(event =>
-    event.event === 'gemini-developer-model-fallback').details.reason,
+    event.event === 'gemini-developer-model-fallback-deferred').details.reason,
+  'transient-response');
+}
+
+function testGeminiNetworkFailureResumesWithFreshModelExecution() {
+  const requests = [];
+  const events = [];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || ''
+    }) },
+    UrlFetchApp: { fetch: (_url, options) => {
+      requests.push(JSON.parse(options.payload).model);
+      if (requests.length <= 2) {
+        throw new Error('socket closed');
+      }
+      return mockedInteractionsResponse();
+    } }
+  });
+  context.Utilities.sleep = () => {};
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+
+  assert.equal(deferred.geminiModelChainPartial, true);
+  assert.equal(deferred.deferredReason, 'gemini-api-transient-response');
+  assert.equal(deferred.nextGeminiModel, 'gemini-3.8-flash');
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: deferred.overloadFailureCount,
+      deferredReason: deferred.deferredReason,
+      nextGeminiModel: deferred.nextGeminiModel
+    }
+  ), '{}');
+  assert.deepEqual(requests, [
+    'gemini-flash-latest', 'gemini-flash-latest', 'gemini-3.8-flash'
+  ]);
+  assert.equal(events.find(event =>
+    event.event === 'gemini-developer-model-fallback-deferred').details.reason,
   'transient-response');
 }
 
@@ -5980,7 +6130,12 @@ function testGeminiTransientModelChainUsesDurableRetryWithoutVertexFallback() {
   let deferred;
   try {
     context.callGeminiForPdf_(
-      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+      {
+        overloadFailureCount: 0,
+        deferredReason: 'gemini-api-transient-response',
+        nextGeminiModel: 'gemini-3.5-flash'
+      }
     );
   } catch (error) {
     deferred = error;
@@ -5989,13 +6144,8 @@ function testGeminiTransientModelChainUsesDurableRetryWithoutVertexFallback() {
   assert.ok(deferred);
   assert.equal(deferred.geminiOverloadDeferred, true);
   assert.equal(deferred.deferredReason, 'gemini-api-transient-response');
-  assert.deepEqual(requests, [
-    'gemini-flash-latest', 'gemini-flash-latest',
-    'gemini-3.8-flash', 'gemini-3.8-flash',
-    'gemini-3.7-flash', 'gemini-3.7-flash',
-    'gemini-3.6-flash', 'gemini-3.6-flash',
-    'gemini-3.5-flash', 'gemini-3.5-flash'
-  ]);
+  assert.equal(deferred.overloadFailureCount, 1);
+  assert.deepEqual(requests, ['gemini-3.5-flash', 'gemini-3.5-flash']);
   assert.deepEqual(writes, []);
 }
 
@@ -6120,13 +6270,31 @@ function testGeminiPartialModelChainResumesBeforeVertexFallback() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = () => {};
 
+  let retryContext = {
+    overloadFailureCount: 4,
+    deferredReason: 'gemini-api-high-demand',
+    nextGeminiModel: 'gemini-3.8-flash'
+  };
+  for (let index = 0; index < 3; index += 1) {
+    let error;
+    try {
+      context.callGeminiForPdf_(
+        { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+        retryContext
+      );
+    } catch (caught) {
+      error = caught;
+    }
+    assert.equal(error.geminiModelChainPartial, true);
+    retryContext = {
+      overloadFailureCount: error.overloadFailureCount,
+      deferredReason: error.deferredReason,
+      nextGeminiModel: error.nextGeminiModel
+    };
+  }
   assert.equal(context.callGeminiForPdf_(
     { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
-    {
-      overloadFailureCount: 4,
-      deferredReason: 'gemini-api-high-demand',
-      nextGeminiModel: 'gemini-3.8-flash'
-    }
+    retryContext
   ), '{}');
 
   assert.deepEqual(requests.slice(0, 4).map(request => request.payload.model), [
@@ -6172,14 +6340,28 @@ function testGeminiModelQuotaMovesToNextKnownFlashModel() {
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+  assert.equal(deferred.geminiModelChainPartial, true);
   assert.equal(context.callGeminiForPdf_(
-    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }, null,
+    {
+      overloadFailureCount: deferred.overloadFailureCount,
+      deferredReason: deferred.deferredReason,
+      nextGeminiModel: deferred.nextGeminiModel
+    }
   ), '{}');
   assert.deepEqual(requests.map(request => request.payload.model), [
     'gemini-flash-latest', 'gemini-3.8-flash'
   ]);
   assert.equal(events.find(event =>
-    event.event === 'gemini-developer-model-fallback').details.reason,
+    event.event === 'gemini-developer-model-fallback-deferred').details.reason,
     'model-quota-limited');
   assert.equal(events.find(event =>
     event.event === 'gemini-generation-usage').details.model,
@@ -9735,6 +9917,7 @@ testGeminiIncompleteResponseFallsBackBeforeRepairAttempt();
 testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback();
 testGeminiModelSpecific429FallsBackToNextModel();
 testGeminiTransientResponseFallsBackBeforeTerminalError();
+testGeminiNetworkFailureResumesWithFreshModelExecution();
 testGeminiTransientModelChainUsesDurableRetryWithoutVertexFallback();
 testGeminiModelChainReservesTimeToPersistDeferredState();
 testGeminiPartialModelChainResumesBeforeVertexFallback();

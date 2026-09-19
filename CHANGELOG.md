@@ -24,6 +24,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Persist bounded retries for chains made entirely of transient or short-window
   rate-limit failures, while reserving Vertex fallback for explicit overload or
   eligible quota conditions.
+- Continue a retryable Developer API model chain through the managed trigger,
+  one model per fresh Apps Script execution, so a later successful extraction
+  retains enough runtime for deterministic validation and repair.
 
 ## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
 
