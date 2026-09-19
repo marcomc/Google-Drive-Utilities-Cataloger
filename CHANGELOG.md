@@ -27,6 +27,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Continue a retryable Developer API model chain through the managed trigger,
   one model per fresh Apps Script execution, so a later successful extraction
   retains enough runtime for deterministic validation and repair.
+- Allow an owner-controlled temporary suspension of the invoice service-address
+  identity gate, while retaining account-holder, monetary, duplicate, and
+  source verification.
 
 ## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
 

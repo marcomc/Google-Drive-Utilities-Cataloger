@@ -64,7 +64,8 @@ flowchart LR
   state -- "no; partial or formula-backed" --> review["NEEDS REVIEW; leave unchanged"]
   state -- "no; existing rows" --> review["NEEDS REVIEW; leave unchanged"]
   bootstrap --> import["Import and archive"]
-  compare -- "match" --> import["Import and archive"]
+  compare -- "holder and address match" --> import["Import and archive"]
+  compare -- "holder match; address gate suspended" --> import["Import and archive"]
   compare -- "missing or mismatch" --> review["NEEDS REVIEW; leave unchanged"]
 ```
 
@@ -74,6 +75,12 @@ It normalizes case, punctuation, whitespace, line breaks, and common Italian
 street abbreviations, then requires the account-holder name plus street, civic
 number, and city. CAP and field order are not required. The raw printed holder
 and address are stored on each imported row for auditability.
+
+An owner may temporarily set `ENFORCE_SERVICE_ADDRESS_IDENTITY=false` to
+suspend only the address comparison. The account-holder, monetary, duplicate,
+and source-row verification gates remain active. First-invoice identity
+bootstrap continues to require the complete corroborated address, so the
+exception cannot establish a weak new supply identity.
 
 New controls display localized placeholder text with an amber background and
 prominent border. They turn green when configured. On a tab with no imported

@@ -78,6 +78,7 @@ const CONFIG = Object.freeze({
     VERTEX_AI_LOCATION: 'VERTEX_AI_LOCATION',
     GEMINI_AUTO_VERTEX_FALLBACK: 'GEMINI_AUTO_VERTEX_FALLBACK',
     GEMINI_VERTEX_FALLBACK_UNTIL: 'GEMINI_VERTEX_FALLBACK_UNTIL',
+    ENFORCE_SERVICE_ADDRESS_IDENTITY: 'ENFORCE_SERVICE_ADDRESS_IDENTITY',
     NOTIFICATION_RECIPIENT: 'NOTIFICATION_RECIPIENT',
     ROOT_FOLDER_ID: 'ROOT_FOLDER_ID',
     SPREADSHEET_ID: 'SPREADSHEET_ID',
@@ -123,6 +124,7 @@ function getSetupStatus() {
     geminiBackend: getGeminiBackend_(),
     geminiEffectiveBackend: getEffectiveGeminiBackend_(),
     geminiAutoVertexFallbackEnabled: isAutomaticVertexFallbackEnabled_(),
+    serviceAddressIdentityEnforced: isServiceAddressIdentityEnforced_(),
     geminiVertexFallbackUntil: getTemporaryVertexFallbackUntilIso_(),
     geminiModel: getGeminiModel_(),
     notificationRecipientConfigured: Boolean(
@@ -322,6 +324,32 @@ function getGeminiBackend_() {
 
 function isAutomaticVertexFallbackEnabled_() {
   return getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_AUTO_VERTEX_FALLBACK) === 'true';
+}
+
+/**
+ * Address identity is normally required alongside the account holder. An
+ * owner may temporarily suspend only the address comparison while a reviewed
+ * semantic address matcher is being prepared.
+ */
+function isServiceAddressIdentityEnforced_() {
+  const configured = getScriptProperty_(
+    CONFIG.PROPERTY_KEYS.ENFORCE_SERVICE_ADDRESS_IDENTITY
+  );
+  return configured === '' || configured === 'true';
+}
+
+/**
+ * Owner-controlled, reversible service-address identity gate.
+ */
+function setServiceAddressIdentityEnforcement(enabled) {
+  if (typeof enabled !== 'boolean') {
+    throw new Error('Service address identity enforcement must be true or false.');
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.ENFORCE_SERVICE_ADDRESS_IDENTITY,
+    String(enabled)
+  );
+  return getSetupStatus();
 }
 
 function getTemporaryVertexFallbackUntil_() {

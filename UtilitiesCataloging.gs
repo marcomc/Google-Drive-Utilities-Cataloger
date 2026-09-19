@@ -2664,17 +2664,39 @@ function hasAddressComponentPlacement_(addressTokens, components,
   return placeComponent(0, Array(addressTokens.length).fill(false));
 }
 
-function validateServiceIdentity_(extracted, expected) {
+function validateServiceIdentity_(extracted, expected, requireAddress) {
   const configured = expected || {};
+  const enforceAddress = requireAddress === true || isServiceAddressIdentityEnforced_();
   if (!normalizeNameIdentity_(configured.account_holder) ||
-    !normalizeAddressIdentityText_(configured.service_address)) {
+    (enforceAddress && !normalizeAddressIdentityText_(configured.service_address))) {
     return invalidExtraction_(
-      'The target supply has no configured account holder or service address.',
-      'Set Intestatario and Indirizzo di fornitura in row 1 of the target supply sheet, then retry the invoice.',
+      enforceAddress ?
+        'The target supply has no configured account holder or service address.' :
+        'The target supply has no configured account holder.',
+      enforceAddress ?
+        'Set Intestatario and Indirizzo di fornitura in row 1 of the target supply sheet, then retry the invoice.' :
+        'Set Intestatario in row 1 of the target supply sheet, then retry the invoice.',
       { code: 'target_identity_not_configured', repairable: false }
     );
   }
   const holder = normalizeNameIdentity_(extracted && extracted.account_holder);
+  if (!holder) {
+    return invalidExtraction_(
+      'The invoice account holder is missing or ambiguous.',
+      'Verify the account holder in the PDF.',
+      { code: 'service_identity_missing', repairable: true, fields: ['account_holder'] }
+    );
+  }
+  if (holder !== normalizeNameIdentity_(configured.account_holder)) {
+    return invalidExtraction_(
+      'The invoice account holder does not match the configured supply identity.',
+      'Verify that the PDF belongs to the configured supply or update Intestatario in row 1.',
+      { code: 'service_identity_mismatch', repairable: true, fields: ['account_holder'] }
+    );
+  }
+  if (!enforceAddress) {
+    return { valid: true };
+  }
   const street = normalizeAddressTokenSequence_(extracted && extracted.service_street);
   const civicNumber = normalizeAddressTokenSequence_(extracted && extracted.service_civic_number);
   const city = normalizeAddressTokenSequence_(extracted && extracted.service_city);
@@ -2685,7 +2707,7 @@ function validateServiceIdentity_(extracted, expected) {
   const evidenceAddress = normalizeAddressTokenSequence_(
     extracted && extracted.address_evidence
   );
-  if (!holder || !street.length || !civicNumber.length || !city.length) {
+  if (!street.length || !civicNumber.length || !city.length) {
     return invalidExtraction_(
       'The invoice account holder or service address is missing or ambiguous.',
       'Verify the account holder and the service address in the PDF.',
@@ -2703,8 +2725,7 @@ function validateServiceIdentity_(extracted, expected) {
     removeTrailingAddressProvince_(configuredAddress, city), addressComponents, true);
   const evidenceMatches = hasAddressComponentPlacement_(evidenceAddress,
     addressComponents, false);
-  if (holder !== normalizeNameIdentity_(configured.account_holder) ||
-    !addressMatches || !evidenceMatches) {
+  if (!addressMatches || !evidenceMatches) {
     return invalidExtraction_(
       'The invoice account holder or service address does not match the configured supply identity.',
       'Verify that the PDF belongs to the configured supply or update the expected identity in row 1.',
@@ -2845,7 +2866,7 @@ function prepareInitialServiceIdentityBootstrap_(sheet, layout, extracted) {
     return null;
   }
   const candidate = buildInitialServiceIdentity_(extracted);
-  if (!validateServiceIdentity_(extracted, candidate).valid) {
+  if (!validateServiceIdentity_(extracted, candidate, true).valid) {
     return null;
   }
   const holderColumn = findHeaderIndex_(layout.lookup,
@@ -3046,7 +3067,7 @@ function validateServiceIdentityForInvoice_(extracted) {
     const validation = validateServiceIdentity_(extracted, {
       account_holder: candidate.account_holder || '__missing_candidate__',
       service_address: candidate.service_address || '__missing_candidate__'
-    });
+    }, true);
     if (validation.valid) {
       validation.initialServiceIdentityBootstrapEligible = true;
     }
