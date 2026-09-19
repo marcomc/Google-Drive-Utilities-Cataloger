@@ -248,7 +248,9 @@ Customize the Drive copy, not the repository template.
 The installer creates or migrates each configured supply tab with two control
 fields above the headers: account holder and service address. These values are
 the persistent ownership check across supplier changes; contract and customer
-identifiers are recorded but are not used as the cross-supplier identity.
+identifiers are recorded but are not used as the cross-supplier identity. The
+address control is enforced by default; an owner may temporarily suspend only
+that comparison with the `ENFORCE_SERVICE_ADDRESS_IDENTITY` Script Property.
 
 The empty controls contain localized prompts, use an amber warning style, and
 turn green when configured. For a newly created tab with no invoice rows, the

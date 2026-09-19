@@ -179,6 +179,14 @@ in the target supply sheet. Supplier, contract, and customer identifiers may
 change when the provider changes. `address_rules` continues to classify
 non-invoice documents and archive-only cases; it does not override invoice
 identity verification.
+
+`ENFORCE_SERVICE_ADDRESS_IDENTITY` is an optional Script Property. It defaults
+to `true`; set it to `false` only as a temporary, owner-approved operational
+exception while a reviewed semantic address matcher is unavailable. With the
+exception active, the account-holder comparison remains required, the printed
+address remains stored on the imported row, and every monetary and duplicate
+check remains unchanged. It does not relax the complete-address requirement
+when establishing a new supply's initial identity controls.
 Each frequency override has this shape:
 
 ```json

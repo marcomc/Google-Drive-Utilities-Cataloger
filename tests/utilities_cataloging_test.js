@@ -100,6 +100,63 @@ function validInvoice() {
   };
 }
 
+function disableServiceAddressIdentityEnforcement(context) {
+  context.getScriptProperty_ = propertyKey => propertyKey ===
+    'ENFORCE_SERVICE_ADDRESS_IDENTITY' ? 'false' : '';
+}
+
+function testServiceAddressIdentityEnforcementDefaultsAndCanBeSet() {
+  const properties = {};
+  const context = loadCataloger({
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => properties[key] || '',
+        setProperty: (key, value) => { properties[key] = value; }
+      })
+    }
+  });
+  assert.equal(context.isServiceAddressIdentityEnforced_(), true);
+  assert.equal(
+    context.setServiceAddressIdentityEnforcement(false).serviceAddressIdentityEnforced,
+    false
+  );
+  assert.equal(context.isServiceAddressIdentityEnforced_(), false);
+  assert.throws(
+    () => context.setServiceAddressIdentityEnforcement('false'),
+    /must be true or false/
+  );
+}
+
+function testServiceAddressIdentityCanBeTemporarilyDisabled() {
+  const context = loadCataloger();
+  disableServiceAddressIdentityEnforcement(context);
+  const expected = {
+    account_holder: 'Laura Fortuna',
+    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+  };
+  const sameHolderDifferentAddress = {
+    account_holder: 'Laura Fortuna',
+    address_evidence: 'Corso Camillo Benso Cavour 125, 47521 Cesena FC',
+    service_street: 'Corso Camillo Benso Cavour',
+    service_civic_number: '125',
+    service_city: 'Cesena'
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.validateServiceIdentity_(
+      sameHolderDifferentAddress, expected
+    ))),
+    { valid: true }
+  );
+  assert.equal(context.validateServiceIdentity_(Object.assign(
+    {}, sameHolderDifferentAddress, { account_holder: 'Different Holder' }
+  ), expected).code, 'service_identity_mismatch');
+  assert.equal(context.validateServiceIdentity_(Object.assign(
+    {}, sameHolderDifferentAddress, {
+      service_street: '', service_civic_number: '', service_city: ''
+    }
+  ), expected, true).code, 'service_identity_missing');
+}
+
 function mockedInteractionsResponse(text = '{}', status = 'completed',
   stepStatus = 'done') {
   return {
@@ -9853,6 +9910,8 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceAddressIdentityEnforcementDefaultsAndCanBeSet();
+testServiceAddressIdentityCanBeTemporarilyDisabled();
 testFirstInvoiceCanEstablishMissingServiceIdentity();
 testFirstInvoiceRequiresManagedServiceIdentityMetadata();
 testFirstInvoiceCannotReplaceFormulaBackedIdentityControls();

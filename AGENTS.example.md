@@ -34,7 +34,10 @@ Do not commit or publish the customized Drive copy.
   SHA-256 hash all match.
 - If a required datum, supplier, or total reconciliation is uncertain, leave the
   PDF in intake with the `NEEDS REVIEW` outcome. A missing service address may
-  use the configured `address_missing_type` fallback.
+  use the configured `address_missing_type` fallback. When the owner has
+  explicitly set `ENFORCE_SERVICE_ADDRESS_IDENTITY=false`, treat an invoice
+  address difference as informational only; retain the printed address and do
+  not weaken account-holder, monetary, duplicate, or source checks.
 
 ## Classification and archiving
 
