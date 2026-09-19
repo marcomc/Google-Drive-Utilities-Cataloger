@@ -250,11 +250,13 @@ logged. These events provide the evidence needed to decide later whether a
 separate AI prompt supervisor would add value.
 
 Transient network, `408`, generic `429`, and selected `5xx` failures receive
-one bounded transport retry. A verified Gemini Developer API daily-quota or
-depleted-prepayment response instead retries once on Vertex when automatic
-fallback is enabled. Explicit Developer API per-model capacity or model-quota
-failures advance through the configured Flash model chain. If every model
-fails, the cataloger persists a per-file retry after 1, 5, 15, then 30 minutes.
+bounded transport retries and then advance through the configured Flash model
+chain. Provider error codes and quota metadata distinguish short-window rate
+limits from model-specific and project-wide quota exhaustion. A verified
+Gemini Developer API daily-quota or depleted-prepayment response can retry once
+on Vertex when automatic fallback is enabled; a transient failure cannot
+activate Vertex by itself. If every model fails, the cataloger persists a
+per-file retry after 1, 5, 15, then 30 minutes.
 The one-minute managed trigger processes only due file IDs and does not hold an
 Apps Script execution open or rescan intake. If the fifth complete chain round
 also fails, automatic fallback may use Vertex for the existing one-hour
@@ -324,8 +326,8 @@ reason, and recommended action rather than inventing a comparison.
 | Function | When to use it | Effect |
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
-| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today; it does not bypass an active Gemini high-demand or incomplete-response backoff. |
-| `processDueGeminiOverloadRetries` | Managed one-minute trigger. | Processes only due persisted high-demand or incomplete-response retries by file ID; do not run it manually to bypass the schedule. |
+| `retryFailedUtilitiesCataloging` | Owner-controlled recovery after a fixed configuration or runtime error. | Retries only direct-root PDFs whose latest outcome is `ERROR`, including errors recorded today; it does not bypass an active Gemini model-chain, rate-limit, high-demand, or incomplete-response backoff. |
+| `processDueGeminiOverloadRetries` | Managed one-minute trigger. | Processes only due persisted model-chain, rate-limit, high-demand, or incomplete-response retries by file ID; do not run it manually to bypass the schedule. |
 | `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
 | `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |

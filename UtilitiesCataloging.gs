@@ -1404,7 +1404,7 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
     const exhaustedReason = 'gemini-api-model-chain-retries-exhausted';
     const deferredReason = getGeminiModelChainDeferredReason_(
       failures, retryContext && retryContext.deferredReason);
-    if (deferredReason !== 'gemini-api-incomplete-response' &&
+    if (isGeminiVertexFallbackEligibleReason_(deferredReason) &&
       isAutomaticVertexFallbackEnabled_()) {
       activateTemporaryVertexFallback_(file, exhaustedReason);
       return callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
@@ -1415,8 +1415,12 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
       throw new Error(failures[failures.length - 1].message +
         ' Scheduled retries for incomplete Gemini responses are exhausted.');
     }
+    if (isGeminiVertexFallbackEligibleReason_(deferredReason)) {
+      throw new Error(failures[failures.length - 1].message +
+        ' Automatic Vertex fallback is disabled after the scheduled model-chain retries.');
+    }
     throw new Error(failures[failures.length - 1].message +
-      ' Automatic Vertex fallback is disabled after the scheduled model-chain retries.');
+      ' Scheduled retries for the Gemini model chain are exhausted.');
   }
   const deferred = new Error(failures[failures.length - 1].message);
   deferred.geminiOverloadDeferred = true;
@@ -1438,6 +1442,10 @@ function getGeminiModelChainDeferredReason_(failures, priorReason) {
     reasons.push('mixed');
   } else if (priorReason === 'gemini-api-incomplete-response') {
     reasons.push('incomplete-response');
+  } else if (priorReason === 'gemini-api-transient-response') {
+    reasons.push('transient-response');
+  } else if (priorReason === 'gemini-api-rate-limited') {
+    reasons.push('rate-limited');
   }
   if (reasons.length > 0 && reasons.every(function (reason) {
     return reason === 'incomplete-response';
@@ -1450,7 +1458,18 @@ function getGeminiModelChainDeferredReason_(failures, priorReason) {
   if (reasons.every(function (reason) { return reason === 'model-quota-limited'; })) {
     return 'gemini-api-model-quota-limited';
   }
+  if (reasons.every(function (reason) { return reason === 'transient-response'; })) {
+    return 'gemini-api-transient-response';
+  }
+  if (reasons.every(function (reason) { return reason === 'rate-limited'; })) {
+    return 'gemini-api-rate-limited';
+  }
   return 'gemini-api-model-chain-unavailable';
+}
+
+function isGeminiVertexFallbackEligibleReason_(reason) {
+  return ['gemini-api-high-demand', 'gemini-api-model-quota-limited']
+    .indexOf(reason) >= 0;
 }
 
 function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
@@ -1585,7 +1604,7 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     if (developerModelFallbackEnabled && backend === 'gemini_api') {
       const modelFailureReason = getGeminiDeveloperModelFailureReason_(
         response, model);
-      if (modelFailureReason) {
+      if (isImmediateGeminiModelFailureReason_(modelFailureReason)) {
         responseLog.modelFailureReason = modelFailureReason;
         logCatalogEvent_('gemini-generation-response', responseLog);
         throw buildGeminiDeveloperModelFailure_(
@@ -1635,6 +1654,16 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
     }
     if (vertexFallbackReason || !isTransientGeminiResponse_(code) ||
       attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
+      if (developerModelFallbackEnabled && backend === 'gemini_api') {
+        const modelFailureReason = getGeminiDeveloperModelFailureReason_(
+          response, model);
+        if (modelFailureReason) {
+          responseLog.modelFailureReason = modelFailureReason;
+          logCatalogEvent_('gemini-generation-response', responseLog);
+          throw buildGeminiDeveloperModelFailure_(
+            response, model, modelFailureReason);
+        }
+      }
       throw new Error(describeGeminiHttpError_(response, backend));
     }
     const delay = CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
@@ -2000,33 +2029,85 @@ function getGeminiDeveloperModelFailureReason_(response, attemptedModel) {
     return 'high-demand';
   }
   const statusCode = response.getResponseCode();
+  const body = parseGeminiErrorBody_(response);
+  const apiError = body && body.error;
+  const message = String(apiError && apiError.message || '');
+  const attempted = String(attemptedModel || '').trim();
+  const responseModel = getGeminiErrorModel_(apiError);
+  const modelMatches = responseModel && (responseModel === attempted ||
+    (attempted === 'gemini-flash-latest' &&
+      /^gemini-[0-9]+(?:\.[0-9]+)*-flash$/.test(responseModel)));
   const terminalQuotaReason = getGeminiVertexFallbackReason_(response);
-  if (terminalQuotaReason) {
-    return terminalQuotaReason;
-  }
+
   if (statusCode === 429) {
-    try {
-      const body = JSON.parse(response.getContentText());
-      const apiError = body && body.error;
-      const message = String(apiError && apiError.message || '');
-      const quotaMatch = message.match(
-        new RegExp('(?:^|\\n)\\* Quota exceeded for metric: ' +
-        'generativelanguage\\.googleapis\\.com\\/[a-z][a-z0-9_]*, ' +
-        'limit: [0-9]+, model: (gemini-[a-z0-9][a-z0-9.-]*)(?:\\n|$)'));
-      const quotaModel = quotaMatch && quotaMatch[1];
-      const attempted = String(attemptedModel || '').trim();
-      const aliasResolvedModel = attempted === 'gemini-flash-latest' &&
-        /^gemini-[0-9]+(?:\.[0-9]+)*-flash$/.test(quotaModel || '');
-      if (apiError && apiError.code === 'too_many_requests' && quotaModel &&
-        (quotaModel === attempted || aliasResolvedModel)) {
-        return 'model-quota-limited';
-      }
-    } catch (error) {
-      return '';
+    if (modelMatches && apiError && (apiError.code === 'quota_exceeded' ||
+      apiError.code === 'too_many_requests' ||
+      apiError.code === 'rate_limit_exceeded' ||
+      hasGeminiModelQuotaViolation_(apiError, responseModel))) {
+      return 'model-quota-limited';
     }
-    return '';
+    if (terminalQuotaReason) {
+      return terminalQuotaReason;
+    }
+    if (apiError && (apiError.code === 'too_many_requests' ||
+      apiError.code === 'rate_limit_exceeded')) {
+      return 'rate-limited';
+    }
+    return 'rate-limited';
+  }
+  if ([408, 500, 502, 503, 504].indexOf(statusCode) >= 0) {
+    return 'transient-response';
   }
   return '';
+}
+
+function isImmediateGeminiModelFailureReason_(reason) {
+  return ['high-demand', 'model-quota-limited',
+    'gemini-api-daily-quota-exhausted',
+    'gemini-api-prepayment-credits-depleted'].indexOf(reason) >= 0;
+}
+
+function parseGeminiErrorBody_(response) {
+  try {
+    const body = JSON.parse(response.getContentText());
+    return body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function getGeminiErrorModel_(apiError) {
+  const message = String(apiError && apiError.message || '');
+  const match = message.match(/\bmodel\s*[:=]?\s*(gemini-[a-z0-9][a-z0-9.-]*)\b/i);
+  if (match) {
+    return match[1];
+  }
+  const details = apiError && apiError.details;
+  if (!Array.isArray(details)) {
+    return '';
+  }
+  for (let index = 0; index < details.length; index += 1) {
+    const metadata = details[index] && details[index].metadata;
+    const model = metadata && String(metadata.model || '').trim();
+    if (/^gemini-[a-z0-9][a-z0-9.-]*$/i.test(model)) {
+      return model;
+    }
+  }
+  return '';
+}
+
+function hasGeminiModelQuotaViolation_(apiError, responseModel) {
+  const details = apiError && apiError.details;
+  if (!Array.isArray(details)) {
+    return Boolean(responseModel);
+  }
+  return details.some(function (detail) {
+    const violations = detail && detail.violations;
+    return Array.isArray(violations) && violations.some(function (violation) {
+      return violation && typeof violation.quotaId === 'string' &&
+        /PerModel/i.test(violation.quotaId);
+    });
+  });
 }
 
 function buildGeminiDeveloperModelFailure_(response, model, reason) {
@@ -5674,7 +5755,8 @@ function isGeminiOverloadRetryLease_(entry, now) {
 
 function isGeminiModelChainDeferredReason_(reason) {
   return ['gemini-api-high-demand', 'gemini-api-model-quota-limited',
-    'gemini-api-model-chain-unavailable', 'gemini-api-incomplete-response']
+    'gemini-api-model-chain-unavailable', 'gemini-api-incomplete-response',
+    'gemini-api-transient-response', 'gemini-api-rate-limited']
     .indexOf(reason) >= 0;
 }
 

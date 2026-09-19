@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [0.6.3] - 2026-09-19 - enhance Gemini overload handling
+## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 
 ### Fixed
 
@@ -18,6 +18,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Keep incomplete responses from activating the paid Vertex fallback on their
   own, and fail closed without Drive or spreadsheet mutations when the retry
   schedule is exhausted.
+- Classify transient HTTP failures and model-specific 429 quota responses from
+  provider error codes and quota metadata, so exhausted transport retries move
+  to the next configured model instead of ending the import prematurely.
+- Persist bounded retries for chains made entirely of transient or short-window
+  rate-limit failures, while reserving Vertex fallback for explicit overload or
+  eligible quota conditions.
 
 ## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
 
