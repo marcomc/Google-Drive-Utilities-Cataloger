@@ -1389,12 +1389,14 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
       }
       failures.push(error);
       if (index + 1 < models.length) {
-        logCatalogEvent_('gemini-developer-model-fallback', Object.assign(
+        const nextModel = models[index + 1];
+        logCatalogEvent_('gemini-developer-model-fallback-deferred', Object.assign(
           describeFileForLog_(file), {
             failedModel: model,
-            nextModel: models[index + 1],
+            nextModel: nextModel,
             reason: error.geminiDeveloperFailureReason
           }));
+        throw buildGeminiModelChainContinuation_(error, retryContext, nextModel);
       }
     }
   }
@@ -1428,6 +1430,17 @@ function callGeminiForPdfWithDeveloperModels_(blob, sheetHeadersBySupply,
   deferred.deferredReason = getGeminiModelChainDeferredReason_(
     failures, retryContext && retryContext.deferredReason);
   throw deferred;
+}
+
+function buildGeminiModelChainContinuation_(error, retryContext, nextModel) {
+  const continuation = new Error(error.message);
+  continuation.geminiOverloadDeferred = true;
+  continuation.geminiModelChainPartial = true;
+  continuation.overloadFailureCount = getGeminiOverloadFailureCount_(retryContext);
+  continuation.deferredReason = getGeminiModelChainDeferredReason_(
+    [error], retryContext && retryContext.deferredReason);
+  continuation.nextGeminiModel = nextModel;
+  return continuation;
 }
 
 function getGeminiModelChainDeferredReason_(failures, priorReason) {
@@ -1564,8 +1577,13 @@ function callGeminiForPdfWithBackend_(blob, sheetHeadersBySupply,
       response = UrlFetchApp.fetch(endpoint, requestOptions);
     } catch (error) {
       if (attempt === CONFIG.GEMINI_MAX_TRANSIENT_ATTEMPTS) {
-        throw new Error('Gemini network request failed after retry: ' +
-          describeError_(error));
+        const networkFailureMessage = 'Gemini network request failed after retry: ' +
+          describeError_(error);
+        if (developerModelFallbackEnabled && backend === 'gemini_api') {
+          throw buildGeminiDeveloperModelFailureFromMessage_(
+            networkFailureMessage, model, 'transient-response');
+        }
+        throw new Error(networkFailureMessage);
       }
       Utilities.sleep(
         CONFIG.GEMINI_INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1)
@@ -2111,7 +2129,12 @@ function hasGeminiModelQuotaViolation_(apiError, responseModel) {
 }
 
 function buildGeminiDeveloperModelFailure_(response, model, reason) {
-  const error = new Error(describeGeminiHttpError_(response, 'gemini_api'));
+  return buildGeminiDeveloperModelFailureFromMessage_(
+    describeGeminiHttpError_(response, 'gemini_api'), model, reason);
+}
+
+function buildGeminiDeveloperModelFailureFromMessage_(message, model, reason) {
+  const error = new Error(message);
   error.geminiDeveloperModelFailure = true;
   error.geminiDeveloperModel = model;
   error.geminiDeveloperFailureReason = reason;
