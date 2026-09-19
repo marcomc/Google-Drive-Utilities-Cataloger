@@ -5820,6 +5820,78 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     'gemini-api-high-demand');
 }
 
+function testGeminiIncompleteResponseFallsBackBeforeRepairAttempt() {
+  const requests = [];
+  const events = [];
+  const responses = [
+    mockedInteractionsResponse('', 'incomplete'),
+    mockedInteractionsResponse()
+  ];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || ''
+    }) },
+    UrlFetchApp: { fetch: (_url, options) => {
+      requests.push(JSON.parse(options.payload).model);
+      return responses.shift();
+    } }
+  });
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = (event, details) => events.push({ event, details });
+
+  assert.equal(context.callGeminiForPdf_(
+    { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+  ), '{}');
+  assert.deepEqual(requests, ['gemini-flash-latest', 'gemini-3.8-flash']);
+  assert.equal(events.find(event =>
+    event.event === 'gemini-developer-model-fallback').details.reason,
+  'incomplete-response');
+}
+
+function testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback() {
+  const requests = [];
+  const writes = [];
+  const context = loadCataloger({
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => ({
+        GEMINI_API_KEY: 'test-secret', GEMINI_MODEL: 'gemini-flash-latest',
+        GEMINI_BACKEND: 'gemini_api', GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+        GOOGLE_CLOUD_PROJECT_ID: 'test-project'
+      })[key] || '',
+      setProperty: (key, value) => writes.push({ key, value })
+    }) },
+    UrlFetchApp: { fetch: (_url, options) => {
+      requests.push(JSON.parse(options.payload).model);
+      return mockedInteractionsResponse('', 'incomplete');
+    } }
+  });
+  context.buildExtractionPrompt_ = () => 'test-prompt';
+  context.logCatalogEvent_ = () => {};
+
+  let deferred;
+  try {
+    context.callGeminiForPdf_(
+      { getBytes: () => [1] }, {}, 'policy', { getId: () => 'file-id' }
+    );
+  } catch (error) {
+    deferred = error;
+  }
+
+  assert.ok(deferred);
+  assert.equal(deferred.geminiOverloadDeferred, true);
+  assert.equal(deferred.overloadFailureCount, 1);
+  assert.equal(deferred.deferredReason, 'gemini-api-incomplete-response');
+  assert.deepEqual(requests, [
+    'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash'
+  ]);
+  assert.deepEqual(writes, []);
+}
+
 function testGeminiModelChainReservesTimeToPersistDeferredState() {
   const requests = [];
   const propertyWrites = [];
@@ -9552,6 +9624,8 @@ testErrorResultMarksRetainedDestinationFoldersAsIncomplete();
 testDestinationFolderCreationCheckpointsEachCreatedPath();
 testTerminalQuotaClassificationAndPaidRouting();
 testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback();
+testGeminiIncompleteResponseFallsBackBeforeRepairAttempt();
+testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback();
 testGeminiModelChainReservesTimeToPersistDeferredState();
 testGeminiPartialModelChainResumesBeforeVertexFallback();
 testGeminiModelQuotaMovesToNextKnownFlashModel();

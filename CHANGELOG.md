@@ -9,7 +9,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Enhance Gemini overload handling with improved retry logic and fallback persistence
+- Classify Gemini Developer API capacity failures explicitly and continue through
+  the configured Flash model chain before persisting a bounded retry.
+- Treat incomplete Gemini extraction responses as retryable model-chain failures:
+  try the next configured model before consuming a validator repair attempt, and
+  persist the unchanged PDF for the existing 1, 5, 15, and 30-minute retry
+  schedule when every configured model is incomplete.
+- Keep incomplete responses from activating the paid Vertex fallback on their
+  own, and fail closed without Drive or spreadsheet mutations when the retry
+  schedule is exhausted.
 
 ## [0.6.2] - 2026-09-08 - Gemini generation readiness probe
 
