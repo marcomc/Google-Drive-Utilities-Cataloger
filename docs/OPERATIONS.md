@@ -423,7 +423,14 @@ owner-requested `processSingleIntakeFile` retry. That retry was deferred for
 provider high demand and handed back to the existing managed retry chain.
 Direct text and visual inspection of the source PDF confirmed the printed holder,
 ordinary May-August period (123 days), and matching net/VAT/total reconciliation.
-The final post-configuration invoice outcome remains pending.
+The managed retry completed with `IMPORTED` after one successful extraction
+on `gemini-3.6-flash`. Fresh readback found exactly one source-linked invoice row
+(row 13), text invoice/contract/customer identifiers, numeric quantities and VAT,
+`quadrimestrale`, 123 billed days, and preserved formulas displaying net 44.67,
+VAT 4.27 and total 48.94. Drive readback confirmed the same untrashed PDF was
+renamed and moved out of intake into the configured archive. The completion and
+`report-email-sent` events share one Apps Script process ID under `0.7.0`;
+mailbox receipt was not independently inspected.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as
