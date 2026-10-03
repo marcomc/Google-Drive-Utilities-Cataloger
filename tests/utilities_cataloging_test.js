@@ -97,6 +97,7 @@ function validInvoice() {
     vat: 2.64,
     total: 14.64,
     problems: [],
+    problem_details: [],
     sheet_values: []
   };
 }
@@ -4188,7 +4189,8 @@ function testDeveloperApiKeyUsesHeader() {
       'vat',
       'total',
       'sheet_values',
-      'problems'
+      'problems',
+      'problem_details'
     ]
   );
   assert.deepEqual(
@@ -6579,6 +6581,8 @@ function testPromptKeepsHeadersScopedBySupply() {
   }, 'trusted policy');
 
   assert.match(prompt, /matching canonical supply entry/);
+  assert.match(prompt, /"problem_details": \[\{"code":"missing","fields":\["exact affected field"\],"message":"observed problems"\}\]/);
+  assert.match(prompt, /Always return problem_details, using an empty array when there are no problems/);
   assert.match(prompt, /"contract_number": "printed contract number or null"/);
   assert.match(prompt,
     /"customer_code": "printed customer\/client\/account code \(ID UTENTE is a customer code\), or null"/);
@@ -10299,3 +10303,40 @@ function testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites() {
   assert.equal(store[prefix+'resumed'],'IMPORTED WITH WARNINGS');
 }
 testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites();
+
+function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
+  const c=loadCataloger();
+  assert.equal(c.buildExtractionResponseSchema_().required.includes('problem_details'),true);
+  assert.equal(c.buildVertexExtractionResponseSchema_().required.includes('problem_details'),true);
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(validInvoice()));
+  for(const value of [undefined,null,{},'unreadable']) {
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),problem_details:value}),
+      /problem_details/);
+  }
+  const message='Unit of measure is unreadable.';
+  const reply={...validInvoice(),problems:[message],
+    problem_details:[{code:'unreadable',fields:['Unit of measure'],message}],
+    sheet_values:[{header:'Unit of measure',value:'guessed'}]};
+  const initial={...reply};delete initial.problem_details;
+  let calls=0;
+  c.callGeminiForPdf_=()=>JSON.stringify(++calls===1?initial:reply);
+  c.getSheetHeadersBySupply_=()=>({Water:['Unit of measure']});
+  c.normalizeExtraction_=data=>({...data});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>['Unit of measure'];
+  c.inferInvoiceFrequency_=()=>{};
+  c.applySupplierFieldDefaults_=()=>{};
+  c.normalizeSheetValues_=values=>values;
+  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+    subscriberIdentifierProblemPatterns:{}});
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  const result=c.extractUtilityDataWithRepair_({getId:()=> 'current',getName:()=> 'invoice.pdf',
+    getBlob:()=>({})},'policy',Date.now()+120000);
+  assert.equal(calls,3);
+  assert.equal(result.validation.valid,true);
+  assert.equal(result.extracted.review_issues[0].fields[0],'Unit of measure');
+  assert.equal(result.extracted.sheet_values[0].value,null);
+}
+testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair();

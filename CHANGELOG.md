@@ -29,6 +29,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Read configured cadence from the verified metadata row in migrated layouts;
   bound rejected historical candidates and retained invoice outcome proof so
   large legacy catalogs do not exhaust execution time or Script Properties.
+- Require structured problem details in both provider schemas so unresolved
+  accessory diagnostics can participate in guided repair and warning imports.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 

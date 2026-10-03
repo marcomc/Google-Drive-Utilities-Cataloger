@@ -375,7 +375,10 @@ pending-review proofs cannot be adopted through this operation.
 Older absent proofs still require complete current PDF and exact row validation;
 unresolved evidence or mismatched blank review cells cannot qualify.
 
-The runtime classifies structured accessory issues after all essential checks.
+Both provider schemas require `problem_details`, including an empty array for
+no model-reported issues. Missing or malformed arrays enter the existing bounded
+schema repair path. The runtime classifies structured accessory issues after all
+essential checks.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
 identity, reference dates, monetary and numeric consumption evidence, formula
 columns and unconfigured headers. Secondary accessory admission uses reviewed
@@ -447,6 +450,14 @@ Setup's 16 fields were unchanged, and post-deployment Sheets readback was
 identical to the verified imported invoice. The closure tests cover migrated
 metadata controls, rejected-candidate limits, bounded proof migration and
 interrupted persistence; independent delta audit found no contract violation.
+The final structured-diagnostic closure was deployed as owner-only version 104.
+Both provider schemas and raw validation now require `problem_details`; prompt
+prose and the JSON example agree. Focused and full checks and independent delta
+audit passed. Exact uploaded entrypoints were checked before promotion;
+HEAD and pinned version 104 matched all nine runtime files. All 16 setup fields
+and the verified HERA row were unchanged. The separate live policy update now
+requires the array even when empty; exact UTF-8 readback matched 23,300 bytes,
+SHA-256 `8f0c868aa953a0e513982ab1393c0c691968b4fbe2093508bfd7eaec23871724`.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

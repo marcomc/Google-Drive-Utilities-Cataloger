@@ -124,7 +124,8 @@ manual review.
 - Explicit printed cadence and reviewed overrides are evidence; configured
   sheet cadence and verified independent history may corroborate them. Retain
   actual contradictions for guided re-reading instead of forcing agreement.
-- Return each unresolved problem separately in `problems` and provide matching
+- Always return `problem_details`; use an empty array when there are no problems.
+  Return each unresolved problem separately in `problems` and provide matching
   `problem_details` with its exact message, affected canonical fields or sheet
   headers, and code `missing`, `unreadable`, `ambiguous`, or `conflicting`.
   Never bundle an accessory issue with an identity or monetary issue.
