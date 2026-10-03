@@ -5825,7 +5825,8 @@ function getHistoricalInvoiceFrequencyEvidence_(extracted, deadlineAt) {
   try {
     const context = buildInvoiceRepairSupplyContext_(extracted,
       Number(deadlineAt) || Date.now() + CONFIG.MAX_RUNTIME_MS);
-    if (['unavailable', 'history-budget-limited'].indexOf(context.state) >= 0) {
+    if (['unavailable', 'history-budget-limited', 'history-candidate-limited']
+      .indexOf(context.state) >= 0) {
       return { state: 'unavailable', frequency: '' };
     }
     const aliases = getHeaderAliases_('frequency').map(normalizeHeader_);

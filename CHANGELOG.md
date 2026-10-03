@@ -39,6 +39,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   Carry those affected fields through the guided repair feedback. Only structured
   `missing` cadence issues may be resolved by independent cadence evidence;
   conflicting, ambiguous or unreadable cadence stays in guided review.
+- Keep candidate-limited historical rows available for guided reading without
+  using their partial cadence as deterministic consensus.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 

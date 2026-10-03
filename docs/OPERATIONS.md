@@ -398,6 +398,9 @@ reach the repair feedback, independently of the message wording. Model
 resolution also requires code `missing`: `conflicting`, `ambiguous` and
 `unreadable` cadence diagnostics survive inference, reviewed overrides and
 provenance exemptions, then enter guided repair and eventual blank-cell review.
+Candidate- or deadline-limited history remains partial guidance for the model
+and cannot authorize historical cadence consensus. Independent printed, ordinary
+period or configured cadence evidence remains eligible.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
 identity, reference dates, monetary and numeric consumption evidence, formula
 columns and unconfigured headers. Secondary accessory admission uses reviewed
@@ -507,6 +510,12 @@ setup fields, live policy and HERA snapshot remained unchanged. The four-code
 matrix across inference, override and provenance resolves only missing cadence;
 other codes retain guided repair and a blank-cell review warning. Focused/full
 checks and the independent recovery audit passed.
+The incomplete-history consensus guard was deployed as owner-only version 110
+with exact uploaded entrypoints and HEAD/pinned source verified. A metadata read
+returned the identity-valid pre-update version 109; one read-only retry observed
+110. All 16 setup fields, live policy and HERA snapshot remained unchanged.
+Focused/full checks and independent convergence audit cover partial history,
+complete-history consensus and independent ordinary-period inference.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

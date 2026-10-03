@@ -9997,6 +9997,26 @@ function testVerifiedHistoryIsRecentIndependentAndExcludesReviewRows() {
   assert.equal(partial.state,'history-candidate-limited');
   assert.equal(partial.previousInvoices.length,2);
   assert.equal(sourceReads,candidateLimit);
+  const withoutPeriod={...invoice,frequency:'',frequency_source_evidence:null,
+    period_start:null,period_end:null,problems:[]};
+  const evidence=context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod,Date.now()+120000);
+  assert.equal(evidence.state,'unavailable');
+  assert.equal(evidence.frequency,'');
+  context.inferInvoiceFrequency_(withoutPeriod,Date.now()+120000);
+  assert.equal(withoutPeriod.frequency,'');
+  assert.match(withoutPeriod.problems.join(' '),/could not be corroborated/);
+  const ordinary={...invoice,frequency:'',frequency_source_evidence:null,problems:[]};
+  context.inferInvoiceFrequency_(ordinary,Date.now()+120000);
+  assert.equal(ordinary.frequency,'monthly');
+  assert.equal(ordinary.problems.length,0);
+  // The same two verified rows can corroborate cadence after a complete scan.
+  rows.length=candidateLimit;
+  const complete=context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod,Date.now()+120000);
+  assert.equal(complete.state,'consensus');
+  assert.equal(complete.frequency,'four_monthly');
+  context.buildInvoiceRepairSupplyContext_=()=>({state:'history-budget-limited',
+    previousInvoices:partial.previousInvoices});
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod).state,'unavailable');
 }
 
 function testImportedReviewReportPersistenceAndNoScheduledRetry() {
