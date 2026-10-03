@@ -1945,7 +1945,8 @@ function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
         const statement = rule.header + (locale === 'it' ? ' non presente nel documento.' :
           ' is not present in the document.');
         const raw = { ...validInvoice(), supplier, supply_type: supply,
-          sheet_values: [], problems: [statement] };
+          sheet_values: [], problems: [statement],
+          problem_details: [{code:'missing',fields:[rule.header],message:statement}] };
         const headers = Array.from(localization.installerSheetHeaders).concat(rule.header);
         context.getSheetHeadersBySupply_ = () => ({ [supply]: headers });
         context.callGeminiForPdf_ = () => JSON.stringify(raw);
@@ -1959,7 +1960,8 @@ function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
           .includes('configured_secondary_headers'), false);
         for (const problem of [statement + ' VAT is missing.',
           rule.header + ' is unreadable.', rule.header + ' is inconsistent.']) {
-          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw, problems: [problem] });
+          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw, problems: [problem],
+            problem_details: [{code:'ambiguous',fields:[rule.header],message:problem}] });
           const blocked = context.extractUtilityData_(file, 'policy');
           assert.equal(context.validateExtractedUtilityDataForImport_(blocked).valid, false, problem);
         }
@@ -2392,7 +2394,8 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
         'Frequency evidence is ambiguous.'
       ]) {
         const blocked = normalize({ ...validInvoice(), frequency: 'annual',
-          frequency_source_evidence: null, problems: [diagnostic] });
+          frequency_source_evidence: null, problems: [diagnostic],
+          problem_details: [{code:'ambiguous',fields:['frequency'],message:diagnostic}] });
         assert.equal(blocked.problems.includes(diagnostic), true);
         assert.equal(context.validateExtraction_(blocked).valid, false, diagnostic);
       }
@@ -2417,7 +2420,9 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
     assert.equal(printed.frequency, 'annual');
     assert.equal(context.validateExtraction_(printed).valid, true);
     const inferred = normalize({ ...validInvoice(), frequency: '', frequency_source_evidence: null,
-      problems: ['Billing frequency is not printed, inferred from period.'] });
+      problems: ['Billing frequency is not printed, inferred from period.'],
+      problem_details: [{code:'missing',fields:['frequency'],
+        message:'Billing frequency is not printed, inferred from period.'}] });
     assert.equal(inferred.frequency, 'monthly');
     assert.equal(context.validateExtraction_(inferred).valid, true);
   }
@@ -3615,9 +3620,12 @@ function testElectricityAggregateAndWeightedRepresentations() {
     const raw = { ...validInvoice(), supplier: 'eg', supply_type: supply,
       electricity_consumption_quantity: 100, electricity_selling_unit_rate: 0.25,
       cost_consumption: 25, cost_non_consumption: 2, vat: 1, total: 28,
-      sheet_values: [], problems: bands.map(absence) };
+      sheet_values: [], problems: bands.map(absence),
+      problem_details:bands.map(header=>({code:'missing',fields:[header],message:absence(header)})) };
     const extract = invoice => {
-      context.callGeminiForPdf_ = () => JSON.stringify(invoice);
+      // Supply model diagnostic metadata so these cases reach numeric validation.
+      context.callGeminiForPdf_ = () => JSON.stringify({...invoice,
+        problem_details:invoice.problems.map(message=>({code:'missing',fields:['sheet_values'],message}))});
       return context.extractUtilityData_(file, 'policy');
     };
     const validate = invoice => context.validateExtractedUtilityDataForImport_(extract(invoice));
@@ -10306,6 +10314,7 @@ testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites();
 
 function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
   const c=loadCataloger();
+  const inferCadence=c.inferInvoiceFrequency_;
   assert.equal(c.buildExtractionResponseSchema_().required.includes('problem_details'),true);
   assert.equal(c.buildVertexExtractionResponseSchema_().required.includes('problem_details'),true);
   assert.doesNotThrow(()=>c.validateRawExtractionShape_(validInvoice()));
@@ -10317,7 +10326,20 @@ function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
   const reply={...validInvoice(),problems:[message],
     problem_details:[{code:'unreadable',fields:['Unit of measure'],message}],
     sheet_values:[{header:'Unit of measure',value:'guessed'}]};
-  const initial={...reply};delete initial.problem_details;
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(reply));
+  const other='Payment method is missing.';
+  for (const candidate of [
+    {...reply,problem_details:[]},
+    {...reply,problems:[message,other]},
+    {...reply,problem_details:[...reply.problem_details,...reply.problem_details]},
+    {...reply,problems:[message,message],
+      problem_details:[...reply.problem_details,...reply.problem_details]},
+    {...reply,problems:[]},
+    {...reply,problem_details:[{...reply.problem_details[0],message:other}]}
+  ]) assert.throws(()=>c.validateRawExtractionShape_(candidate),/problem_details/);
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_({...reply,problems:[message,other],
+    problem_details:[...reply.problem_details,{code:'missing',fields:['Payment method'],message:other}]}));
+  const initial={...reply,problem_details:[]};
   let calls=0;
   c.callGeminiForPdf_=()=>JSON.stringify(++calls===1?initial:reply);
   c.getSheetHeadersBySupply_=()=>({Water:['Unit of measure']});
@@ -10332,11 +10354,34 @@ function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
   c.validateTargetSheetValues_=()=>({valid:true});
   c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
   c.logCatalogEvent_=()=>{};
-  const result=c.extractUtilityDataWithRepair_({getId:()=> 'current',getName:()=> 'invoice.pdf',
-    getBlob:()=>({})},'policy',Date.now()+120000);
+  const file={getId:()=> 'current',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/current'};
+  const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
   assert.equal(calls,3);
   assert.equal(result.validation.valid,true);
   assert.equal(result.extracted.review_issues[0].fields[0],'Unit of measure');
   assert.equal(result.extracted.sheet_values[0].value,null);
+  // Runtime diagnostics are generated after the provider's complete raw output.
+  c.callGeminiForPdf_=()=>JSON.stringify(validInvoice());
+  c.inferInvoiceFrequency_=inferCadence;
+  c.getAutomationConfig_=()=>({frequency_overrides:[]});
+  c.getConfiguredInvoiceFrequency_=()=> 'quarterly';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  const runtimeIssue=c.extractUtilityData_(file,'policy');
+  assert.equal(runtimeIssue.frequency,'');
+  assert.match(runtimeIssue.problems[0],/conflicting/);
+  assert.equal(runtimeIssue.problem_details.length,0);
+  assert.equal(c.validateExtractedUtilityDataForImport_(runtimeIssue,{acceptAccessory:true}).valid,true);
+  c.inferInvoiceFrequency_=()=>{};
+  calls=0;
+  c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(initial);};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'ERROR');
+  assert.equal(calls,3);
+  assert.deepEqual(mutations,[]);
 }
 testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair();

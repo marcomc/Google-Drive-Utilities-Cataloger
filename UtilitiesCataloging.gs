@@ -1026,14 +1026,21 @@ function getAccessoryInvoiceHeaderRole_(header) {
 
 /** Structured issues permit accessory review only; unknown diagnostics stay blocking. */
 function validateInvoiceProblemDetails_(extracted) {
-  if (!Array.isArray(extracted.problem_details) || extracted.problem_details.some(function (issue) {
+  const problems = extracted.problems || [];
+  const details = extracted.problem_details;
+  if (!Array.isArray(details) || details.length !== problems.length ||
+    problems.some(function (problem) {
+      return details.filter(function (issue) {
+        return issue && issue.message === problem;
+      }).length !== 1;
+    }) || details.some(function (issue) {
     return !issue || typeof issue !== 'object' || Array.isArray(issue) ||
       !Object.keys(issue).every(function (key) { return ['code', 'fields', 'message'].indexOf(key) >= 0; }) ||
       ['missing', 'unreadable', 'ambiguous', 'conflicting'].indexOf(issue.code) < 0 ||
       !Array.isArray(issue.fields) || !issue.fields.length ||
       issue.fields.some(function (field) { return typeof field !== 'string' || !field.trim(); }) ||
       typeof issue.message !== 'string' || !issue.message.trim() ||
-      (extracted.problems || []).indexOf(issue.message) < 0;
+      problems.indexOf(issue.message) < 0;
   })) {
     throw new Error('Gemini extraction problem_details contains an invalid issue.');
   }

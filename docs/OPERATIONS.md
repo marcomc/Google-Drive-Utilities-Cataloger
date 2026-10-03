@@ -376,9 +376,15 @@ Older absent proofs still require complete current PDF and exact row validation;
 unresolved evidence or mismatched blank review cells cannot qualify.
 
 Both provider schemas require `problem_details`, including an empty array for
-no model-reported issues. Missing or malformed arrays enter the existing bounded
-schema repair path. The runtime classifies structured accessory issues after all
-essential checks.
+no model-reported issues. Raw output requires exactly one matching detail per
+model problem; missing, duplicate or orphan details enter the existing bounded
+schema repair path. Runtime diagnostics added after normalization do not require
+model-authored details. The runtime classifies structured accessory issues after
+all essential checks. Under the reviewed import contract, unresolved accessory
+cadence or supported unit/payment/note uncertainty may include unreadable,
+ambiguous or conflicting evidence: repair first, then retain the import with the
+affected value blank and an explicit review warning. Identity, monetary,
+reference-period, destination and existing-document conflicts remain blocking.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
 identity, reference dates, monetary and numeric consumption evidence, formula
 columns and unconfigured headers. Secondary accessory admission uses reviewed
@@ -458,6 +464,12 @@ HEAD and pinned version 104 matched all nine runtime files. All 16 setup fields
 and the verified HERA row were unchanged. The separate live policy update now
 requires the array even when empty; exact UTF-8 readback matched 23,300 bytes,
 SHA-256 `8f0c868aa953a0e513982ab1393c0c691968b4fbe2093508bfd7eaec23871724`.
+The one-to-one problem/detail validation closure was subsequently deployed as
+owner-only version 105. The exact uploaded entrypoints and nine runtime files
+were verified before promotion, then HEAD/pinned readback matched the source.
+All 16 setup fields, the live policy and the verified HERA row were unchanged.
+Focused/full checks and an independent convergence audit passed; model output
+with incomplete details exhausts the bounded repair without invoice mutations.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

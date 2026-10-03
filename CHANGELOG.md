@@ -31,6 +31,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   large legacy catalogs do not exhaust execution time or Script Properties.
 - Require structured problem details in both provider schemas so unresolved
   accessory diagnostics can participate in guided repair and warning imports.
+  Validate exactly one matching detail per model problem before normalization.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 
