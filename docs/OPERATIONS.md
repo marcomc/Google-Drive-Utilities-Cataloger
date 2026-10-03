@@ -392,7 +392,10 @@ reference-period, destination and existing-document conflicts remain blocking.
 Matching model detail fields take precedence over cadence-looking text. Runtime
 cadence shortcuts apply only without a matching model detail; inference and
 reviewed overrides clear a model cadence diagnostic only when all its fields
-are canonical `frequency`. Essential, mixed or unknown fields stay unresolved
+are canonical `frequency`. Exact configured frequency headers are normalized
+to that field once at extraction, before overrides and every cadence consumer;
+the existing localized alias map supplies the identity without new model
+instructions or parameters. Essential, mixed or unknown fields stay unresolved
 and blocking even after cadence is established. Structured affected fields also
 reach the repair feedback, independently of the message wording. Model
 resolution also requires code `missing`: `conflicting`, `ambiguous` and
@@ -516,6 +519,13 @@ returned the identity-valid pre-update version 109; one read-only retry observed
 110. All 16 setup fields, live policy and HERA snapshot remained unchanged.
 Focused/full checks and independent convergence audit cover partial history,
 complete-history consensus and independent ordinary-period inference.
+After explicit approval to resume, the configured diagnostic-header identity
+correction was deployed as owner-only version 111. Exact uploaded entrypoints
+and HEAD/pinned source were verified; all 16 setup fields, live policy and HERA
+snapshot remained unchanged. Focused/full checks and independent audit cover
+English/Italian configured headers through resolution, blanking and repair,
+while mixed essential fields and unconfigured names still block. Model prompts,
+schemas and parameters are unchanged.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

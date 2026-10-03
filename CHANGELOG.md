@@ -41,6 +41,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   conflicting, ambiguous or unreadable cadence stays in guided review.
 - Keep candidate-limited historical rows available for guided reading without
   using their partial cadence as deterministic consensus.
+- Normalize configured frequency-header names to the canonical diagnostic field
+  before admission, resolution and repair, without adding model instructions.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 

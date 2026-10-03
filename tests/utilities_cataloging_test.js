@@ -10581,6 +10581,47 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
     }
   }
   config.frequency_overrides=[];
+  for(const header of ['Frequency','Frequenza']) {
+    c.getLocalization_=()=>header==='Frequenza'?c.getItalianLocalization_():c.getEnglishLocalization_();
+    c.getSheetHeadersBySupply_=()=>({Water:[header]});
+    const raw={...validInvoice(),frequency:null,frequency_source_evidence:null,
+      period_start:null,period_end:null,problems:[message],
+      problem_details:[{code:'missing',fields:[header],message}],
+      sheet_values:[{header,value:'monthly'}]};
+    const contexts=[];
+    c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+      contexts.push(repair);return JSON.stringify(raw);
+    };
+    const warning=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(warning.validation.valid,true,header);
+    assert.equal(warning.aiCallCount,3);
+    assert.equal(warning.extracted.frequency,'');
+    assert.deepEqual(Array.from(warning.extracted.review_issues[0].fields),['frequency']);
+    assert.equal(warning.extracted.sheet_values[0].value,null);
+    assert.ok(contexts[1].feedback.issues[0].fields.includes('period_end'));
+    raw.period_start='2026-06-01';raw.period_end='2026-06-30';
+    const resolved=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(resolved.aiCallCount,1);
+    assert.equal(resolved.extracted.frequency,'monthly');
+    assert.equal(resolved.extracted.review_issues.length,0);
+    config.frequency_overrides=[{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}];
+    const overridden=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(overridden.aiCallCount,1);
+    assert.equal(overridden.extracted.frequency,'annual');
+    raw.problem_details[0].fields=[header,'total'];
+    const mixed=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(mixed.validation.valid,false);
+    assert.equal(mixed.aiCallCount,3);
+    assert.deepEqual(Array.from(mixed.extracted.problem_details[0].fields),['frequency','total']);
+    config.frequency_overrides=[];
+    c.getSheetHeadersBySupply_=()=>({Water:[]});
+    raw.problem_details[0].fields=[header];
+    const unconfigured=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(unconfigured.validation.valid,false);
+    assert.deepEqual(Array.from(unconfigured.extracted.problem_details[0].fields),[header]);
+    assert.deepEqual(mutations,[]);
+  }
+  c.getLocalization_=()=>c.getEnglishLocalization_();
   for(const modelDetail of [false,true]) {
     const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,
       period_start:null,period_end:null,problems:modelDetail?[message]:[],

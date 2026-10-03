@@ -1046,6 +1046,24 @@ function validateInvoiceProblemDetails_(extracted) {
   }
 }
 
+/** Resolve diagnostic field identity once, before cadence consumers. */
+function normalizeInvoiceProblemFields_(extracted, headers) {
+  if (extracted.document_type !== 'Invoice') {
+    return;
+  }
+  const aliases = getHeaderAliases_('frequency').map(normalizeHeader_);
+  const frequencyHeaders = (headers || []).filter(function (header) {
+    return aliases.indexOf(normalizeHeader_(header)) >= 0;
+  });
+  (extracted.problem_details || []).forEach(function (issue) {
+    if (issue && Array.isArray(issue.fields)) {
+      issue.fields = issue.fields.map(function (field) {
+        return frequencyHeaders.indexOf(field) >= 0 ? 'frequency' : field;
+      });
+    }
+  });
+}
+
 function getInvoiceProblemDetails_(problem, extracted) {
   return (extracted.problem_details || []).filter(function (issue) {
     return issue && issue.message === problem;
@@ -1514,7 +1532,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext,
   extracted.original_file_name = file.getName();
   let normalized;
   try {
-    normalized = normalizeExtraction_(extracted);
+    normalized = normalizeExtraction_(extracted, headersBySupply);
   } catch (error) {
     if (!isModelExtractionNormalizationError_(error)) {
       throw error;
@@ -2804,7 +2822,7 @@ function validateRawExtractionShape_(extracted) {
   }
 }
 
-function normalizeExtraction_(extracted) {
+function normalizeExtraction_(extracted, headersBySupply) {
   const normalized = extracted || {};
   // These flags are runtime conclusions, never model-provided evidence.
   ['frequency_override_authoritative_', 'frequency_inferred_',
@@ -2850,6 +2868,8 @@ function normalizeExtraction_(extracted) {
     normalized.problems.slice() : [];
   normalized.frequency_source_evidence =
     normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
+  normalizeInvoiceProblemFields_(normalized,
+    (headersBySupply || {})[normalized.supply_type] || []);
   normalizeExtractedInvoiceFrequency_(normalized);
   applyFrequencyOverride_(normalized);
   // Apply reviewed supplier defaults to their original representation before
