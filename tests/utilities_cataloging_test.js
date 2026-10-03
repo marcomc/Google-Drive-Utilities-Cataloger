@@ -10523,6 +10523,43 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
     assert.equal(calls,3);
     assert.deepEqual(mutations,[]);
   }
+  for(const code of ['missing','conflicting','ambiguous','unreadable']) {
+    for(const resolution of ['inferred','override','provenance']) {
+      config.frequency_overrides=resolution==='override'?
+        [{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}]:[];
+      const problem=resolution==='provenance'?
+        'Billing frequency value is unsupported or lacks printed provenance.':
+        'Billing frequency is missing';
+      const raw={...validInvoice(),frequency:resolution==='provenance'?'monthly':'',
+        frequency_source_evidence:null,problems:[problem],
+        problem_details:[{code,fields:['frequency'],message:problem}]};
+      const contexts=[];
+      c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+        contexts.push(repair);return JSON.stringify(raw);
+      };
+      const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+      assert.equal(result.validation.valid,true);
+      if(code==='missing') {
+        assert.equal(result.aiCallCount,1,resolution);
+        assert.equal(result.extracted.frequency,resolution==='override'?'annual':'monthly');
+        assert.equal(result.extracted.review_issues.length,0);
+        assert.equal(result.extracted.problem_details.length,0);
+        continue;
+      }
+      assert.equal(result.aiCallCount,3,code+':'+resolution);
+      assert.equal(result.extracted.frequency,'');
+      assert.equal(result.extracted.review_issues[0].code,code);
+      assert.equal(result.extracted.review_issues[0].origin,'model');
+      assert.ok(result.extracted.problems.includes(problem));
+      assert.equal(result.extracted.problem_details[0].code,code);
+      for(const repair of contexts.slice(1)) {
+        assert.equal(repair.feedback.issues[0].code,'accessory_review_required');
+        assert.ok(repair.feedback.issues[0].fields.includes('frequency'));
+        assert.equal(repair.previousExtraction.problem_details[0].code,code);
+      }
+      assert.deepEqual(mutations,[]);
+    }
+  }
   config.frequency_overrides=[];
   for(const modelDetail of [false,true]) {
     const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,

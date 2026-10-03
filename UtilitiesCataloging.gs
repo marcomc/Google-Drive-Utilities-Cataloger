@@ -1061,6 +1061,13 @@ function isCadenceOnlyInvoiceProblem_(problem, extracted) {
     details[0].fields.every(function (field) { return field === 'frequency'; });
 }
 
+/** Only structured absence can be resolved by independent cadence evidence. */
+function isResolvableMissingCadenceProblem_(problem, extracted) {
+  const details = getInvoiceProblemDetails_(problem, extracted);
+  return isCadenceOnlyInvoiceProblem_(problem, extracted) &&
+    (details.length === 0 || details[0].code === 'missing');
+}
+
 function classifyAccessoryInvoiceProblem_(problem, extracted) {
   if (!extracted || extracted.document_type !== 'Invoice') {
     return null;
@@ -5343,7 +5350,7 @@ function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
   const hasAuthoritativeResolution = extracted &&
     (extracted.frequency_inferred_ === true ||
       extracted.frequency_override_authoritative_ === true);
-  if (!extracted || !isCadenceOnlyInvoiceProblem_(problem, extracted) ||
+  if (!extracted || !isResolvableMissingCadenceProblem_(problem, extracted) ||
     extracted.frequency_source_evidence === 'printed' ||
     !hasAuthoritativeResolution ||
     (extracted.frequency_override_authoritative_ !== true &&
@@ -5364,7 +5371,7 @@ function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
 
 function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
   extracted.problems = (extracted.problems || []).filter(function (problem) {
-    return !isCadenceOnlyInvoiceProblem_(problem, extracted) ||
+    return !isResolvableMissingCadenceProblem_(problem, extracted) ||
       !isMissingFrequencyProblem_(problem) &&
       !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted);
   });

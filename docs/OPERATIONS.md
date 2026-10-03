@@ -394,7 +394,10 @@ cadence shortcuts apply only without a matching model detail; inference and
 reviewed overrides clear a model cadence diagnostic only when all its fields
 are canonical `frequency`. Essential, mixed or unknown fields stay unresolved
 and blocking even after cadence is established. Structured affected fields also
-reach the repair feedback, independently of the message wording.
+reach the repair feedback, independently of the message wording. Model
+resolution also requires code `missing`: `conflicting`, `ambiguous` and
+`unreadable` cadence diagnostics survive inference, reviewed overrides and
+provenance exemptions, then enter guided repair and eventual blank-cell review.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
 identity, reference dates, monetary and numeric consumption evidence, formula
 columns and unconfigured headers. Secondary accessory admission uses reviewed
@@ -498,6 +501,12 @@ version 108 after focused and full validation passed. Matching structured fields
 reach the existing feedback path even when the prose describes cadence.
 Exact uploaded entrypoints and HEAD/pinned source were verified; all 16 setup
 fields, live policy and the HERA spreadsheet snapshot remain unchanged.
+The structured-code resolution recovery was deployed as owner-only version 109
+with exact uploaded entrypoints and HEAD/pinned runtime source verified. All 16
+setup fields, live policy and HERA snapshot remained unchanged. The four-code
+matrix across inference, override and provenance resolves only missing cadence;
+other codes retain guided repair and a blank-cell review warning. Focused/full
+checks and the independent recovery audit passed.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as
