@@ -378,7 +378,11 @@ unresolved evidence or mismatched blank review cells cannot qualify.
 Both provider schemas require `problem_details`, including an empty array for
 no model-reported issues. Raw output requires exactly one matching detail per
 model problem; missing, duplicate or orphan details enter the existing bounded
-schema repair path. Runtime diagnostics added after normalization do not require
+schema repair path. The same raw boundary enforces the shared schema's full
+required-field list and rejects missing billing-cycle classifications, with the
+affected field in repair feedback. Nullable fields may explicitly return null.
+The inline prompt example covers every schema-required key. Runtime diagnostics
+added after normalization do not require
 model-authored details. The runtime classifies structured accessory issues after
 all essential checks. Under the reviewed import contract, unresolved accessory
 cadence or supported unit/payment/note uncertainty may include unreadable,
@@ -470,6 +474,12 @@ were verified before promotion, then HEAD/pinned readback matched the source.
 All 16 setup fields, the live policy and the verified HERA row were unchanged.
 Focused/full checks and an independent convergence audit passed; model output
 with incomplete details exhausts the bounded repair without invoice mutations.
+The complete raw required-shape correction was deployed as owner-only version
+106. Exact uploaded entrypoints and all nine files were verified before
+promotion; HEAD and pinned readback matched the runtime source. Setup's 16 fields,
+live policy and the verified HERA row remained unchanged. Focused/full gates and
+independent recovery audit passed, including every required-field omission,
+nullable compatibility, prompt example parity and bounded no-mutation exhaustion.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

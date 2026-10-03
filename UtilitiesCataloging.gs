@@ -1567,7 +1567,7 @@ function markInvalidExtractionOutput_(error) {
   marked.extractionIssueCode = /^Invalid Gemini JSON:/.test(marked.message) ?
     'invalid_extraction_json' : 'invalid_extraction_schema';
   const fieldMatch = marked.message.match(
-    /(?:invalid type|invalid date):\s*([a-z][a-z0-9_]*)/i
+    /(?:missing required field|invalid type|invalid date):\s*([a-z][a-z0-9_]*)/i
   );
   marked.extractionFields = fieldMatch ? [fieldMatch[1]] : [];
   return marked;
@@ -2574,6 +2574,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "reference_year": 2026,',
     '  "reference_month": "01",',
     '  "frequency": "text or null",',
+    '  "billing_cycle_kind": "unknown",',
     '  "frequency_source_evidence": "printed or null",',
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
@@ -2686,6 +2687,12 @@ function validateRawExtractionShape_(extracted) {
   if (!extracted || typeof extracted !== 'object' || Array.isArray(extracted)) {
     throw new Error('Gemini extraction must be a JSON object.');
   }
+  buildExtractionResponseSchema_().required.forEach(function (field) {
+    if (!Object.prototype.hasOwnProperty.call(extracted, field) ||
+      extracted[field] === undefined) {
+      throw new Error('Gemini extraction missing required field: ' + field);
+    }
+  });
   [
     'document_type',
     'supplier',
@@ -2754,8 +2761,7 @@ function validateRawExtractionShape_(extracted) {
     })) {
     throw new Error('Gemini extraction problems must be an array of strings.');
   }
-  if (extracted.billing_cycle_kind !== undefined &&
-    ['ordinary', 'adjustment', 'unknown'].indexOf(extracted.billing_cycle_kind) < 0) {
+  if (['ordinary', 'adjustment', 'unknown'].indexOf(extracted.billing_cycle_kind) < 0) {
     throw new Error('Gemini extraction billing_cycle_kind is invalid.');
   }
   validateInvoiceProblemDetails_(extracted);

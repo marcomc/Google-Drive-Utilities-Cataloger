@@ -92,6 +92,7 @@ function validInvoice() {
     frequency_source_evidence: 'printed',
     period_start: '2026-06-01',
     period_end: '2026-06-30',
+    consumption_description: null,
     cost_consumption: 10,
     cost_non_consumption: 2,
     vat: 2.64,
@@ -6589,6 +6590,12 @@ function testPromptKeepsHeadersScopedBySupply() {
   }, 'trusted policy');
 
   assert.match(prompt, /matching canonical supply entry/);
+  const exampleStart=prompt.indexOf('{\n  "document_type"');
+  assert.ok(exampleStart>=0);
+  const example=JSON.parse(prompt.slice(exampleStart,prompt.indexOf('\n}',exampleStart)+2));
+  for(const field of context.buildExtractionResponseSchema_().required) {
+    assert.ok(Object.prototype.hasOwnProperty.call(example,field),field);
+  }
   assert.match(prompt, /"problem_details": \[\{"code":"missing","fields":\["exact affected field"\],"message":"observed problems"\}\]/);
   assert.match(prompt, /Always return problem_details, using an empty array when there are no problems/);
   assert.match(prompt, /"contract_number": "printed contract number or null"/);
@@ -10385,3 +10392,74 @@ function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
   assert.deepEqual(mutations,[]);
 }
 testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair();
+
+function testRawExtractionRequiresCompleteDeclaredShape() {
+  const c=loadCataloger();
+  const schema=c.buildExtractionResponseSchema_();
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(validInvoice()));
+  for(const field of schema.required) {
+    const missing={...validInvoice()};delete missing[field];
+    assert.throws(()=>c.validateRawExtractionShape_(missing),/Gemini extraction/,field);
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),[field]:undefined}),
+      /missing required field/,field);
+  }
+  for(const field of schema.required.filter(field=>
+    Array.isArray(schema.properties[field].type)&&schema.properties[field].type.includes('null'))) {
+    assert.doesNotThrow(()=>c.validateRawExtractionShape_({...validInvoice(),[field]:null}),field);
+  }
+  for(const kind of ['ordinary','adjustment','unknown']) {
+    assert.doesNotThrow(()=>c.validateRawExtractionShape_({...validInvoice(),billing_cycle_kind:kind}));
+  }
+  for(const kind of [undefined,null,'',0,'regular']) {
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),billing_cycle_kind:kind}),
+      /billing_cycle_kind/);
+  }
+  const missing={...validInvoice()};delete missing.billing_cycle_kind;
+  let calls=0;
+  const repairs=[];
+  c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+    repairs.push(repair);return JSON.stringify(++calls===1?missing:validInvoice());
+  };
+  c.getSheetHeadersBySupply_=()=>({Water:[]});
+  c.normalizeExtraction_=data=>({...data});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>[];
+  c.getAutomationConfig_=()=>({frequency_overrides:[]});
+  c.getConfiguredInvoiceFrequency_=()=> '';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  c.applySupplierFieldDefaults_=()=>{};
+  c.normalizeSheetValues_=values=>values;
+  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+    subscriberIdentifierProblemPatterns:{}});
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  const file={getId:()=> 'cycle-kind',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/cycle-kind'};
+  assert.equal(c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000).validation.valid,true);
+  assert.equal(calls,2);
+  assert.equal(repairs[1].feedback.issues[0].code,'invalid_extraction_schema');
+  assert.deepEqual(Array.from(repairs[1].feedback.issues[0].fields),['billing_cycle_kind']);
+  const ordinary={...validInvoice(),frequency:'',frequency_source_evidence:null,
+    period_start:'2026-05-01',period_end:'2026-08-31',reference_month:'08',issue_date:'2026-10-01'};
+  const missingOrdinary={...ordinary};delete missingOrdinary.billing_cycle_kind;
+  calls=0;
+  c.getConfiguredInvoiceFrequency_=()=> 'quarterly';
+  c.callGeminiForPdf_=()=>JSON.stringify(++calls===1?missingOrdinary:ordinary);
+  const conflict=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+  assert.equal(calls,3);
+  assert.equal(conflict.validation.valid,true);
+  assert.equal(conflict.extracted.frequency,'');
+  assert.match(conflict.extracted.review_issues[0].message,/conflicting/);
+  calls=0;
+  c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(missing);};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'ERROR');
+  assert.equal(calls,3);
+  assert.deepEqual(mutations,[]);
+}
+testRawExtractionRequiresCompleteDeclaredShape();
