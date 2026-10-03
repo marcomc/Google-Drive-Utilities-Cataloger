@@ -361,15 +361,19 @@ reason, and recommended action rather than inventing a comparison.
 Confirmed duplicates, archived non-invoices, provider deferrals and dashboard
 refresh warnings retain their existing separate outcomes. Scheduled paths do not
 reprocess a completed review import. Review it through the report's row link;
-manual deletion of the row is the user's choice. Review outcomes are stored
-separately from intake retry state so archived imports awaiting review are not
-used as historical guidance. Legacy rows without a positive completed-import
-record are excluded. To adopt one, the owner can call
+manual deletion of the row is the user's choice. Outcome proof is stored
+separately from intake retry state in a bounded cache
+of the 128 most recently recorded documents, with an index capped at 8 KiB.
+Eviction removes proof; absent proof never authorizes historical guidance.
+Archived imports awaiting review and legacy rows without positive completed-import
+proof are excluded. To adopt one, the owner can call
 `verifyHistoricalInvoiceForRepair(fileId)`: it re-extracts the archived PDF within
 the normal call/deadline limits, requires no unresolved issues, exactly one
 source-linked matching row, and successful cell verification before recording
-`IMPORTED`. It never inserts, rewrites, renames or moves an invoice. Pending
-review rows cannot be adopted through this operation.
+`IMPORTED`. It never inserts, rewrites, renames or moves an invoice. Retained
+pending-review proofs cannot be adopted through this operation.
+Older absent proofs still require complete current PDF and exact row validation;
+unresolved evidence or mismatched blank review cells cannot qualify.
 
 The runtime classifies structured accessory issues after all essential checks.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
@@ -384,7 +388,8 @@ For unprinted cadence, the runtime recognizes `monthly`, `bimonthly`, `quarterly
 and `four_monthly` from complete calendar or anniversary-aligned ordinary
 periods. The Italian sheet value for the latter is `quadrimestrale`.
 Adjustment/unknown period roles cannot establish cadence from duration alone.
-A formula-free frequency in metadata row 1 can corroborate the current period;
+A formula-free frequency in the verified managed metadata row immediately
+above the detected header can corroborate the current period;
 contradictions with printed cadence, period, or historical consensus leave the
 frequency blank and require guided review. Reviewed configuration overrides
 retain their explicit installation precedence.
@@ -398,6 +403,10 @@ and monetary readback. Legacy rows require explicit PDF/row revalidation through
 insufficient. Historical text is bounded reference data, never instructions;
 transaction values always come from the current PDF. The existing maximum of
 three extraction cycles and one absolute deadline applies to all repairs.
+At most 24 relevant historical candidates are inspected per context, including
+rejected candidates; fewer than three accepted rows may therefore be returned.
+The context explicitly reports a candidate or deadline limit, and the model
+must continue using current PDF evidence rather than wait for legacy adoption.
 
 On 2026-10-03, the installation's separately stored Drive policy was updated
 for structured review outcomes, ordinary four-month periods, reviewed accessory
@@ -431,6 +440,13 @@ VAT 4.27 and total 48.94. Drive readback confirmed the same untrashed PDF was
 renamed and moved out of intake into the configured archive. The completion and
 `report-email-sent` events share one Apps Script process ID under `0.7.0`;
 mailbox receipt was not independently inspected.
+The complete remote-review closure batch was then deployed as owner-only
+version 103. Exact uploaded entrypoints and all nine runtime files were checked
+before promotion; post-update HEAD/pinned readback matched the final source.
+Setup's 16 fields were unchanged, and post-deployment Sheets readback was
+identical to the verified imported invoice. The closure tests cover migrated
+metadata controls, rejected-candidate limits, bounded proof migration and
+interrupted persistence; independent delta audit found no contract violation.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as

@@ -26,6 +26,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   attribute validator-generated diagnostics to extraction validation.
 - Check configured sheet cadence against current evidence rather than silently
   replacing a contradictory period or explicitly printed frequency.
+- Read configured cadence from the verified metadata row in migrated layouts;
+  bound rejected historical candidates and retained invoice outcome proof so
+  large legacy catalogs do not exhaust execution time or Script Properties.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 

@@ -160,7 +160,7 @@ function verifyHistoricalInvoiceForRepair(fileId) {
     verifyImportedRow_(duplicate.sheet.sheet, duplicate.sheet.row,
       getSheetLayout_(duplicate.sheet.sheet), file, analysis.extracted);
     assertExtractionRepairBudget_(file, deadlineAt, analysis.aiCallCount, analysis.validation);
-    properties.setProperty(key, 'IMPORTED');
+    recordInvoiceReviewOutcome_(fileId, 'IMPORTED', properties);
     return { status: 'VERIFIED', aiCallCount: analysis.aiCallCount };
   });
 }
@@ -1165,6 +1165,10 @@ function buildInvoiceRepairSupplyContext_(extracted, deadlineAt) {
   const properties = PropertiesService.getScriptProperties();
   const root = DriveApp.getFolderById(getRootFolderId_());
   for (let index = 0; index < candidates.length && context.previousInvoices.length < 3; index += 1) {
+    if (index >= CONFIG.EXTRACTION_HISTORY_MAX_CANDIDATES) {
+      context.state = 'history-candidate-limited';
+      break;
+    }
     if (Date.now() + CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS >= deadlineAt) {
       context.state = 'history-budget-limited';
       break;
@@ -5824,7 +5828,8 @@ function getConfiguredInvoiceFrequency_(extracted) {
     return '';
   }
   const layout = getSheetLayout_(sheet);
-  if (layout.headerRow <= 1) {
+  if (layout.headerRow <= 1 ||
+    !hasManagedServiceIdentityMetadata_(sheet, layout, extracted.supply_type)) {
     return '';
   }
   const identity = getServiceIdentityControls_(sheet, layout);
@@ -5836,7 +5841,7 @@ function getConfiguredInvoiceFrequency_(extracted) {
   if (!column) {
     return '';
   }
-  const cell = sheet.getRange(1, column);
+  const cell = sheet.getRange(layout.headerRow - 1, column);
   if (typeof cell.getFormula !== 'function' || cell.getFormula() ||
     typeof cell.getDisplayValue !== 'function') {
     return '';
@@ -6109,10 +6114,48 @@ function recordIntakeFileOutcome_(state, file, result) {
   state[file.getId()] = outcome;
 }
 
+/** Bounded proof cache, newest first. Eviction never grants import eligibility. */
+function recordInvoiceReviewOutcome_(fileId, status, scriptProperties) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(fileId) ||
+    ['IMPORTED', 'IMPORTED NEEDS REVIEW', 'IMPORTED WITH WARNINGS'].indexOf(status) < 0) {
+    throw new Error('Invalid invoice outcome proof.');
+  }
+  const properties = scriptProperties || PropertiesService.getScriptProperties();
+  const prefix = CONFIG.PROPERTY_KEYS.INVOICE_REVIEW_OUTCOME_PREFIX;
+  const indexKey = CONFIG.PROPERTY_KEYS.INVOICE_REVIEW_OUTCOME_INDEX;
+  const values = properties.getProperties();
+  const existing = Object.keys(values).filter(function (key) {
+    return key !== indexKey && key.indexOf(prefix) === 0;
+  }).map(function (key) { return key.slice(prefix.length); });
+  let prior = [];
+  try {
+    const decoded = JSON.parse(values[indexKey] || '[]');
+    prior = Array.isArray(decoded) ? decoded : [];
+  } catch (error) {
+    // Ordering can be reconstructed from existing proof; it grants no new proof.
+  }
+  const order = [fileId].concat(prior, existing.sort()).filter(function (id, index, all) {
+    return typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) &&
+      (id === fileId || existing.indexOf(id) >= 0) && all.indexOf(id) === index;
+  }).slice(0, CONFIG.MAX_INVOICE_OUTCOME_MARKERS);
+  while (Utilities.newBlob(JSON.stringify(order)).getBytes().length >
+    CONFIG.MAX_INVOICE_OUTCOME_INDEX_BYTES) {
+    order.pop();
+  }
+  existing.forEach(function (id) {
+    if (order.indexOf(id) < 0) {
+      properties.deleteProperty(prefix + id);
+    }
+  });
+  // Prune and checkpoint the bounded index before adding proof. Interrupted
+  // index writes leave missing proof ineligible; the import journal stays active.
+  properties.setProperty(indexKey, JSON.stringify(order));
+  properties.setProperty(prefix + fileId, status);
+}
+
 function persistCatalogResult_(state, file, rootFolder, result) {
   if (['IMPORTED', 'IMPORTED NEEDS REVIEW', 'IMPORTED WITH WARNINGS'].indexOf(result.status) >= 0) {
-    PropertiesService.getScriptProperties().setProperty(
-      CONFIG.PROPERTY_KEYS.INVOICE_REVIEW_OUTCOME_PREFIX + file.getId(), result.status);
+    recordInvoiceReviewOutcome_(file.getId(), result.status);
   }
   updateIntakeStateForResult_(state, file, rootFolder, result);
   if (!isGeminiOverloadDeferredResult_(result)) {

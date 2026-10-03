@@ -9953,6 +9953,31 @@ function testVerifiedHistoryIsRecentIndependentAndExcludesReviewRows() {
   const bounded = context.buildInvoiceRepairSupplyContext_(invoice,Date.now());
   assert.equal(bounded.state,'history-budget-limited');
   assert.equal(bounded.previousInvoices.length,0);
+  // Rejected legacy candidates consume the scan cap too, so repair can proceed.
+  rows.length = 0;
+  for (const key of Object.keys(properties)) delete properties[key];
+  for (let i = 0; i < 200; i += 1) {
+    rows.push(['SUPPLIER','quadrimestrale','2025-01-01',`LEGACY-${i}`,
+      'Avery North','Cedar Meridian Boulevard 125 Rivermouth',`source-${i}`,2,12,10]);
+  }
+  sheet.getLastRow = () => rows.length + 2;
+  let sourceReads = 0;
+  context.getFileFromSourceCell_ = cell => {
+    sourceReads += 1;
+    return {getId:()=> `source-${cell.row-3}`,isTrashed:()=>false};
+  };
+  const candidateLimit = vm.runInContext('CONFIG.EXTRACTION_HISTORY_MAX_CANDIDATES',context);
+  const legacyBound = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(legacyBound.state,'history-candidate-limited');
+  assert.equal(legacyBound.previousInvoices.length,0);
+  assert.equal(sourceReads,candidateLimit);
+  properties['INVOICE_REVIEW_OUTCOME_source-0']='IMPORTED';
+  properties['INVOICE_REVIEW_OUTCOME_source-1']='IMPORTED';
+  sourceReads = 0;
+  const partial = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(partial.state,'history-candidate-limited');
+  assert.equal(partial.previousInvoices.length,2);
+  assert.equal(sourceReads,candidateLimit);
 }
 
 function testImportedReviewReportPersistenceAndNoScheduledRetry() {
@@ -10022,6 +10047,7 @@ function testHistoricalVerificationRequiresSourceAndRowProof() {
   context.getRootFolderId_ = () => 'root';
   context.DriveApp = {getFolderById:()=>({}),getFileById:()=>file};
   context.PropertiesService = {getScriptProperties:()=>({getProperty:k=>properties[k]||'',
+    getProperties:()=>({...properties}),deleteProperty:k=>{delete properties[k];},
     setProperty:(k,v)=>{properties[k]=v;}})};
   context.isFileInFolder_ = () => false;
   context.hasMutationJournal_ = () => false;
@@ -10196,3 +10222,80 @@ function testPrintedCadenceContradictionsReachValidationAndSheet() {
   assert.equal(adjustment.problems.length,0);
 }
 testPrintedCadenceContradictionsReachValidationAndSheet();
+
+function testConfiguredCadenceUsesVerifiedManagedMetadataRow() {
+  for (const headerRow of [2,11]) {
+    const c=loadCataloger();
+    const invoice=validInvoice();
+    const fields={1:'Controllo fornitura',5:invoice.account_holder,6:invoice.address_evidence,
+      11:'quadrimestrale'};
+    let formula='';
+    const reads=[];
+    const sheet={getName:()=> 'Water',getRange:(row,column)=>{
+      reads.push([row,column]);
+      return {getDisplayValue:()=>row===headerRow-1?(fields[column]||''):
+        row===1?'monthly':'',getFormula:()=>column===11?formula:''};
+    }};
+    c.getAutomationConfig_=()=>({sheet_by_supply:{Water:'Water'}});
+    c.getSpreadsheetId_=()=> 'spreadsheet';
+    c.SpreadsheetApp.openById=()=>({getSheetByName:()=>sheet});
+    c.getSheetLayout_=()=>({headerRow,lookup:{frequency:11,intestatario:5,indirizzo:6}});
+    c.getHeaderAliases_=key=>({frequency:['Frequency'],accountHolder:['Intestatario'],
+      serviceAddress:['Indirizzo']}[key]||[]);
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'four_monthly');
+    assert.ok(reads.some(([row,column])=>row===headerRow-1&&column===11));
+    if(headerRow===11)assert.equal(reads.some(([row])=>row===1),false);
+    formula='=some_formula';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+    formula='';fields[1]='User presentation';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+    fields[1]='Controllo fornitura';fields[5]='Different holder';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+  }
+}
+testConfiguredCadenceUsesVerifiedManagedMetadataRow();
+
+function testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites() {
+  const c=loadCataloger();
+  const prefix='INVOICE_REVIEW_OUTCOME_';
+  const initial={unrelated:'preserved'};
+  for(let i=0;i<300;i+=1)initial[prefix+`legacy-${String(i).padStart(3,'0')}`]=
+    i%2?'IMPORTED':'IMPORTED NEEDS REVIEW';
+  const {store,properties}=installScriptPropertyStore(c,initial);
+  const limit=vm.runInContext('CONFIG.MAX_INVOICE_OUTCOME_MARKERS',c);
+  const bytes=vm.runInContext('CONFIG.MAX_INVOICE_OUTCOME_INDEX_BYTES',c);
+  c.recordInvoiceReviewOutcome_('fresh','IMPORTED',properties);
+  assert.equal(store.unrelated,'preserved');
+  assert.equal(store[prefix+'fresh'],'IMPORTED');
+  assert.equal(Object.keys(store).filter(k=>k.startsWith(prefix)).length,limit);
+  assert.equal(JSON.parse(store.INVOICE_OUTCOME_INDEX)[0],'fresh');
+  assert.equal(store[prefix+'legacy-299'],undefined); // absent proof stays ineligible
+  for(let i=0;i<200;i+=1)c.recordInvoiceReviewOutcome_(`new-${i}`,'IMPORTED',properties);
+  assert.equal(Object.keys(store).filter(k=>k.startsWith(prefix)).length,limit);
+  assert.equal(store[prefix+'fresh'],undefined);
+  assert.ok(Buffer.byteLength(store.INVOICE_OUTCOME_INDEX,'utf8')<=bytes);
+  // Byte limit also applies when valid source identifiers reach their length limit.
+  for(let i=0;i<limit;i+=1)c.recordInvoiceReviewOutcome_(
+    String(i).padStart(128,'x'),'IMPORTED NEEDS REVIEW',properties);
+  assert.ok(Buffer.byteLength(store.INVOICE_OUTCOME_INDEX,'utf8')<=bytes);
+  assert.ok(Object.keys(store).filter(k=>k.startsWith(prefix)).length<limit);
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('fresh','ERROR',properties),/Invalid/);
+  const originalSet=properties.setProperty;
+  properties.setProperty=(key,value)=>{
+    if(key==='INVOICE_OUTCOME_INDEX')throw new Error('index unavailable');
+    originalSet(key,value);
+  };
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('not-written','IMPORTED',properties),/index unavailable/);
+  assert.equal(store[prefix+'not-written'],undefined);
+  properties.setProperty=(key,value)=>{
+    if(key===prefix+'not-written')throw new Error('marker unavailable');
+    originalSet(key,value);
+  };
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('not-written','IMPORTED',properties),/marker unavailable/);
+  assert.equal(store[prefix+'not-written'],undefined);
+  properties.setProperty=originalSet;
+  c.recordInvoiceReviewOutcome_('resumed','IMPORTED WITH WARNINGS',properties);
+  assert.equal(JSON.parse(store.INVOICE_OUTCOME_INDEX).includes('not-written'),false);
+  assert.equal(store[prefix+'resumed'],'IMPORTED WITH WARNINGS');
+}
+testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites();
