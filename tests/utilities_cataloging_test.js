@@ -10463,3 +10463,88 @@ function testRawExtractionRequiresCompleteDeclaredShape() {
   assert.deepEqual(mutations,[]);
 }
 testRawExtractionRequiresCompleteDeclaredShape();
+
+function testCadenceTextCannotOverrideStructuredEssentialFields() {
+  const c=loadCataloger();
+  const message='Billing frequency could not be established from the billed period or prior invoices.';
+  const candidate={...validInvoice(),frequency:'',period_start:null,period_end:null,
+    problems:[message],problem_details:[{code:'missing',fields:['total'],message}]};
+  c.validateRawExtractionShape_(candidate);
+  assert.equal(c.classifyAccessoryInvoiceProblem_(message,candidate),null);
+  c.getLocalization_=()=>c.getEnglishLocalization_();
+  const config={locale:'en',canonical_suppliers:['SUPPLIER'],canonical_supplies:['Water'],
+    supplier_aliases:{},supply_aliases:{},frequency_overrides:[]};
+  c.getAutomationConfig_=()=>config;
+  c.classifyAddress_=()=> 'import';
+  c.getSheetHeadersBySupply_=()=>({Water:[]});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>[];
+  c.getConfiguredInvoiceFrequency_=()=> '';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  c.applySupplierFieldDefaults_=()=>{};
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  const file={getId:()=> 'cadence-fields',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/cadence-fields'};
+  for(const scenario of [
+    {fields:['total'],resolution:'none',message},
+    {fields:['period_end'],resolution:'inferred',message},
+    {fields:['frequency','total'],resolution:'override',message:'Frequenza non trovata in fattura.'},
+    {fields:['total'],resolution:'provenance',
+      message:'Billing frequency value is unsupported or lacks printed provenance.'},
+    {fields:['Unconfigured'],resolution:'none',message}
+  ]) {
+    config.frequency_overrides=scenario.resolution==='override'?
+      [{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}]:[];
+    const raw={...validInvoice(),frequency:scenario.resolution==='provenance'?'monthly':'',
+      frequency_source_evidence:null,problems:[scenario.message],
+      problem_details:[{code:'missing',fields:scenario.fields,message:scenario.message}]};
+    if(scenario.resolution==='none'){raw.period_start=null;raw.period_end=null;}
+    let calls=0;
+    c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(raw);};
+    const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(calls,3,scenario.resolution);
+    assert.equal(result.validation.valid,false,scenario.resolution);
+    assert.equal(result.validation.code,'model_reported_blocking_problems');
+    for(const field of c.normalizeExtractionRepairFields_(scenario.fields)) {
+      assert.ok(result.validation.fields.includes(field),field);
+    }
+    assert.ok(result.extracted.problems.includes(scenario.message));
+    assert.deepEqual(Array.from(result.extracted.problem_details[0].fields),scenario.fields);
+    assert.equal(c.isInformationalMissingFrequencyProvenanceProblem_(scenario.message,result.extracted),false);
+    calls=0;
+    assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'BLOCKED NEEDS REVIEW');
+    assert.equal(calls,3);
+    assert.deepEqual(mutations,[]);
+  }
+  config.frequency_overrides=[];
+  for(const modelDetail of [false,true]) {
+    const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,
+      period_start:null,period_end:null,problems:modelDetail?[message]:[],
+      problem_details:modelDetail?[{code:'missing',fields:['frequency'],message}]:[]};
+    c.callGeminiForPdf_=()=>JSON.stringify(raw);
+    const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(result.validation.valid,true,JSON.stringify(result.validation));
+    assert.equal(result.extracted.review_issues[0].origin,modelDetail?'model':'runtime');
+    assert.equal(result.extracted.frequency,'');
+    raw.period_start='2026-06-01';raw.period_end='2026-06-30';
+    const resolved=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(resolved.aiCallCount,1);
+    assert.equal(resolved.validation.valid,true);
+    assert.equal(resolved.extracted.frequency,'monthly');
+    assert.equal(resolved.extracted.review_issues.length,0);
+  }
+  for(const fields of [[],null,['period_end']]) {
+    const diagnostic={...candidate,frequency:'monthly',frequency_inferred_:true,
+      frequency_provenance_missing_:true,problem_details:[{code:'missing',fields,message}]};
+    c.reconcileResolvedInvoiceFrequencyProblems_(diagnostic);
+    assert.ok(diagnostic.problems.includes(message));
+  }
+}
+testCadenceTextCannotOverrideStructuredEssentialFields();

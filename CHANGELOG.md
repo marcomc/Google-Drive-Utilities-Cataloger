@@ -34,6 +34,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   Validate exactly one matching detail per model problem before normalization.
 - Reject omitted schema-required response fields before inference, including
   billing-cycle classifications, and identify the affected field for repair.
+- Preserve model-reported essential uncertainty even when its message mentions
+  cadence; resolving cadence cannot clear other structured affected fields.
+  Carry those affected fields through the guided repair feedback.
 
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 

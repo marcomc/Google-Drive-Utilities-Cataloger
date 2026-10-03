@@ -1046,6 +1046,21 @@ function validateInvoiceProblemDetails_(extracted) {
   }
 }
 
+function getInvoiceProblemDetails_(problem, extracted) {
+  return (extracted.problem_details || []).filter(function (issue) {
+    return issue && issue.message === problem;
+  });
+}
+
+/** A cadence resolution cannot resolve other structured affected fields. */
+function isCadenceOnlyInvoiceProblem_(problem, extracted) {
+  const details = getInvoiceProblemDetails_(problem, extracted);
+  return details.length === 0 || details.length === 1 &&
+    ['missing', 'unreadable', 'ambiguous', 'conflicting'].indexOf(details[0].code) >= 0 &&
+    Array.isArray(details[0].fields) && details[0].fields.length > 0 &&
+    details[0].fields.every(function (field) { return field === 'frequency'; });
+}
+
 function classifyAccessoryInvoiceProblem_(problem, extracted) {
   if (!extracted || extracted.document_type !== 'Invoice') {
     return null;
@@ -1056,14 +1071,14 @@ function classifyAccessoryInvoiceProblem_(problem, extracted) {
     'Billing frequency evidence is conflicting and was left blank.',
     'Billing frequency value is unsupported or lacks printed provenance.'
   ];
-  if (cadenceMessages.indexOf(problem) >= 0 || isMissingFrequencyProblem_(problem)) {
+  const details = getInvoiceProblemDetails_(problem, extracted);
+  const cadenceProblem = cadenceMessages.indexOf(problem) >= 0 || isMissingFrequencyProblem_(problem);
+  if (details.length === 0 && cadenceProblem) {
     return { code: problem === cadenceMessages[2] ? 'conflicting' : 'missing',
       fields: ['frequency'], message: problem, origin: 'runtime' };
   }
-  const details = (extracted.problem_details || []).filter(function (issue) {
-    return issue.message === problem;
-  });
-  if (details.length !== 1 || hasCriticalInvoiceFieldMention_(problem)) {
+  if (details.length !== 1 || hasCriticalInvoiceFieldMention_(problem) &&
+    !(cadenceProblem && isCadenceOnlyInvoiceProblem_(problem, extracted))) {
     return null;
   }
   const issue = details[0];
@@ -3959,6 +3974,11 @@ function getExtractionProblemFieldsForRepair_(problems, extracted) {
     fields.push('cost_consumption', 'cost_non_consumption', 'vat', 'total');
   }
   (problems || []).forEach(function (problem) {
+    getInvoiceProblemDetails_(problem, extracted).forEach(function (issue) {
+      if (Array.isArray(issue.fields)) {
+        fields.push.apply(fields, issue.fields);
+      }
+    });
     if (problem === 'Billing frequency evidence is conflicting and was left blank.') {
       fields.push('frequency', 'period_start', 'period_end',
         'reference_year', 'reference_month');
@@ -5323,7 +5343,8 @@ function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
   const hasAuthoritativeResolution = extracted &&
     (extracted.frequency_inferred_ === true ||
       extracted.frequency_override_authoritative_ === true);
-  if (!extracted || extracted.frequency_source_evidence === 'printed' ||
+  if (!extracted || !isCadenceOnlyInvoiceProblem_(problem, extracted) ||
+    extracted.frequency_source_evidence === 'printed' ||
     !hasAuthoritativeResolution ||
     (extracted.frequency_override_authoritative_ !== true &&
       extracted.frequency_provenance_missing_ !== true)) {
@@ -5343,7 +5364,8 @@ function isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) {
 
 function reconcileResolvedInvoiceFrequencyProblems_(extracted) {
   extracted.problems = (extracted.problems || []).filter(function (problem) {
-    return !isMissingFrequencyProblem_(problem) &&
+    return !isCadenceOnlyInvoiceProblem_(problem, extracted) ||
+      !isMissingFrequencyProblem_(problem) &&
       !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted);
   });
 }

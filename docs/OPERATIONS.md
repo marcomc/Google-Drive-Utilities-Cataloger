@@ -389,6 +389,12 @@ cadence or supported unit/payment/note uncertainty may include unreadable,
 ambiguous or conflicting evidence: repair first, then retain the import with the
 affected value blank and an explicit review warning. Identity, monetary,
 reference-period, destination and existing-document conflicts remain blocking.
+Matching model detail fields take precedence over cadence-looking text. Runtime
+cadence shortcuts apply only without a matching model detail; inference and
+reviewed overrides clear a model cadence diagnostic only when all its fields
+are canonical `frequency`. Essential, mixed or unknown fields stay unresolved
+and blocking even after cadence is established. Structured affected fields also
+reach the repair feedback, independently of the message wording.
 Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
 identity, reference dates, monetary and numeric consumption evidence, formula
 columns and unconfigured headers. Secondary accessory admission uses reviewed
@@ -480,6 +486,18 @@ promotion; HEAD and pinned readback matched the runtime source. Setup's 16 field
 live policy and the verified HERA row remained unchanged. Focused/full gates and
 independent recovery audit passed, including every required-field omission,
 nullable compatibility, prompt example parity and bounded no-mutation exhaustion.
+The structured cadence-field authority correction was deployed as owner-only
+version 107. Exact uploaded entrypoints and nine runtime files were verified
+before promotion, with matching HEAD/pinned readback afterward. All 16 setup
+fields, the live policy and the verified HERA row remained unchanged. Frozen
+focused/full checks cover essential diagnostics through unresolved, inferred,
+override and provenance paths, with three-call blocking and zero mutations;
+runtime and frequency-only controls retain warning and resolved import behavior.
+The repair-feedback field propagation was subsequently deployed as owner-only
+version 108 after focused and full validation passed. Matching structured fields
+reach the existing feedback path even when the prose describes cadence.
+Exact uploaded entrypoints and HEAD/pinned source were verified; all 16 setup
+fields, live policy and the HERA spreadsheet snapshot remain unchanged.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as
