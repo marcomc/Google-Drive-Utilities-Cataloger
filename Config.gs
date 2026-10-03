@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.6.3',
+  APP_VERSION: '0.7.0',
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
@@ -85,6 +85,7 @@ const CONFIG = Object.freeze({
     AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
     SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
     SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE',
+    INVOICE_REVIEW_OUTCOME_PREFIX: 'INVOICE_REVIEW_OUTCOME_',
     INTAKE_FILE_STATE: 'INTAKE_FILE_STATE',
     INTAKE_FILE_STATE_PREFIX: 'INTAKE_FILE_STATE_',
     PENDING_REPORT_PREFIX: 'PENDING_REPORT_',

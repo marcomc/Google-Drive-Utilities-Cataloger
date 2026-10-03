@@ -141,11 +141,14 @@ function getEnglishLocalization_() {
       '## Maintenance', '',
       '- Put a revised profile in `Pending approval` for review; never overwrite this approved profile automatically.', ''
     ]),
+    frequencyLabels: Object.freeze({ four_monthly: 'every four months' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTED',
       IMPORTED_WITH_WARNINGS: 'IMPORTED WITH WARNINGS',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVED WITHOUT IMPORT',
       DUPLICATE: 'DUPLICATE',
+      IMPORTED_NEEDS_REVIEW: 'IMPORTED — NEEDS REVIEW',
+      BLOCKED_NEEDS_REVIEW: 'BLOCKED — NEEDS REVIEW',
       NEEDS_REVIEW: 'NEEDS REVIEW',
       ERROR: 'ERROR'
     }),
@@ -240,6 +243,7 @@ function getEnglishLocalization_() {
       month: ['month', 'reference month'],
       frequency: ['frequency'],
       unitCost: ['unit cost'],
+      netCosts: ['total costs (excl. VAT)', 'total costs excluding VAT'],
       consumptionCost: ['total consumption costs', 'consumption cost'],
       nonConsumptionCosts: ['total non-consumption costs', 'non-consumption costs'],
       vat: ['vat'],

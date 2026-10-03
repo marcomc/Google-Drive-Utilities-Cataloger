@@ -138,11 +138,14 @@ function getItalianLocalization_() {
       '## Manutenzione', '',
       '- Inserire un profilo rivisto in `In attesa di approvazione`; non sovrascrivere automaticamente il profilo approvato.', ''
     ]),
+    frequencyLabels: Object.freeze({ four_monthly: 'quadrimestrale' }),
     statusLabels: Object.freeze({
       IMPORTED: 'IMPORTATO',
       IMPORTED_WITH_WARNINGS: 'IMPORTATO CON AVVISI',
       ARCHIVED_WITHOUT_IMPORT: 'ARCHIVIATO SENZA IMPORTAZIONE',
       DUPLICATE: 'DUPLICATO',
+      IMPORTED_NEEDS_REVIEW: 'IMPORTATO — DA VERIFICARE',
+      BLOCKED_NEEDS_REVIEW: 'BLOCCATO — DA VERIFICARE',
       NEEDS_REVIEW: 'DA VERIFICARE',
       ERROR: 'ERRORE'
     }),
@@ -242,6 +245,7 @@ function getItalianLocalization_() {
       ],
       frequency: ['frequenza'],
       unitCost: ['costo unitario'],
+      netCosts: ['totale costi (escl. IVA)', 'totale costi esclusa IVA'],
       consumptionCost: ['totale costi consumo', 'costo consumi', 'costi consumo'],
       nonConsumptionCosts: ['totale costi non consumo', 'costi non consumo'],
       vat: ['iva'],
