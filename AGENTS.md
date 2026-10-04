@@ -80,6 +80,10 @@
   non-applicability. Ambiguous, unreadable, inconsistent, or mismatched values
   remain blocking; a tied historical cadence must fail closed rather than pick
   an arbitrary frequency.
+- Require every non-overridden cadence candidate, including printed cadence,
+  to pass the same configured, period, and verified-history admission check.
+  When repairing it, reopen cadence, role, and period provenance together;
+  essential uncertainty remains blocking.
 - For reviewed supplier defaults, normalize a provider's exact numeric string
   representation only in the target field and only after explicit absence
   evidence; unreadable or ambiguous evidence remains blocking.
@@ -111,6 +115,10 @@
   provider calls, increment retries only after a completed round, reserve time
   before scheduled mutations, and reset stale progress when the fingerprint
   changes; test interruption before and during each external-call sequence.
+- Exercise recovery at each durable synchronization boundary: provider write,
+  local draft, identity marker, and downloaded baseline. After a failure that
+  follows an acknowledged cloud write, reconcile without repeating that write,
+  then prove the recovered baseline supports an ordinary edit.
 - Validate the complete script-scoped Pub/Sub topic and subscription identity
   before every pull or acknowledgement. Treat an entirely absent pair as an
   unconfigured no-op where appropriate, and reject partial or mismatched state.
