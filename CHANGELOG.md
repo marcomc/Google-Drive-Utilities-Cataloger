@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-10-03 - guided invoice review and quadrimestral billing
+
+### Added
+
+- Import validated invoices with a review warning when only accessory evidence
+  remains unresolved after bounded guided extraction repair. Keep identity,
+  monetary, reference-period, destination, and duplicate conflicts blocking.
+- Provide the existing Gemini repair loop with target-sheet structure, configured
+  supply identity, and up to three recent independently verified imported rows.
+  Historical values guide re-reading; current transaction values remain PDF-only.
+- Retain imported review outcomes so scheduled paths do not reprocess warnings
+  and historical guidance excludes imports still awaiting review.
+
+### Fixed
+
+- Recognize four-month billing periods and quadrimestral historical cadence,
+  including the HERA May-August cycle, and localize its spreadsheet value.
+- Distinguish blocked review from imported review in reports and runtime state;
+  attribute validator-generated diagnostics to extraction validation.
+- Check configured sheet cadence against current evidence rather than silently
+  replacing a contradictory period or explicitly printed frequency.
+- Read configured cadence from the verified metadata row in migrated layouts;
+  bound rejected historical candidates and retained invoice outcome proof so
+  large legacy catalogs do not exhaust execution time or Script Properties.
+- Require structured problem details in both provider schemas so unresolved
+  accessory diagnostics can participate in guided repair and warning imports.
+  Validate exactly one matching detail per model problem before normalization.
+- Reject omitted schema-required response fields before inference, including
+  billing-cycle classifications, and identify the affected field for repair.
+- Preserve model-reported essential uncertainty even when its message mentions
+  cadence; resolving cadence cannot clear other structured affected fields.
+  Carry those affected fields through the guided repair feedback. Only structured
+  `missing` cadence issues may be resolved by independent cadence evidence;
+  conflicting, ambiguous or unreadable cadence stays in guided review.
+- Keep candidate-limited historical rows available for guided reading without
+  using their partial cadence as deterministic consensus.
+- Normalize configured frequency-header names to the canonical diagnostic field
+  before admission, resolution and repair, without adding model instructions.
+
 ## [0.6.3] - 2026-09-19 - enhance Gemini overload and retry handling
 
 ### Fixed

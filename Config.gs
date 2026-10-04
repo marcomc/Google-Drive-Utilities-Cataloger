@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.6.3',
+  APP_VERSION: '0.7.0',
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
@@ -41,6 +41,11 @@ const CONFIG = Object.freeze({
   GEMINI_VERTEX_THINKING_BUDGET: 4096,
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
+  // Bound remote reads independently of the three accepted historical rows.
+  EXTRACTION_HISTORY_MAX_CANDIDATES: 24,
+  // Keep outcome proof disposable and bounded; absent proof never grants history.
+  MAX_INVOICE_OUTCOME_MARKERS: 128,
+  MAX_INVOICE_OUTCOME_INDEX_BYTES: 8 * 1024,
   // Keep enough execution time to persist a retry after a model call returns.
   GEMINI_REQUEST_MIN_REMAINING_MS: 45 * 1000,
   // Reserve time to persist the per-file outcome instead of starting a repair
@@ -85,6 +90,8 @@ const CONFIG = Object.freeze({
     AUTOMATION_CONFIG_JSON: 'AUTOMATION_CONFIG_JSON',
     SUPPLIER_PROFILE_WORKSPACE_STATE: 'SUPPLIER_PROFILE_WORKSPACE_STATE',
     SUPPLIER_PROFILE_TEMPLATE_STATE: 'SUPPLIER_PROFILE_TEMPLATE_STATE',
+    INVOICE_REVIEW_OUTCOME_PREFIX: 'INVOICE_REVIEW_OUTCOME_',
+    INVOICE_REVIEW_OUTCOME_INDEX: 'INVOICE_OUTCOME_INDEX',
     INTAKE_FILE_STATE: 'INTAKE_FILE_STATE',
     INTAKE_FILE_STATE_PREFIX: 'INTAKE_FILE_STATE_',
     PENDING_REPORT_PREFIX: 'PENDING_REPORT_',

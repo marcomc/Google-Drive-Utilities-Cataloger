@@ -88,14 +88,17 @@ function validInvoice() {
     reference_year: 2026,
     reference_month: '06',
     frequency: 'monthly',
+    billing_cycle_kind: 'ordinary',
     frequency_source_evidence: 'printed',
     period_start: '2026-06-01',
     period_end: '2026-06-30',
+    consumption_description: null,
     cost_consumption: 10,
     cost_non_consumption: 2,
     vat: 2.64,
     total: 14.64,
     problems: [],
+    problem_details: [],
     sheet_values: []
   };
 }
@@ -1793,306 +1796,52 @@ function testExtractionSchemaAndCalendarValidation() {
 
 function testInvoiceFrequencyInferenceUsesPeriodAndHistory() {
   const context = loadCataloger();
-  context.getAutomationConfig_ = () => ({
-    sheet_by_supply: { Water: 'Water' },
-    canonical_suppliers: ['SUPPLIER', 'OTHER'], supplier_aliases: {}
-  });
-  context.getSpreadsheetId_ = () => 'spreadsheet-id';
-  context.getHeaderAliases_ = (key) => ({
-    supplier: ['Supplier'],
-    frequency: ['Frequency'],
-    issueDate: ['Issue date'],
-    accountHolder: ['Account holder'],
-    serviceAddress: ['Service address'],
-    sourceFile: ['Source file']
-  })[key] || [];
-  const sheet = {
-    getLastRow: () => 4,
-    getRange: () => ({
-      getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'monthly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'quarterly', '2026-08-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['OTHER', 'quarterly', '2026-06-20', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
-      ]
-    })
+  context.getHeaderAliases_ = () => ['Frequency'];
+  context.getConfiguredInvoiceFrequency_ = () => '';
+  let state = 'available';
+  let rows = [{Frequency:'monthly'}, {Frequency:'monthly'}];
+  context.buildInvoiceRepairSupplyContext_ = (_invoice, deadlineAt) => {
+    assert.equal(Number.isFinite(deadlineAt), true);
+    return {state, previousInvoices:rows};
   };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => sheet })
-  };
-  context.getSheetLayout_ = () => ({
-    headerRow: 1,
-    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder', 'Service address'],
-    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
-      'service address': 5 }
-  });
-  const extracted = {
-    ...validInvoice(),
-    issue_date: '2026-07-16',
-    period_start: '2026-06-01',
-    period_end: '2026-06-30',
-    frequency: ''
-  };
+  const extracted = {...validInvoice(), frequency:'', problems:[]};
   context.inferInvoiceFrequency_(extracted);
   assert.equal(extracted.frequency, 'monthly');
   assert.equal(context.validateExtraction_(extracted).valid, true);
-
-  const cumulativePeriod = {
-    ...extracted, period_start: '2026-05-01', frequency: '', problems: []
-  };
-  context.inferInvoiceFrequency_(cumulativePeriod);
-  assert.equal(cumulativePeriod.frequency, '');
-  const periodRepairFields = context.getExtractionProblemFieldsForRepair_(
-    cumulativePeriod.problems, cumulativePeriod);
-  for (const field of ['period_start', 'period_end', 'reference_year', 'reference_month']) {
-    assert.equal(periodRepairFields.includes(field), true);
+  const cumulative = {...extracted, period_start:'2026-05-01', frequency:'', problems:[]};
+  context.inferInvoiceFrequency_(cumulative);
+  assert.equal(cumulative.frequency, '');
+  const fields=context.getExtractionProblemFieldsForRepair_(cumulative.problems,cumulative);
+  for(const field of ['period_start','period_end','reference_year','reference_month']) {
+    assert.equal(fields.includes(field),true);
   }
-  const correctedPeriod = {
-    ...extracted, period_start: '2026-06-01', frequency: '', problems: []
-  };
-  context.preserveUnimplicatedRepairFields_(correctedPeriod, {
-    previousExtraction: cumulativePeriod,
-    feedback: { issues: [{ fields: periodRepairFields }] }
-  });
-  context.inferInvoiceFrequency_(correctedPeriod);
-  assert.equal(correctedPeriod.frequency, 'monthly');
-  assert.equal(context.validateExtraction_(correctedPeriod).valid, true);
-
-  const historyOnly = {
-    ...extracted,
-    period_start: '',
-    period_end: '',
-    frequency: ''
-  };
-  context.inferInvoiceFrequency_(historyOnly);
-  assert.equal(historyOnly.frequency, 'monthly');
-
-  const tieSheet = {
-    getLastRow: () => 3,
-    getRange: () => ({
-      getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'quarterly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
-      ]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => tieSheet })
-  };
-  const tiedHistory = {
-    ...historyOnly,
-    frequency: ''
-  };
-  context.inferInvoiceFrequency_(tiedHistory);
-  assert.equal(tiedHistory.frequency, '');
-
-  const periodWithConflictingHistory = {
-    ...tiedHistory,
-    period_start: '2026-06-01',
-    period_end: '2026-06-30',
-    frequency: '',
-    problems: []
-  };
-  context.inferInvoiceFrequency_(periodWithConflictingHistory);
-  assert.equal(periodWithConflictingHistory.frequency, '');
-  assert.match(periodWithConflictingHistory.problems.join(' '), /conflicting/);
-
-  const conflictingPeriod = {
-    ...extracted,
-    period_start: '2026-06-01',
-    period_end: '2026-06-30',
-    frequency: ''
-  };
-  const differentSheet = {
-    getLastRow: () => 2,
-    getRange: () => ({
-      getValues: () => [['SUPPLIER', 'quarterly', '2026-05-16',
-        'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => differentSheet })
-  };
-  context.inferInvoiceFrequency_(conflictingPeriod);
-  assert.equal(conflictingPeriod.frequency, '');
-  assert.match(conflictingPeriod.problems.join(' '), /conflicting/);
-
-  const malformedDate = {
-    ...historyOnly,
-    issue_date: 'not-a-date',
-    frequency: ''
-  };
-  context.inferInvoiceFrequency_(malformedDate);
-  assert.equal(malformedDate.frequency, '');
-
-  const digitEnglishSheet = {
-    getLastRow: () => 3,
-    getRange: () => ({
-      getValues: () => [
-        ['SUPPLIER', 'every 2 months', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', '2 months', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
-      ]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => digitEnglishSheet })
-  };
-  const digitEnglishHistory = { ...historyOnly, frequency: '' };
-  context.inferInvoiceFrequency_(digitEnglishHistory);
-  assert.equal(digitEnglishHistory.frequency, 'bimonthly');
-
-  const pluralitySheet = {
-    getLastRow: () => 5,
-    getRange: () => ({
-      getValues: () => [
-        ['SUPPLIER', 'monthly', '2026-03-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'monthly', '2026-04-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'bimonthly', '2026-05-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth'],
-        ['SUPPLIER', 'quarterly', '2026-06-16', 'Avery North', 'Avery North, Cedar Meridian Boulevard 125, Rivermouth']
-      ]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => pluralitySheet })
-  };
-  const pluralityHistory = { ...historyOnly, frequency: '' };
-  context.inferInvoiceFrequency_(pluralityHistory);
-  assert.equal(pluralityHistory.frequency, '');
-  assert.match(pluralityHistory.problems.join(' '), /conflicting/);
-
-  const sourceFiles = {
-    same: { getId: () => 'current-file-id' },
-    independent: { getId: () => 'prior-file-id' }
-  };
-  const sourceIdentityReads = [];
-  const replacementSheet = {
-    getLastRow: () => 5,
-    getRange: (row, column) => ({
-      row,
-      column,
-      getValues: () => [
-        ['SUPPLIER', 'quarterly', '2026-05-16', 'Avery North',
-          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'same'],
-        ['SUPPLIER', 'monthly', '2026-06-16', 'Avery North',
-          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'independent'],
-        ['SUPPLIER', '', '2026-04-16', 'Avery North',
-          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'unreadable'],
-        ['SUPPLIER', 'annual', '2026-03-16', 'Avery North',
-          'Avery North, Cedar Meridian Boulevard 125, Rivermouth', 'unreadable']
-      ]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => replacementSheet })
-  };
-  context.getSheetLayout_ = () => ({
-    headerRow: 1,
-    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder',
-      'Service address', 'Source file'],
-    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
-      'service address': 5, 'source file': 6 }
-  });
-  context.getFileFromSourceCell_ = (cell) => {
-    sourceIdentityReads.push(cell.row);
-    return cell.row === 2 ? sourceFiles.same : sourceFiles.independent;
-  };
-  const replacementRetry = {
-    ...historyOnly,
-    original_file_id: 'current-file-id',
-    frequency: ''
-  };
-  context.inferInvoiceFrequency_(replacementRetry);
-  assert.equal(replacementRetry.frequency, 'monthly');
-  assert.deepEqual(sourceIdentityReads, [2, 3]);
-
-  context.getFileFromSourceCell_ = () => null;
-  const unidentifiedHistory = { ...replacementRetry, frequency: '', problems: [] };
-  context.inferInvoiceFrequency_(unidentifiedHistory);
-  assert.equal(unidentifiedHistory.frequency, '');
-  assert.match(unidentifiedHistory.problems.join(' '), /conflicting/);
-
-  context.getSheetLayout_ = () => ({
-    headerRow: 1,
-    headers: ['Supplier', 'Frequency', 'Issue date', 'Account holder',
-      'Service address'],
-    lookup: { supplier: 1, frequency: 2, 'issue date': 3, 'account holder': 4,
-      'service address': 5 }
-  });
-  const missingSourceHeader = { ...replacementRetry, frequency: '', problems: [] };
-  context.inferInvoiceFrequency_(missingSourceHeader);
-  assert.equal(missingSourceHeader.frequency, '');
-  assert.match(missingSourceHeader.problems.join(' '), /conflicting/);
-
-  const otherSupplyHistory = {
-    getLastRow: () => 3,
-    getRange: () => ({
-      getValues: () => [
-        ['SUPPLIER', 'quarterly', '2026-05-16', 'Other Holder', 'Other Supply 1, Rivermouth'],
-        ['SUPPLIER', 'quarterly', '2026-06-16', 'Other Holder', 'Other Supply 1, Rivermouth']
-      ]
-    })
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => otherSupplyHistory })
-  };
-  const sameSupplierDifferentSupply = { ...historyOnly, frequency: '' };
-  context.inferInvoiceFrequency_(sameSupplierDifferentSupply);
-  assert.equal(sameSupplierDifferentSupply.frequency, '');
-
-  const unavailableHistory = { ...historyOnly, frequency: '', problems: [] };
-  context.SpreadsheetApp = { openById: () => { throw new Error('unavailable'); } };
-  context.inferInvoiceFrequency_(unavailableHistory);
-  assert.equal(unavailableHistory.frequency, '');
-  assert.match(unavailableHistory.problems.join(' '), /could not be corroborated/);
-  assert.equal(context.validateExtraction_(unavailableHistory).valid, false);
-
-  const periodWithUnavailableHistory = {
-    ...unavailableHistory,
-    period_start: '2026-06-01',
-    period_end: '2026-06-30',
-    frequency: '',
-    problems: ['Billing frequency is not printed.']
-  };
-  context.inferInvoiceFrequency_(periodWithUnavailableHistory);
-  assert.equal(periodWithUnavailableHistory.frequency, 'monthly');
-  assert.deepEqual(periodWithUnavailableHistory.problems, []);
-
-  const noFrequencyEvidence = {
-    ...historyOnly,
-    frequency: '',
-    problems: []
-  };
-  context.SpreadsheetApp = {
-    openById: () => ({ getSheetByName: () => ({
-      getLastRow: () => 1,
-      getRange: () => ({ getValues: () => [] })
-    }) })
-  };
-  context.inferInvoiceFrequency_(noFrequencyEvidence);
-  assert.equal(noFrequencyEvidence.frequency, '');
-  assert.match(noFrequencyEvidence.problems.join(' '),
-    /could not be established from the billed period or prior invoices/);
-  assert.equal(context.validateExtraction_(noFrequencyEvidence).valid, false);
-
-  const periodWithEmptyHistory = {
-    ...noFrequencyEvidence,
-    period_start: '2026-06-01',
-    period_end: '2026-06-30',
-    frequency: '',
-    problems: ['Frequenza non indicata.']
-  };
-  context.inferInvoiceFrequency_(periodWithEmptyHistory);
-  assert.equal(periodWithEmptyHistory.frequency, 'monthly');
-  assert.deepEqual(periodWithEmptyHistory.problems, []);
-
-  [
-    ['2026-05-16', '2026-06-15', 'monthly'],
-    ['2026-05-16', '2026-07-15', 'bimonthly'],
-    ['2026-05-16', '2026-08-15', 'quarterly'],
-    ['2026-01-31', '2026-02-28', 'monthly']
-  ].forEach(([periodStart, periodEnd, frequency]) => {
-    assert.equal(context.inferFrequencyFromPeriod_({ period_start: periodStart, period_end: periodEnd }), frequency);
-  });
+  const withoutPeriod={...extracted,period_start:'',period_end:'',frequency:'',problems:[]};
+  context.inferInvoiceFrequency_(withoutPeriod);
+  assert.equal(withoutPeriod.frequency,'monthly');
+  rows=[{Frequency:'monthly'},{Frequency:'quarterly'}];
+  const tied={...withoutPeriod,frequency:'',problems:[]};
+  context.inferInvoiceFrequency_(tied);
+  assert.equal(tied.frequency,'');
+  assert.match(tied.problems.join(' '),/conflicting/);
+  rows=[{Frequency:'every 2 months'},{Frequency:'monthly'},{Frequency:'bimestrale'}];
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod).frequency,'bimonthly');
+  rows=[];
+  const empty={...withoutPeriod,frequency:'',problems:[]};
+  context.inferInvoiceFrequency_(empty);
+  assert.equal(empty.frequency,'');
+  state='unavailable';
+  const unavailable={...withoutPeriod,frequency:'',problems:[]};
+  context.inferInvoiceFrequency_(unavailable);
+  assert.match(unavailable.problems.join(' '),/could not be corroborated/);
+  const validPeriod={...extracted,frequency:'',problems:['Billing frequency is not printed.']};
+  context.inferInvoiceFrequency_(validPeriod);
+  assert.equal(validPeriod.frequency,'monthly');
+  assert.deepEqual(validPeriod.problems,[]);
+  for(const [period_start,period_end,frequency] of [
+    ['2026-05-16','2026-06-15','monthly'],['2026-05-16','2026-07-15','bimonthly'],
+    ['2026-05-16','2026-08-15','quarterly'],['2026-01-31','2026-02-28','monthly']]) {
+    assert.equal(context.inferFrequencyFromPeriod_({billing_cycle_kind:'ordinary',period_start,period_end}),frequency);
+  }
 }
 
 function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
@@ -2125,6 +1874,7 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
   const printed = {
     ...validInvoice(),
     frequency: 'quarterly',
+    period_start: '2026-04-01',
     problems: [
       'Frequency absent.',
       'Billing frequency could not be established from the billed period or prior invoices.',
@@ -2138,6 +1888,7 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
   const annualPrinted = {
     ...validInvoice(),
     frequency: 'annuale',
+    period_start: '2025-07-01',
     problems: ['Frequenza non indicata.']
   };
   context.inferInvoiceFrequency_(annualPrinted);
@@ -2195,7 +1946,8 @@ function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
         const statement = rule.header + (locale === 'it' ? ' non presente nel documento.' :
           ' is not present in the document.');
         const raw = { ...validInvoice(), supplier, supply_type: supply,
-          sheet_values: [], problems: [statement] };
+          sheet_values: [], problems: [statement],
+          problem_details: [{code:'missing',fields:[rule.header],message:statement}] };
         const headers = Array.from(localization.installerSheetHeaders).concat(rule.header);
         context.getSheetHeadersBySupply_ = () => ({ [supply]: headers });
         context.callGeminiForPdf_ = () => JSON.stringify(raw);
@@ -2209,7 +1961,8 @@ function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
           .includes('configured_secondary_headers'), false);
         for (const problem of [statement + ' VAT is missing.',
           rule.header + ' is unreadable.', rule.header + ' is inconsistent.']) {
-          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw, problems: [problem] });
+          context.callGeminiForPdf_ = () => JSON.stringify({ ...raw, problems: [problem],
+            problem_details: [{code:'ambiguous',fields:[rule.header],message:problem}] });
           const blocked = context.extractUtilityData_(file, 'policy');
           assert.equal(context.validateExtractedUtilityDataForImport_(blocked).valid, false, problem);
         }
@@ -2409,7 +2162,7 @@ function testFrequencySentinelsRemainUnresolvedUntilCadenceIsUsable() {
     ['annuale', 'annual'],
     ['semiannual', 'semiannual'],
     ['weekly', 'weekly'],
-    ['every 4 months', 'every 4 months']
+    ['every 4 months', 'four_monthly']
   ].forEach(([printed, canonical]) => {
     const extracted = {
       frequency: printed, frequency_source_evidence: 'printed', problems: []
@@ -2625,7 +2378,7 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
     };
     for (const [override, expected] of [
       ['annual', 'annual'], ['annuale', 'annual'],
-      ['installation-cycle', 'installation-cycle'], ['every 4 months', 'every 4 months']
+      ['installation-cycle', 'installation-cycle'], ['every 4 months', 'four_monthly']
     ]) {
       config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency: override }];
       const result = normalize({ ...validInvoice(), frequency: 'annual',
@@ -2642,7 +2395,8 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
         'Frequency evidence is ambiguous.'
       ]) {
         const blocked = normalize({ ...validInvoice(), frequency: 'annual',
-          frequency_source_evidence: null, problems: [diagnostic] });
+          frequency_source_evidence: null, problems: [diagnostic],
+          problem_details: [{code:'ambiguous',fields:['frequency'],message:diagnostic}] });
         assert.equal(blocked.problems.includes(diagnostic), true);
         assert.equal(context.validateExtraction_(blocked).valid, false, diagnostic);
       }
@@ -2650,8 +2404,9 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
       context.applyFrequencyOverride_(result);
       context.inferInvoiceFrequency_(result);
       assert.equal(result.frequency_override_authoritative_, false);
-      assert.equal(context.validateExtraction_(result).valid, false,
-        'Removing an override must revoke its authority on a reused object');
+      assert.equal(context.validateExtraction_(result).valid, expected === 'four_monthly',
+        'Removing an override revokes authority; supported cadence may be re-inferred from current evidence');
+      if (expected === 'four_monthly') assert.equal(result.frequency, 'monthly');
     }
     for (const frequency of ['', 'not printed', 'non disponibile']) {
       config.frequency_overrides = [{ supplier: 'SUPPLIER', supply_type: 'Water', frequency }];
@@ -2662,11 +2417,13 @@ function testAuthoritativeFrequencyProvenanceThroughNormalization() {
       assert.equal(context.validateExtraction_(forged).valid, false);
     }
     config.frequency_overrides = [];
-    const printed = normalize({ ...validInvoice(), frequency: 'annual' });
+    const printed = normalize({ ...validInvoice(), frequency: 'annual', period_start:'2025-07-01' });
     assert.equal(printed.frequency, 'annual');
     assert.equal(context.validateExtraction_(printed).valid, true);
     const inferred = normalize({ ...validInvoice(), frequency: '', frequency_source_evidence: null,
-      problems: ['Billing frequency is not printed, inferred from period.'] });
+      problems: ['Billing frequency is not printed, inferred from period.'],
+      problem_details: [{code:'missing',fields:['frequency'],
+        message:'Billing frequency is not printed, inferred from period.'}] });
     assert.equal(inferred.frequency, 'monthly');
     assert.equal(context.validateExtraction_(inferred).valid, true);
   }
@@ -3864,9 +3621,12 @@ function testElectricityAggregateAndWeightedRepresentations() {
     const raw = { ...validInvoice(), supplier: 'eg', supply_type: supply,
       electricity_consumption_quantity: 100, electricity_selling_unit_rate: 0.25,
       cost_consumption: 25, cost_non_consumption: 2, vat: 1, total: 28,
-      sheet_values: [], problems: bands.map(absence) };
+      sheet_values: [], problems: bands.map(absence),
+      problem_details:bands.map(header=>({code:'missing',fields:[header],message:absence(header)})) };
     const extract = invoice => {
-      context.callGeminiForPdf_ = () => JSON.stringify(invoice);
+      // Supply model diagnostic metadata so these cases reach numeric validation.
+      context.callGeminiForPdf_ = () => JSON.stringify({...invoice,
+        problem_details:invoice.problems.map(message=>({code:'missing',fields:['sheet_values'],message}))});
       return context.extractUtilityData_(file, 'policy');
     };
     const validate = invoice => context.validateExtractedUtilityDataForImport_(extract(invoice));
@@ -4248,7 +4008,7 @@ function testExhaustedExtractionRepairDoesNotStartMutations() {
     getUrl: () => 'https://drive.test/file-id'
   }, {}, 'policy');
 
-  assert.equal(result.status, 'NEEDS REVIEW');
+  assert.equal(result.status, 'BLOCKED NEEDS REVIEW');
   assert.equal(result.problem, 'Invoice identifier is missing.');
   assert.deepEqual(mutationCalls, []);
 }
@@ -4428,6 +4188,7 @@ function testDeveloperApiKeyUsesHeader() {
       'reference_year',
       'reference_month',
       'frequency',
+      'billing_cycle_kind',
       'frequency_source_evidence',
       'period_start',
       'period_end',
@@ -4437,7 +4198,8 @@ function testDeveloperApiKeyUsesHeader() {
       'vat',
       'total',
       'sheet_values',
-      'problems'
+      'problems',
+      'problem_details'
     ]
   );
   assert.deepEqual(
@@ -4790,11 +4552,11 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   context.getAutomationConfig_ = () => migrated;
   context.getSpreadsheetId_ = () => 'spreadsheet-id';
   const headers = ['Supplier', 'Frequency', 'Issue date', 'Account holder',
-    'Service address', 'Source file', 'Invoice number'];
+    'Service address', 'Source file', 'Invoice number', 'VAT', 'Total', 'Net'];
   context.getHeaderAliases_ = (key) => ({
     supplier: ['Supplier'], frequency: ['Frequency'], issueDate: ['Issue date'],
     accountHolder: ['Account holder'], serviceAddress: ['Service address'],
-    sourceFile: ['Source file'], identifier: ['Invoice number']
+    sourceFile: ['Source file'], identifier: ['Invoice number'], vat:['VAT'], total:['Total'], netCosts:['Net']
   })[key] || [];
   const layout = { headerRow: 1, headers,
     lookup: Object.fromEntries(headers.map((header, index) => [header.toLowerCase(), index + 1])) };
@@ -4802,10 +4564,10 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   const invoice = { ...validInvoice(), supplier: context.normalizeSupplier_('ENERGYGAS'),
     supply_type: 'Electricity', issue_date: '2026-06-16', original_file_id: 'current-file' };
   let rows = [['ENERGYGAS', 'monthly', '2026-06-16', invoice.account_holder,
-    invoice.address_evidence, 'old-file', invoice.identifier]];
+    invoice.address_evidence, 'old-file', invoice.identifier, 2, 12, 10]];
   const sheet = {
     getLastRow: () => rows.length + 1,
-    getRange: (row) => ({ getValues: () => rows, row })
+    getRange: (row) => ({ getValues: () => rows, getFormulas:()=>[headers.map(()=> '')], row })
   };
   context.SpreadsheetApp = { openById: () => ({
     getSpreadsheetTimeZone: () => 'Etc/UTC',
@@ -4813,9 +4575,15 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   }) };
   context.getFileFromSourceCell_ = (cell) => {
     const id = rows[cell.row - 2][5];
-    return id ? { getId: () => id } : null;
+    return id ? { getId: () => id, isTrashed:()=>false } : null;
   };
   context.sha256ForFile_ = () => 'same-hash';
+  context.getServiceIdentityControls_ = () => ({account_holder:invoice.account_holder});
+  context.getRootFolderId_ = () => 'root';
+  context.DriveApp = {getFolderById:()=>({getId:()=> 'root'})};
+  context.isFileInFolder_ = () => false;
+  context.hasMutationJournal_ = () => false;
+  context.PropertiesService = {getScriptProperties:()=>({getProperty:()=> 'IMPORTED'})};
   for (const historicalSupplier of ['ENERGYGAS', ' energygas ',
     'ENERGYGAS ITALIA SRL', 'Energygas Italia']) {
     rows[0][0] = historicalSupplier;
@@ -4860,6 +4628,7 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'conflict');
   rows[1][1] = 'quarterly';
   rows[1][5] = 'other-old-file';
+  rows[1][6] = 'OTHER-INVOICE';
   assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
     ...invoice, issue_date: '2026-07-16'
   }).state, 'conflict');
@@ -4868,7 +4637,7 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
   assert.equal(context.findDuplicate_(invoice, 'same-hash', 'current-file').status, 'conflict');
   assert.equal(context.getHistoricalInvoiceFrequencyEvidence_({
     ...invoice, issue_date: '2026-07-16'
-  }).state, 'conflict');
+  }).state, 'empty');
   assert.equal(migrated.destination_templates['Electricity|Energygas Italia'],
     'Energia Elettrica/ENERGYGAS/{year}');
 
@@ -5412,7 +5181,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.3',
+      applicationVersion: '0.7.0',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5423,7 +5192,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.6.3',
+      applicationVersion: '0.7.0',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -6821,6 +6590,14 @@ function testPromptKeepsHeadersScopedBySupply() {
   }, 'trusted policy');
 
   assert.match(prompt, /matching canonical supply entry/);
+  const exampleStart=prompt.indexOf('{\n  "document_type"');
+  assert.ok(exampleStart>=0);
+  const example=JSON.parse(prompt.slice(exampleStart,prompt.indexOf('\n}',exampleStart)+2));
+  for(const field of context.buildExtractionResponseSchema_().required) {
+    assert.ok(Object.prototype.hasOwnProperty.call(example,field),field);
+  }
+  assert.match(prompt, /"problem_details": \[\{"code":"missing","fields":\["exact affected field"\],"message":"observed problems"\}\]/);
+  assert.match(prompt, /Always return problem_details, using an empty array when there are no problems/);
   assert.match(prompt, /"contract_number": "printed contract number or null"/);
   assert.match(prompt,
     /"customer_code": "printed customer\/client\/account code \(ID UTENTE is a customer code\), or null"/);
@@ -6842,7 +6619,7 @@ function testPromptKeepsHeadersScopedBySupply() {
     /If a configured secondary field is explicitly absent or not applicable/);
   assert.match(prompt, /only after core monetary reconciliation succeeds/);
   assert.match(prompt, /Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking/);
-  assert.match(prompt, /blocks import if evidence is insufficient or conflicting/);
+  assert.match(prompt, /unresolved cadence alone permits import with a review warning after essential validation/);
   assert.doesNotMatch(prompt, /runtime may import the invoice with that field blank/);
   assert.match(prompt,
     /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
@@ -10054,3 +9831,818 @@ testSingleFileRecoversOnlyTargetJournal();
 testSingleFileStopsWhenTargetJournalRemains();
 
 console.log('Utilities cataloging tests passed.');
+
+function testQuadrimestralCadenceAndConfiguredEvidence() {
+  const context = loadCataloger();
+  context.getHistoricalInvoiceFrequencyEvidence_ = () => ({ state: 'consensus', frequency: 'four_monthly' });
+  context.getConfiguredInvoiceFrequency_ = () => 'four_monthly';
+  const invoice = { ...validInvoice(), frequency: '', frequency_source_evidence: null,
+    period_start: '2026-05-01', period_end: '2026-08-31', problems: [] };
+  context.inferInvoiceFrequency_(invoice);
+  assert.equal(invoice.frequency, 'four_monthly');
+  assert.equal(invoice.problems.length, 0);
+  assert.equal(context.inferFrequencyFromPeriod_({billing_cycle_kind:'ordinary', period_start: '2026-05-16', period_end: '2026-09-15'}), 'four_monthly');
+  for (const value of ['quadrimestrale', 'every 4 months', 'every four months', 'four_monthly']) {
+    assert.equal(context.normalizeInferredFrequency_(value), 'four_monthly');
+  }
+  context.getLocalization_ = () => ({frequencyLabels: {four_monthly: 'quadrimestrale'}});
+  assert.equal(context.localizeInvoiceFrequency_(invoice.frequency), 'quadrimestrale');
+  assert.equal(context.inferFrequencyFromPeriod_({...invoice, billing_cycle_kind:'adjustment'}), '');
+  assert.equal(context.inferFrequencyFromPeriod_({...invoice, billing_cycle_kind:'unknown'}), '');
+  context.getConfiguredInvoiceFrequency_ = () => 'quarterly';
+  const conflict = {...invoice, frequency:'', problems:[]};
+  context.inferInvoiceFrequency_(conflict);
+  assert.equal(conflict.frequency, '');
+  assert.match(conflict.problems.join(' '), /conflicting/);
+  const printed = {...invoice, frequency:'four_monthly', frequency_source_evidence:'printed', problems:[]};
+  context.inferInvoiceFrequency_(printed);
+  assert.equal(printed.frequency, '');
+  assert.match(printed.problems.join(' '), /conflicting/);
+}
+
+function testAccessoryRepairAdmissionAndEssentialVetoes() {
+  const context = loadCataloger();
+  context.getLocalization_ = () => ({supplierReconciliation: {}, headerAliases: {}, subscriberIdentifierProblemPatterns:{}});
+  context.validateServiceIdentityForInvoice_ = () => ({valid:true});
+  context.validateTargetSheetValues_ = () => ({valid:true});
+  context.logCatalogEvent_ = () => {};
+  context.buildInvoiceRepairSupplyContext_ = () => ({state:'available', previousInvoices:[{Frequency:'four_monthly'}]});
+  const contexts = [];
+  const deadline = Date.now() + 120000;
+  const message = 'Billing frequency could not be established from the billed period or prior invoices.';
+  context.extractUtilityData_ = (_file, _policy, repair, _retry, observedDeadline) => {
+    assert.equal(observedDeadline, deadline);
+    contexts.push(repair);
+    return {...validInvoice(), frequency:'', problems:[message]};
+  };
+  const result = context.extractUtilityDataWithRepair_({getId:()=> 'current'}, 'policy', deadline);
+  assert.equal(result.aiCallCount, 3);
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.extracted.review_issues[0].fields[0], 'frequency');
+  assert.equal(contexts[1].supplyContext.previousInvoices.length, 1);
+  assert.equal(contexts[2].history.length, 2);
+  const badMoney = {...validInvoice(), frequency:'', problems:[message], total:99};
+  assert.equal(context.validateExtractedUtilityDataForImport_(badMoney,{acceptAccessory:true}).code,
+    'monetary_reconciliation_mismatch');
+  context.validateServiceIdentityForInvoice_ = () => context.invalidExtraction_('wrong holder', '',
+    {code:'service_identity_mismatch', repairable:true});
+  assert.equal(context.validateExtractedUtilityDataForImport_({...validInvoice(),problems:[message]},
+    {acceptAccessory:true}).code, 'service_identity_mismatch');
+  context.validateServiceIdentityForInvoice_ = () => ({valid:true});
+  for (const unknown of ['VAT is unreadable.', 'Frequency evidence is ambiguous.']) {
+    assert.equal(context.validateExtractedUtilityDataForImport_({...validInvoice(), problems:[unknown]},
+      {acceptAccessory:true}).valid, false);
+  }
+}
+
+function testStructuredAccessoryFieldsCannotAuthorizeCriticalValues() {
+  const context = loadCataloger();
+  const message = 'Unit of measure is unreadable.';
+  const extracted = {...validInvoice(), problems:[message], configured_secondary_headers:['Unit of measure'],
+    problem_details:[{code:'unreadable',fields:['Unit of measure'],message}],
+    sheet_values:[{header:'Unit of measure',value:'guessed'}]};
+  context.validateInvoiceProblemDetails_(extracted);
+  assert.equal(context.classifyAccessoryInvoiceProblem_(message, extracted).fields[0], 'Unit of measure');
+  context.getHeaderAliases_ = () => [];
+  context.blankAccessoryInvoiceValues_(extracted);
+  assert.equal(extracted.sheet_values[0].value, null);
+  for (const field of ['vat', 'Costo unitario', 'Invoice number', 'Source file', 'Unconfigured']) {
+    const candidate = {...extracted, problem_details:[{code:'unreadable',fields:[field],message}]};
+    assert.equal(context.classifyAccessoryInvoiceProblem_(message, candidate), null, field);
+  }
+  for (const field of ['Period start', 'Period end', 'Reference year', 'Reference month',
+    'Destination', 'Drive destination', 'Unrecognized metadata']) {
+    const message = `${field} is conflicting.`;
+    const candidate = {...extracted, problems:[message], configured_secondary_headers:[field],
+      sheet_values:[{header:field,value:null}],
+      problem_details:[{code:'conflicting',fields:[field],message}]};
+    assert.equal(context.classifyAccessoryInvoiceProblem_(message,candidate),null,field);
+    assert.equal(context.validateExtraction_(candidate,{allowAccessory:true}).valid,false,field);
+  }
+  const bundled = 'Unit of measure is unreadable. VAT is inconsistent.';
+  assert.equal(context.classifyAccessoryInvoiceProblem_(bundled, {...extracted,
+    problems:[bundled], problem_details:[{code:'unreadable',fields:['Unit of measure'],message:bundled}]}), null);
+  assert.throws(()=>context.validateInvoiceProblemDetails_({...extracted,
+    problem_details:[{code:'safe',fields:['Unit of measure'],message}]}), /invalid issue/);
+  const duplicate = {...extracted, problem_details:[...extracted.problem_details,...extracted.problem_details]};
+  assert.equal(context.classifyAccessoryInvoiceProblem_(message, duplicate), null);
+}
+
+function testVerifiedHistoryIsRecentIndependentAndExcludesReviewRows() {
+  const context = loadCataloger();
+  const properties = {};
+  const headers = ['Supplier','Frequency','Issue date','Invoice number','Account holder','Service address',
+    'Source file','VAT','Total','Total costs (excl. VAT)'];
+  const lookup = Object.fromEntries(headers.map((h,i)=>[context.normalizeHeader_(h),i+1]));
+  const rows = Array.from({length:8},(_,i)=>['SUPPLIER','quadrimestrale',`2026-0${i+1}-01`,
+    `INV-${i+1}`,'Avery North','Cedar Meridian Boulevard 125 Rivermouth',`source-${i}`,2,12,10]);
+  const sheet = { getLastRow:()=>10, getRange:(row,col,count)=>({row,col,
+    getFormulas:()=>[headers.map(()=> '')], getValues:()=>rows}) };
+  context.getAutomationConfig_ = () => ({sheet_by_supply:{Water:'Water'}});
+  context.getSpreadsheetId_ = () => 'spreadsheet';
+  context.SpreadsheetApp.openById = () => ({getSheetByName:()=>sheet});
+  context.getSheetLayout_ = () => ({headerRow:2,headers,lookup});
+  context.getServiceIdentityControls_ = () => ({account_holder:'Avery North',service_address:'Cedar Meridian Boulevard 125 Rivermouth'});
+  context.getHeaderAliases_ = key => ({supplier:['Supplier'],frequency:['Frequency'],issueDate:['Issue date'],
+    identifier:['Invoice number'],accountHolder:['Account holder'],serviceAddress:['Service address'],
+    sourceFile:['Source file'],vat:['VAT'],total:['Total'],netCosts:['Total costs (excl. VAT)']}[key]||[]);
+  context.supplierIdentitiesMatch_ = (a,b)=>a===b;
+  context.getRootFolderId_ = () => 'root';
+  context.DriveApp = {getFolderById:()=>({getId:()=> 'root'})};
+  context.getFileFromSourceCell_ = cell => ({getId:()=> `source-${cell.row-3}`,isTrashed:()=>false});
+  context.isFileInFolder_ = file => file.getId()==='source-4';
+  context.hasMutationJournal_ = id => id==='source-3';
+  context.PropertiesService = {getScriptProperties:()=>({getProperty:k=>properties[k]||''})};
+  for(let i=0;i<8;i+=1) properties[`INVOICE_REVIEW_OUTCOME_source-${i}`]='IMPORTED';
+  properties['INVOICE_REVIEW_OUTCOME_source-5'] = 'IMPORTED WITH WARNINGS';
+  properties['INVOICE_REVIEW_OUTCOME_source-6'] = 'IMPORTED NEEDS REVIEW';
+  const invoice = {...validInvoice(), issue_date:'2026-10-01',original_file_id:'source-7',
+    address_evidence:'Cedar Meridian Boulevard 125 Rivermouth'};
+  const result = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(result.state,'available');
+  assert.deepEqual(Array.from(result.previousInvoices, r=>r['Invoice number']), ['INV-6','INV-3','INV-2']);
+  assert.equal(result.columns.length,headers.length);
+  delete properties['INVOICE_REVIEW_OUTCOME_source-5'];
+  const legacy = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(legacy.previousInvoices.some(row=>row['Invoice number']==='INV-6'),false);
+  properties['INVOICE_REVIEW_OUTCOME_source-5']='IMPORTED';
+  rows[5][8]=99; // invalid monetary readback removes the newest candidate
+  const revised = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.deepEqual(Array.from(revised.previousInvoices, r=>r['Invoice number']), ['INV-3','INV-2','INV-1']);
+  const bounded = context.buildInvoiceRepairSupplyContext_(invoice,Date.now());
+  assert.equal(bounded.state,'history-budget-limited');
+  assert.equal(bounded.previousInvoices.length,0);
+  // Rejected legacy candidates consume the scan cap too, so repair can proceed.
+  rows.length = 0;
+  for (const key of Object.keys(properties)) delete properties[key];
+  for (let i = 0; i < 200; i += 1) {
+    rows.push(['SUPPLIER','quadrimestrale','2025-01-01',`LEGACY-${i}`,
+      'Avery North','Cedar Meridian Boulevard 125 Rivermouth',`source-${i}`,2,12,10]);
+  }
+  sheet.getLastRow = () => rows.length + 2;
+  let sourceReads = 0;
+  context.getFileFromSourceCell_ = cell => {
+    sourceReads += 1;
+    return {getId:()=> `source-${cell.row-3}`,isTrashed:()=>false};
+  };
+  const candidateLimit = vm.runInContext('CONFIG.EXTRACTION_HISTORY_MAX_CANDIDATES',context);
+  const legacyBound = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(legacyBound.state,'history-candidate-limited');
+  assert.equal(legacyBound.previousInvoices.length,0);
+  assert.equal(sourceReads,candidateLimit);
+  properties['INVOICE_REVIEW_OUTCOME_source-0']='IMPORTED';
+  properties['INVOICE_REVIEW_OUTCOME_source-1']='IMPORTED';
+  sourceReads = 0;
+  const partial = context.buildInvoiceRepairSupplyContext_(invoice,Date.now()+120000);
+  assert.equal(partial.state,'history-candidate-limited');
+  assert.equal(partial.previousInvoices.length,2);
+  assert.equal(sourceReads,candidateLimit);
+  const withoutPeriod={...invoice,frequency:'',frequency_source_evidence:null,
+    period_start:null,period_end:null,problems:[]};
+  const evidence=context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod,Date.now()+120000);
+  assert.equal(evidence.state,'unavailable');
+  assert.equal(evidence.frequency,'');
+  context.inferInvoiceFrequency_(withoutPeriod,Date.now()+120000);
+  assert.equal(withoutPeriod.frequency,'');
+  assert.match(withoutPeriod.problems.join(' '),/could not be corroborated/);
+  const ordinary={...invoice,frequency:'',frequency_source_evidence:null,problems:[]};
+  context.inferInvoiceFrequency_(ordinary,Date.now()+120000);
+  assert.equal(ordinary.frequency,'monthly');
+  assert.equal(ordinary.problems.length,0);
+  // The same two verified rows can corroborate cadence after a complete scan.
+  rows.length=candidateLimit;
+  const complete=context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod,Date.now()+120000);
+  assert.equal(complete.state,'consensus');
+  assert.equal(complete.frequency,'four_monthly');
+  context.buildInvoiceRepairSupplyContext_=()=>({state:'history-budget-limited',
+    previousInvoices:partial.previousInvoices});
+  assert.equal(context.getHistoricalInvoiceFrequencyEvidence_(withoutPeriod).state,'unavailable');
+}
+
+function testImportedReviewReportPersistenceAndNoScheduledRetry() {
+  const context = loadCataloger();
+  const {store} = installScriptPropertyStore(context);
+  const file={getId:()=> 'review-file',getName:()=> 'invoice.pdf',getUrl:()=> 'https://drive.test/review-file',
+    getLastUpdated:()=>new Date(1000),getSize:()=>10};
+  const extracted={...validInvoice(),review_issues:[{code:'missing',fields:['frequency'],message:'Cadence unresolved'}]};
+  const result=context.buildSuccessResult_(file,'invoice.pdf','assigned.pdf',{path:'Water/2026'},extracted,
+    'https://sheets.test/#gid=1&range=A3');
+  assert.equal(result.status,'IMPORTED NEEDS REVIEW');
+  assert.equal(result.warnings[0].field,'frequency');
+  context.getLocalization_ = () => context.getEnglishLocalization_();
+  const body=context.formatResult_(result);
+  assert.match(body,/IMPORTED — NEEDS REVIEW/);
+  assert.match(body,/Cadence unresolved/);
+  assert.match(body,/range=A3/);
+  context.isDirectIntakePdf_=()=>true;
+  context.queuePendingReports_=()=>{};
+  context.hasMutationJournal_=()=>false;
+  context.getScriptProperty_=()=>'';
+  context.persistCatalogResult_({},file,{},result);
+  assert.equal(store['INVOICE_REVIEW_OUTCOME_review-file'],'IMPORTED NEEDS REVIEW');
+  const state={};context.recordIntakeFileOutcome_(state,file,result);
+  for(const trigger of ['daily','manual_retry','event']) {
+    assert.equal(context.shouldProcessIntakeFile_(file,state,trigger),false,trigger);
+  }
+}
+
+testQuadrimestralCadenceAndConfiguredEvidence();
+testAccessoryRepairAdmissionAndEssentialVetoes();
+testStructuredAccessoryFieldsCannotAuthorizeCriticalValues();
+testVerifiedHistoryIsRecentIndependentAndExcludesReviewRows();
+testImportedReviewReportPersistenceAndNoScheduledRetry();
+
+function testQuadrimestralSheetWriteAndVerification() {
+  for (const locale of ['en', 'it']) {
+    const f = createInvoiceVerificationFixture(locale);
+    f.invoice.frequency = 'four_monthly';
+    f.context.writeInvoiceRow_(f.sheet, 2, f.layout, f.file, f.invoice);
+    const index = f.indexFor('frequency');
+    const expected = locale === 'it' ? 'quadrimestrale' : 'every four months';
+    assert.equal(f.values[index], expected);
+    assert.equal(typeof f.values[index], 'string');
+    assert.doesNotThrow(f.verify);
+    f.displays.set(index, 'quarterly');
+    assert.throws(f.verify, /verification failed/);
+    f.displays.set(index, expected);
+    f.values[index] = 4;
+    assert.throws(f.verify, /verification failed/);
+  }
+  const context = loadCataloger();
+  const invoice = {...validInvoice(),frequency:'',frequency_source_evidence:null};
+  delete invoice.billing_cycle_kind;
+  assert.equal(context.inferFrequencyFromPeriod_(invoice),'');
+  assert.equal(context.buildExtractionResponseSchema_().required.includes('billing_cycle_kind'),true);
+}
+
+testQuadrimestralSheetWriteAndVerification();
+
+function testHistoricalVerificationRequiresSourceAndRowProof() {
+  const context = loadCataloger();
+  const properties = {};
+  const file = {getId:()=> 'legacy'};
+  context.assertCatalogConfiguration_ = () => {};
+  context.withCatalogProcessingLock_ = (_kind, callback) => callback();
+  context.getRootFolderId_ = () => 'root';
+  context.DriveApp = {getFolderById:()=>({}),getFileById:()=>file};
+  context.PropertiesService = {getScriptProperties:()=>({getProperty:k=>properties[k]||'',
+    getProperties:()=>({...properties}),deleteProperty:k=>{delete properties[k];},
+    setProperty:(k,v)=>{properties[k]=v;}})};
+  context.isFileInFolder_ = () => false;
+  context.hasMutationJournal_ = () => false;
+  context.previewUtilityInvoiceExtractionWithinLock_ = () => ({validation:{valid:true},
+    extracted:validInvoice(),aiCallCount:1});
+  context.sha256ForFile_ = () => 'hash';
+  context.findDuplicate_ = () => ({status:'duplicate',file,sheet:{sheet:{},row:3}});
+  context.getSheetLayout_ = () => ({});
+  let verified = false;
+  context.verifyImportedRow_ = () => {verified=true;};
+  assert.equal(context.verifyHistoricalInvoiceForRepair('legacy').status,'VERIFIED');
+  assert.equal(verified,true);
+  assert.equal(properties.INVOICE_REVIEW_OUTCOME_legacy,'IMPORTED');
+  delete properties.INVOICE_REVIEW_OUTCOME_legacy;
+  context.verifyImportedRow_ = () => {throw new Error('readback mismatch');};
+  assert.throws(()=>context.verifyHistoricalInvoiceForRepair('legacy'),/readback mismatch/);
+  assert.equal(properties.INVOICE_REVIEW_OUTCOME_legacy,undefined);
+  properties.INVOICE_REVIEW_OUTCOME_legacy='IMPORTED NEEDS REVIEW';
+  assert.throws(()=>context.verifyHistoricalInvoiceForRepair('legacy'),/pending review/);
+  delete properties.INVOICE_REVIEW_OUTCOME_legacy;
+  context.findDuplicate_ = () => ({status:'conflict'});
+  assert.throws(()=>context.verifyHistoricalInvoiceForRepair('legacy'),/exactly one/);
+  assert.equal(properties.INVOICE_REVIEW_OUTCOME_legacy,undefined);
+}
+testHistoricalVerificationRequiresSourceAndRowProof();
+
+function createReviewImportLifecycleFixture() {
+  const f = createInvoiceVerificationFixture('en');
+  const {context,sheet,layout,values,formulas} = f;
+  values.fill(''); formulas.fill('');
+  let inserted=false;
+  let name='invoice.pdf';
+  let parentId='root';
+  const id='review-lifecycle-source-1234567890';
+  const iterator = list => {let n=0;return {hasNext:()=>n<list.length,next:()=>list[n++]};};
+  const root={getId:()=> 'root'};
+  const destination={getId:()=> 'archive',getFilesByName:()=>iterator([])};
+  const file={getId:()=>id,getUrl:()=>`https://drive.test/${id}`,getName:()=>name,
+    getMimeType:()=> 'application/pdf',isTrashed:()=>false,getSize:()=>10,getLastUpdated:()=>new Date(1000),
+    setName:v=>{name=v;},moveTo:folder=>{parentId=folder.getId();},
+    getParents:()=>iterator([{getId:()=>parentId}])};
+  sheet.getLastRow=()=>inserted?2:1;
+  sheet.insertRowBefore=()=>{inserted=true;};
+  sheet.insertRowsBefore=()=>{inserted=true;};
+  sheet.insertRowsAfter=()=>{inserted=true;};
+  sheet.getMaxRows=()=>100;
+  sheet.deleteRow=()=>{inserted=false;values.fill('');formulas.fill('');};
+  const spreadsheet={getSheetByName:()=>sheet,getUrl:()=> 'https://sheets.test/lifecycle',
+    getSpreadsheetTimeZone:()=> 'Etc/UTC'};
+  context.SpreadsheetApp.openById=()=>spreadsheet;
+  context.DriveApp={getFileById:()=>file};
+  context.getAutomationConfig_=()=>({locale:'en',sheet_by_supply:{Water:'Water',Electricity:'Electricity'}});
+  context.getSpreadsheetId_=()=> 'spreadsheet';
+  context.getRootFolderId_=()=> 'root';
+  context.getSheetLayout_=()=>layout;
+  context.getServiceIdentityControls_=()=>({account_holder:f.invoice.account_holder,
+    service_address:context.buildInitialServiceIdentity_(f.invoice).service_address});
+  context.copyRowStyleAndFormulas_=()=>{};
+  context.getElectricitySupplySheetName_=()=> 'Electricity';
+  context.refreshElectricityDashboardAfterInvoiceImport_=()=>null;
+  context.getFileFromSourceCell_=cell=>cell.getFormula().includes(file.getUrl())?file:null;
+  context.getDestinationFolder_=()=>({folder:destination,path:'Water/2026',createdFolders:[]});
+  context.sha256ForFile_=()=> 'hash';
+  context.logCatalogEvent_=()=>{};
+  context.addRecoveryOperatorLinks_=()=>{};
+  const {store}=installScriptPropertyStore(context);
+  let calls=0;
+  context.extractUtilityData_=()=>{
+    calls++;
+    return {...validInvoice(),frequency:'',frequency_source_evidence:null,
+      problems:['Billing frequency could not be established from the billed period or prior invoices.']};
+  };
+  return {...f,file,root,store,isInserted:()=>inserted,parentId:()=>parentId,name:()=>name,calls:()=>calls};
+}
+
+function testReviewOutcomeAcrossImportAndRecoveryLifecycle() {
+  const f=createReviewImportLifecycleFixture();
+  const {context,file,root,store}=f;
+  const result=context.processIntakeFile_(file,root,'policy',Date.now()+120000);
+  assert.equal(result.status,'IMPORTED NEEDS REVIEW',JSON.stringify(result));
+  assert.equal(f.calls(),3);
+  assert.equal(f.isInserted(),true);
+  assert.equal(f.values[f.indexFor('frequency')],'');
+  assert.match(result.sheetLink,/#gid=7&range=A2/);
+  assert.equal(f.parentId(),'archive');
+  assert.notEqual(f.name(),'invoice.pdf');
+  const key=`MUTATION_JOURNAL_${file.getId()}`;
+  assert.equal(JSON.parse(store[key]).stage,'moved');
+  context.persistCatalogResult_({},file,root,result);
+  assert.equal(store[key],undefined);
+  assert.equal(store[`INVOICE_REVIEW_OUTCOME_${file.getId()}`],'IMPORTED NEEDS REVIEW');
+  const report=JSON.parse(store[`PENDING_REPORT_${file.getId()}`]).body;
+  assert.match(report,/IMPORTED — NEEDS REVIEW/);
+  assert.match(report,/frequency/);
+  assert.match(report,/#gid=7&range=A2/);
+  const state={};context.recordIntakeFileOutcome_(state,file,result);
+  for(const trigger of ['daily','manual_retry','event']) {
+    assert.equal(context.shouldProcessIntakeFile_(file,state,trigger),false);
+  }
+
+  const essential=createReviewImportLifecycleFixture();
+  essential.context.extractUtilityData_=()=>({...validInvoice(),total:99});
+  const blocked=essential.context.processIntakeFile_(essential.file,essential.root,'policy',Date.now()+120000);
+  assert.equal(blocked.status,'BLOCKED NEEDS REVIEW');
+  assert.equal(essential.isInserted(),false);
+  assert.equal(essential.name(),'invoice.pdf');
+  assert.equal(essential.parentId(),'root');
+  assert.equal(essential.context.hasMutationJournal_(essential.file.getId()),false);
+
+  const interrupted=createReviewImportLifecycleFixture();
+  const imported=interrupted.context.processIntakeFile_(interrupted.file,interrupted.root,'policy',Date.now()+120000);
+  assert.equal(imported.status,'IMPORTED NEEDS REVIEW');
+  const props=interrupted.context.PropertiesService.getScriptProperties();
+  const originalSet=props.setProperty;
+  props.setProperty=(key,value)=>{
+    if(key.startsWith('PENDING_REPORT_'))throw Error('report persistence interrupted');
+    originalSet(key,value);
+  };
+  assert.throws(()=>interrupted.context.persistCatalogResult_({},interrupted.file,interrupted.root,imported),/interrupted/);
+  assert.equal(interrupted.context.hasMutationJournal_(interrupted.file.getId()),true);
+  props.setProperty=originalSet;
+  const recovered=interrupted.context.recoverMutationJournalForFile_(interrupted.root,interrupted.file.getId());
+  assert.equal(recovered.status,'ERROR');
+  assert.equal(recovered.rollbackCompleted,true);
+  assert.equal(interrupted.isInserted(),false);
+  assert.equal(interrupted.parentId(),'root');
+  assert.equal(interrupted.name(),'invoice.pdf');
+  assert.equal(interrupted.store[`INVOICE_REVIEW_OUTCOME_${interrupted.file.getId()}`],undefined);
+  assert.equal(interrupted.context.hasMutationJournal_(interrupted.file.getId()),false);
+  const recoveredReport=JSON.parse(interrupted.store[`PENDING_REPORT_${interrupted.file.getId()}`]).body;
+  assert.match(recoveredReport,/rollback completed/);
+  assert.match(recoveredReport,/not imported/);
+}
+testReviewOutcomeAcrossImportAndRecoveryLifecycle();
+
+function testPrintedCadenceContradictionsReachValidationAndSheet() {
+  for(const evidence of ['period','history','configured']) {
+    const f=createInvoiceVerificationFixture('en');
+    const c=f.context;
+    c.validateServiceIdentityForInvoice_=()=>({valid:true});
+    c.validateTargetSheetValues_=()=>({valid:true});
+    c.getConfiguredInvoiceFrequency_=()=>evidence==='configured'?'four_monthly':'';
+    c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:evidence==='history'?'consensus':'empty',
+      frequency:evidence==='history'?'four_monthly':''});
+    const invoice={...f.invoice,frequency:'monthly',frequency_source_evidence:'printed',problems:[],
+      reference_month:evidence==='period'?'08':'06',
+      issue_date:evidence==='period'?'2026-10-01':'2026-07-16',
+      period_start:evidence==='period'?'2026-05-01':'2026-06-01',
+      period_end:evidence==='period'?'2026-08-31':'2026-06-30'};
+    c.inferInvoiceFrequency_(invoice);
+    assert.equal(invoice.frequency,'',evidence);
+    assert.match(invoice.problems.join(' '),/conflicting/);
+    assert.equal(c.validateExtractedUtilityDataForImport_(invoice).code,'accessory_review_required');
+    assert.equal(c.validateExtractedUtilityDataForImport_(invoice,{acceptAccessory:true}).valid,true);
+    c.writeInvoiceRow_(f.sheet,2,f.layout,f.file,invoice);
+    assert.equal(f.values[f.indexFor('frequency')],'');
+    assert.doesNotThrow(()=>c.verifyImportedRow_(f.sheet,2,f.layout,f.file,invoice));
+  }
+  const f=createInvoiceVerificationFixture('en');
+  f.context.getConfiguredInvoiceFrequency_=()=> 'four_monthly';
+  f.context.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'consensus',frequency:'four_monthly'});
+  const valid={...f.invoice,frequency:'quadrimestrale',frequency_source_evidence:'printed',problems:[],
+    reference_month:'08',issue_date:'2026-10-01',period_start:'2026-05-01',period_end:'2026-08-31'};
+  f.context.inferInvoiceFrequency_(valid);
+  assert.equal(valid.frequency,'four_monthly');
+  assert.equal(valid.problems.length,0);
+  const adjustment={...valid,frequency:'monthly',billing_cycle_kind:'adjustment',problems:[]};
+  f.context.getConfiguredInvoiceFrequency_=()=> '';
+  f.context.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  f.context.inferInvoiceFrequency_(adjustment);
+  assert.equal(adjustment.frequency,'monthly');
+  assert.equal(adjustment.problems.length,0);
+}
+testPrintedCadenceContradictionsReachValidationAndSheet();
+
+function testConfiguredCadenceUsesVerifiedManagedMetadataRow() {
+  for (const headerRow of [2,11]) {
+    const c=loadCataloger();
+    const invoice=validInvoice();
+    const fields={1:'Controllo fornitura',5:invoice.account_holder,6:invoice.address_evidence,
+      11:'quadrimestrale'};
+    let formula='';
+    const reads=[];
+    const sheet={getName:()=> 'Water',getRange:(row,column)=>{
+      reads.push([row,column]);
+      return {getDisplayValue:()=>row===headerRow-1?(fields[column]||''):
+        row===1?'monthly':'',getFormula:()=>column===11?formula:''};
+    }};
+    c.getAutomationConfig_=()=>({sheet_by_supply:{Water:'Water'}});
+    c.getSpreadsheetId_=()=> 'spreadsheet';
+    c.SpreadsheetApp.openById=()=>({getSheetByName:()=>sheet});
+    c.getSheetLayout_=()=>({headerRow,lookup:{frequency:11,intestatario:5,indirizzo:6}});
+    c.getHeaderAliases_=key=>({frequency:['Frequency'],accountHolder:['Intestatario'],
+      serviceAddress:['Indirizzo']}[key]||[]);
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'four_monthly');
+    assert.ok(reads.some(([row,column])=>row===headerRow-1&&column===11));
+    if(headerRow===11)assert.equal(reads.some(([row])=>row===1),false);
+    formula='=some_formula';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+    formula='';fields[1]='User presentation';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+    fields[1]='Controllo fornitura';fields[5]='Different holder';
+    assert.equal(c.getConfiguredInvoiceFrequency_(invoice),'');
+  }
+}
+testConfiguredCadenceUsesVerifiedManagedMetadataRow();
+
+function testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites() {
+  const c=loadCataloger();
+  const prefix='INVOICE_REVIEW_OUTCOME_';
+  const initial={unrelated:'preserved'};
+  for(let i=0;i<300;i+=1)initial[prefix+`legacy-${String(i).padStart(3,'0')}`]=
+    i%2?'IMPORTED':'IMPORTED NEEDS REVIEW';
+  const {store,properties}=installScriptPropertyStore(c,initial);
+  const limit=vm.runInContext('CONFIG.MAX_INVOICE_OUTCOME_MARKERS',c);
+  const bytes=vm.runInContext('CONFIG.MAX_INVOICE_OUTCOME_INDEX_BYTES',c);
+  c.recordInvoiceReviewOutcome_('fresh','IMPORTED',properties);
+  assert.equal(store.unrelated,'preserved');
+  assert.equal(store[prefix+'fresh'],'IMPORTED');
+  assert.equal(Object.keys(store).filter(k=>k.startsWith(prefix)).length,limit);
+  assert.equal(JSON.parse(store.INVOICE_OUTCOME_INDEX)[0],'fresh');
+  assert.equal(store[prefix+'legacy-299'],undefined); // absent proof stays ineligible
+  for(let i=0;i<200;i+=1)c.recordInvoiceReviewOutcome_(`new-${i}`,'IMPORTED',properties);
+  assert.equal(Object.keys(store).filter(k=>k.startsWith(prefix)).length,limit);
+  assert.equal(store[prefix+'fresh'],undefined);
+  assert.ok(Buffer.byteLength(store.INVOICE_OUTCOME_INDEX,'utf8')<=bytes);
+  // Byte limit also applies when valid source identifiers reach their length limit.
+  for(let i=0;i<limit;i+=1)c.recordInvoiceReviewOutcome_(
+    String(i).padStart(128,'x'),'IMPORTED NEEDS REVIEW',properties);
+  assert.ok(Buffer.byteLength(store.INVOICE_OUTCOME_INDEX,'utf8')<=bytes);
+  assert.ok(Object.keys(store).filter(k=>k.startsWith(prefix)).length<limit);
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('fresh','ERROR',properties),/Invalid/);
+  const originalSet=properties.setProperty;
+  properties.setProperty=(key,value)=>{
+    if(key==='INVOICE_OUTCOME_INDEX')throw new Error('index unavailable');
+    originalSet(key,value);
+  };
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('not-written','IMPORTED',properties),/index unavailable/);
+  assert.equal(store[prefix+'not-written'],undefined);
+  properties.setProperty=(key,value)=>{
+    if(key===prefix+'not-written')throw new Error('marker unavailable');
+    originalSet(key,value);
+  };
+  assert.throws(()=>c.recordInvoiceReviewOutcome_('not-written','IMPORTED',properties),/marker unavailable/);
+  assert.equal(store[prefix+'not-written'],undefined);
+  properties.setProperty=originalSet;
+  c.recordInvoiceReviewOutcome_('resumed','IMPORTED WITH WARNINGS',properties);
+  assert.equal(JSON.parse(store.INVOICE_OUTCOME_INDEX).includes('not-written'),false);
+  assert.equal(store[prefix+'resumed'],'IMPORTED WITH WARNINGS');
+}
+testOutcomeProofRetentionBoundsMigrationAndInterruptedWrites();
+
+function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
+  const c=loadCataloger();
+  const inferCadence=c.inferInvoiceFrequency_;
+  assert.equal(c.buildExtractionResponseSchema_().required.includes('problem_details'),true);
+  assert.equal(c.buildVertexExtractionResponseSchema_().required.includes('problem_details'),true);
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(validInvoice()));
+  for(const value of [undefined,null,{},'unreadable']) {
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),problem_details:value}),
+      /problem_details/);
+  }
+  const message='Unit of measure is unreadable.';
+  const reply={...validInvoice(),problems:[message],
+    problem_details:[{code:'unreadable',fields:['Unit of measure'],message}],
+    sheet_values:[{header:'Unit of measure',value:'guessed'}]};
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(reply));
+  const other='Payment method is missing.';
+  for (const candidate of [
+    {...reply,problem_details:[]},
+    {...reply,problems:[message,other]},
+    {...reply,problem_details:[...reply.problem_details,...reply.problem_details]},
+    {...reply,problems:[message,message],
+      problem_details:[...reply.problem_details,...reply.problem_details]},
+    {...reply,problems:[]},
+    {...reply,problem_details:[{...reply.problem_details[0],message:other}]}
+  ]) assert.throws(()=>c.validateRawExtractionShape_(candidate),/problem_details/);
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_({...reply,problems:[message,other],
+    problem_details:[...reply.problem_details,{code:'missing',fields:['Payment method'],message:other}]}));
+  const initial={...reply,problem_details:[]};
+  let calls=0;
+  c.callGeminiForPdf_=()=>JSON.stringify(++calls===1?initial:reply);
+  c.getSheetHeadersBySupply_=()=>({Water:['Unit of measure']});
+  c.normalizeExtraction_=data=>({...data});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>['Unit of measure'];
+  c.inferInvoiceFrequency_=()=>{};
+  c.applySupplierFieldDefaults_=()=>{};
+  c.normalizeSheetValues_=values=>values;
+  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+    subscriberIdentifierProblemPatterns:{}});
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  const file={getId:()=> 'current',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/current'};
+  const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+  assert.equal(calls,3);
+  assert.equal(result.validation.valid,true);
+  assert.equal(result.extracted.review_issues[0].fields[0],'Unit of measure');
+  assert.equal(result.extracted.sheet_values[0].value,null);
+  // Runtime diagnostics are generated after the provider's complete raw output.
+  c.callGeminiForPdf_=()=>JSON.stringify(validInvoice());
+  c.inferInvoiceFrequency_=inferCadence;
+  c.getAutomationConfig_=()=>({frequency_overrides:[]});
+  c.getConfiguredInvoiceFrequency_=()=> 'quarterly';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  const runtimeIssue=c.extractUtilityData_(file,'policy');
+  assert.equal(runtimeIssue.frequency,'');
+  assert.match(runtimeIssue.problems[0],/conflicting/);
+  assert.equal(runtimeIssue.problem_details.length,0);
+  assert.equal(c.validateExtractedUtilityDataForImport_(runtimeIssue,{acceptAccessory:true}).valid,true);
+  c.inferInvoiceFrequency_=()=>{};
+  calls=0;
+  c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(initial);};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'ERROR');
+  assert.equal(calls,3);
+  assert.deepEqual(mutations,[]);
+}
+testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair();
+
+function testRawExtractionRequiresCompleteDeclaredShape() {
+  const c=loadCataloger();
+  const schema=c.buildExtractionResponseSchema_();
+  assert.doesNotThrow(()=>c.validateRawExtractionShape_(validInvoice()));
+  for(const field of schema.required) {
+    const missing={...validInvoice()};delete missing[field];
+    assert.throws(()=>c.validateRawExtractionShape_(missing),/Gemini extraction/,field);
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),[field]:undefined}),
+      /missing required field/,field);
+  }
+  for(const field of schema.required.filter(field=>
+    Array.isArray(schema.properties[field].type)&&schema.properties[field].type.includes('null'))) {
+    assert.doesNotThrow(()=>c.validateRawExtractionShape_({...validInvoice(),[field]:null}),field);
+  }
+  for(const kind of ['ordinary','adjustment','unknown']) {
+    assert.doesNotThrow(()=>c.validateRawExtractionShape_({...validInvoice(),billing_cycle_kind:kind}));
+  }
+  for(const kind of [undefined,null,'',0,'regular']) {
+    assert.throws(()=>c.validateRawExtractionShape_({...validInvoice(),billing_cycle_kind:kind}),
+      /billing_cycle_kind/);
+  }
+  const missing={...validInvoice()};delete missing.billing_cycle_kind;
+  let calls=0;
+  const repairs=[];
+  c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+    repairs.push(repair);return JSON.stringify(++calls===1?missing:validInvoice());
+  };
+  c.getSheetHeadersBySupply_=()=>({Water:[]});
+  c.normalizeExtraction_=data=>({...data});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>[];
+  c.getAutomationConfig_=()=>({frequency_overrides:[]});
+  c.getConfiguredInvoiceFrequency_=()=> '';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  c.applySupplierFieldDefaults_=()=>{};
+  c.normalizeSheetValues_=values=>values;
+  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+    subscriberIdentifierProblemPatterns:{}});
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  const file={getId:()=> 'cycle-kind',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/cycle-kind'};
+  assert.equal(c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000).validation.valid,true);
+  assert.equal(calls,2);
+  assert.equal(repairs[1].feedback.issues[0].code,'invalid_extraction_schema');
+  assert.deepEqual(Array.from(repairs[1].feedback.issues[0].fields),['billing_cycle_kind']);
+  const ordinary={...validInvoice(),frequency:'',frequency_source_evidence:null,
+    period_start:'2026-05-01',period_end:'2026-08-31',reference_month:'08',issue_date:'2026-10-01'};
+  const missingOrdinary={...ordinary};delete missingOrdinary.billing_cycle_kind;
+  calls=0;
+  c.getConfiguredInvoiceFrequency_=()=> 'quarterly';
+  c.callGeminiForPdf_=()=>JSON.stringify(++calls===1?missingOrdinary:ordinary);
+  const conflict=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+  assert.equal(calls,3);
+  assert.equal(conflict.validation.valid,true);
+  assert.equal(conflict.extracted.frequency,'');
+  assert.match(conflict.extracted.review_issues[0].message,/conflicting/);
+  calls=0;
+  c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(missing);};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'ERROR');
+  assert.equal(calls,3);
+  assert.deepEqual(mutations,[]);
+}
+testRawExtractionRequiresCompleteDeclaredShape();
+
+function testCadenceTextCannotOverrideStructuredEssentialFields() {
+  const c=loadCataloger();
+  const message='Billing frequency could not be established from the billed period or prior invoices.';
+  const candidate={...validInvoice(),frequency:'',period_start:null,period_end:null,
+    problems:[message],problem_details:[{code:'missing',fields:['total'],message}]};
+  c.validateRawExtractionShape_(candidate);
+  assert.equal(c.classifyAccessoryInvoiceProblem_(message,candidate),null);
+  c.getLocalization_=()=>c.getEnglishLocalization_();
+  const config={locale:'en',canonical_suppliers:['SUPPLIER'],canonical_supplies:['Water'],
+    supplier_aliases:{},supply_aliases:{},frequency_overrides:[]};
+  c.getAutomationConfig_=()=>config;
+  c.classifyAddress_=()=> 'import';
+  c.getSheetHeadersBySupply_=()=>({Water:[]});
+  c.getConfiguredSecondaryInvoiceHeaders_=()=>[];
+  c.getConfiguredInvoiceFrequency_=()=> '';
+  c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
+  c.applySupplierFieldDefaults_=()=>{};
+  c.validateServiceIdentityForInvoice_=()=>({valid:true});
+  c.validateTargetSheetValues_=()=>({valid:true});
+  c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
+  c.logCatalogEvent_=()=>{};
+  c.sha256ForFile_=()=> 'hash';
+  const mutations=[];
+  for(const name of ['findDuplicate_','saveMutationJournal_','getDestinationFolder_','writeInvoiceRow_']) {
+    c[name]=()=>{mutations.push(name);throw new Error('Unexpected mutation');};
+  }
+  const file={getId:()=> 'cadence-fields',getName:()=> 'invoice.pdf',getBlob:()=>({}),
+    getSize:()=>100,getUrl:()=> 'https://drive.test/cadence-fields'};
+  for(const scenario of [
+    {fields:['total'],resolution:'none',message},
+    {fields:['period_end'],resolution:'inferred',message},
+    {fields:['frequency','total'],resolution:'override',message:'Frequenza non trovata in fattura.'},
+    {fields:['total'],resolution:'provenance',
+      message:'Billing frequency value is unsupported or lacks printed provenance.'},
+    {fields:['Unconfigured'],resolution:'none',message}
+  ]) {
+    config.frequency_overrides=scenario.resolution==='override'?
+      [{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}]:[];
+    const raw={...validInvoice(),frequency:scenario.resolution==='provenance'?'monthly':'',
+      frequency_source_evidence:null,problems:[scenario.message],
+      problem_details:[{code:'missing',fields:scenario.fields,message:scenario.message}]};
+    if(scenario.resolution==='none'){raw.period_start=null;raw.period_end=null;}
+    let calls=0;
+    c.callGeminiForPdf_=()=>{calls+=1;return JSON.stringify(raw);};
+    const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(calls,3,scenario.resolution);
+    assert.equal(result.validation.valid,false,scenario.resolution);
+    assert.equal(result.validation.code,'model_reported_blocking_problems');
+    for(const field of c.normalizeExtractionRepairFields_(scenario.fields)) {
+      assert.ok(result.validation.fields.includes(field),field);
+    }
+    assert.ok(result.extracted.problems.includes(scenario.message));
+    assert.deepEqual(Array.from(result.extracted.problem_details[0].fields),scenario.fields);
+    assert.equal(c.isInformationalMissingFrequencyProvenanceProblem_(scenario.message,result.extracted),false);
+    calls=0;
+    assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'BLOCKED NEEDS REVIEW');
+    assert.equal(calls,3);
+    assert.deepEqual(mutations,[]);
+  }
+  for(const code of ['missing','conflicting','ambiguous','unreadable']) {
+    for(const resolution of ['inferred','override','provenance']) {
+      config.frequency_overrides=resolution==='override'?
+        [{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}]:[];
+      const problem=resolution==='provenance'?
+        'Billing frequency value is unsupported or lacks printed provenance.':
+        'Billing frequency is missing';
+      const raw={...validInvoice(),frequency:resolution==='provenance'?'monthly':'',
+        frequency_source_evidence:null,problems:[problem],
+        problem_details:[{code,fields:['frequency'],message:problem}]};
+      const contexts=[];
+      c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+        contexts.push(repair);return JSON.stringify(raw);
+      };
+      const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+      assert.equal(result.validation.valid,true);
+      if(code==='missing') {
+        assert.equal(result.aiCallCount,1,resolution);
+        assert.equal(result.extracted.frequency,resolution==='override'?'annual':'monthly');
+        assert.equal(result.extracted.review_issues.length,0);
+        assert.equal(result.extracted.problem_details.length,0);
+        continue;
+      }
+      assert.equal(result.aiCallCount,3,code+':'+resolution);
+      assert.equal(result.extracted.frequency,'');
+      assert.equal(result.extracted.review_issues[0].code,code);
+      assert.equal(result.extracted.review_issues[0].origin,'model');
+      assert.ok(result.extracted.problems.includes(problem));
+      assert.equal(result.extracted.problem_details[0].code,code);
+      for(const repair of contexts.slice(1)) {
+        assert.equal(repair.feedback.issues[0].code,'accessory_review_required');
+        assert.ok(repair.feedback.issues[0].fields.includes('frequency'));
+        assert.equal(repair.previousExtraction.problem_details[0].code,code);
+      }
+      assert.deepEqual(mutations,[]);
+    }
+  }
+  config.frequency_overrides=[];
+  for(const header of ['Frequency','Frequenza']) {
+    c.getLocalization_=()=>header==='Frequenza'?c.getItalianLocalization_():c.getEnglishLocalization_();
+    c.getSheetHeadersBySupply_=()=>({Water:[header]});
+    const raw={...validInvoice(),frequency:null,frequency_source_evidence:null,
+      period_start:null,period_end:null,problems:[message],
+      problem_details:[{code:'missing',fields:[header],message}],
+      sheet_values:[{header,value:'monthly'}]};
+    const contexts=[];
+    c.callGeminiForPdf_=(_blob,_headers,_policy,_file,repair)=>{
+      contexts.push(repair);return JSON.stringify(raw);
+    };
+    const warning=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(warning.validation.valid,true,header);
+    assert.equal(warning.aiCallCount,3);
+    assert.equal(warning.extracted.frequency,'');
+    assert.deepEqual(Array.from(warning.extracted.review_issues[0].fields),['frequency']);
+    assert.equal(warning.extracted.sheet_values[0].value,null);
+    assert.ok(contexts[1].feedback.issues[0].fields.includes('period_end'));
+    raw.period_start='2026-06-01';raw.period_end='2026-06-30';
+    const resolved=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(resolved.aiCallCount,1);
+    assert.equal(resolved.extracted.frequency,'monthly');
+    assert.equal(resolved.extracted.review_issues.length,0);
+    config.frequency_overrides=[{supplier:'SUPPLIER',supply_type:'Water',frequency:'annual'}];
+    const overridden=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(overridden.aiCallCount,1);
+    assert.equal(overridden.extracted.frequency,'annual');
+    raw.problem_details[0].fields=[header,'total'];
+    const mixed=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(mixed.validation.valid,false);
+    assert.equal(mixed.aiCallCount,3);
+    assert.deepEqual(Array.from(mixed.extracted.problem_details[0].fields),['frequency','total']);
+    config.frequency_overrides=[];
+    c.getSheetHeadersBySupply_=()=>({Water:[]});
+    raw.problem_details[0].fields=[header];
+    const unconfigured=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(unconfigured.validation.valid,false);
+    assert.deepEqual(Array.from(unconfigured.extracted.problem_details[0].fields),[header]);
+    assert.deepEqual(mutations,[]);
+  }
+  c.getLocalization_=()=>c.getEnglishLocalization_();
+  for(const modelDetail of [false,true]) {
+    const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,
+      period_start:null,period_end:null,problems:modelDetail?[message]:[],
+      problem_details:modelDetail?[{code:'missing',fields:['frequency'],message}]:[]};
+    c.callGeminiForPdf_=()=>JSON.stringify(raw);
+    const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(result.validation.valid,true,JSON.stringify(result.validation));
+    assert.equal(result.extracted.review_issues[0].origin,modelDetail?'model':'runtime');
+    assert.equal(result.extracted.frequency,'');
+    raw.period_start='2026-06-01';raw.period_end='2026-06-30';
+    const resolved=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
+    assert.equal(resolved.aiCallCount,1);
+    assert.equal(resolved.validation.valid,true);
+    assert.equal(resolved.extracted.frequency,'monthly');
+    assert.equal(resolved.extracted.review_issues.length,0);
+  }
+  for(const fields of [[],null,['period_end']]) {
+    const diagnostic={...candidate,frequency:'monthly',frequency_inferred_:true,
+      frequency_provenance_missing_:true,problem_details:[{code:'missing',fields,message}]};
+    c.reconcileResolvedInvoiceFrequencyProblems_(diagnostic);
+    assert.ok(diagnostic.problems.includes(message));
+  }
+}
+testCadenceTextCannotOverrideStructuredEssentialFields();

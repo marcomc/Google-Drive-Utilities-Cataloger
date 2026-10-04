@@ -15,6 +15,7 @@ This guide covers one deployed cataloger instance. Use the separate
 - [Cadence and cost](#cadence-and-cost)
 - [Use cases](#use-cases)
 - [Operations](#operations)
+  - [Invoice review outcomes](#invoice-review-outcomes)
 - [Observability](#observability)
 - [Troubleshooting](#troubleshooting)
 - [Secrets and cost controls](#secrets-and-cost-controls)
@@ -61,12 +62,12 @@ flowchart LR
   extract --> state{"Controls configured?"}
   state -- "yes" --> compare["Compare with target supply controls"]
   state -- "no; pristine literal controls" --> bootstrap["Corroborate and establish controls"]
-  state -- "no; partial or formula-backed" --> review["NEEDS REVIEW; leave unchanged"]
-  state -- "no; existing rows" --> review["NEEDS REVIEW; leave unchanged"]
+  state -- "no; partial or formula-backed" --> review["BLOCKED NEEDS REVIEW; leave unchanged"]
+  state -- "no; existing rows" --> review["BLOCKED NEEDS REVIEW; leave unchanged"]
   bootstrap --> import["Import and archive"]
   compare -- "holder and address match" --> import["Import and archive"]
   compare -- "holder match; address gate suspended" --> import["Import and archive"]
-  compare -- "missing or mismatch" --> review["NEEDS REVIEW; leave unchanged"]
+  compare -- "missing or mismatch" --> review["BLOCKED NEEDS REVIEW; leave unchanged"]
 ```
 
 The comparison is independent of supplier, contract number, and customer code,
@@ -237,9 +238,10 @@ fallback enabled at every interval.
 
 Each normally processed PDF uses one Gemini generation cycle. When
 deterministic validation finds repairable document-data problems, it can request
-at most two additional targeted cycles, for a maximum of three. Each repair
+at most two additional targeted cycles, for a maximum of three extraction cycles. Provider transport retries and model
+fallback requests are accounted separately at their outbound boundary. Each repair
 prompt contains structured issue codes and fields, the previous schema-valid
-extraction when available, and prior-attempt history; it asks for another
+extraction when available, prior-attempt history, and verified supply context; it asks for another
 complete schema object rather than a partial patch. Configuration or
 spreadsheet-state errors stop without spending another model call. A repair is
 also deferred when the shared Apps Script runtime budget is nearly exhausted,
@@ -347,14 +349,183 @@ reason, and recommended action rather than inventing a comparison.
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
 
-For invoices whose billing frequency is not printed explicitly, the runtime may
-derive `monthly`, `bimonthly`, or `quarterly` from a complete calendar or
-anniversary-aligned billed period, or from verified independent earlier invoices
-for the same supplier and supply. A unique historical majority is required when
-history is used. Conflicting, unavailable, or insufficient evidence leaves a
-blocking diagnostic; it never copies a transaction-specific value from another
-invoice. An explicit printed frequency or reviewed configuration override
-remains authoritative.
+### Invoice review outcomes
+
+| Outcome | Effect |
+| --- | --- |
+| `IMPORTED` | Verified row and archived PDF; no unresolved review issue. |
+| `IMPORTED NEEDS REVIEW` | Verified import retained; unresolved accessory cells blank; report names fields, reasons, and row link. |
+| `BLOCKED NEEDS REVIEW` | Essential evidence or conflicts unresolved; no row import or PDF rename/move. |
+| `ERROR` | Operational failure; report records actual complete/incomplete rollback. |
+
+Confirmed duplicates, archived non-invoices, provider deferrals and dashboard
+refresh warnings retain their existing separate outcomes. Scheduled paths do not
+reprocess a completed review import. Review it through the report's row link;
+manual deletion of the row is the user's choice. Outcome proof is stored
+separately from intake retry state in a bounded cache
+of the 128 most recently recorded documents, with an index capped at 8 KiB.
+Eviction removes proof; absent proof never authorizes historical guidance.
+Archived imports awaiting review and legacy rows without positive completed-import
+proof are excluded. To adopt one, the owner can call
+`verifyHistoricalInvoiceForRepair(fileId)`: it re-extracts the archived PDF within
+the normal call/deadline limits, requires no unresolved issues, exactly one
+source-linked matching row, and successful cell verification before recording
+`IMPORTED`. It never inserts, rewrites, renames or moves an invoice. Retained
+pending-review proofs cannot be adopted through this operation.
+Older absent proofs still require complete current PDF and exact row validation;
+unresolved evidence or mismatched blank review cells cannot qualify.
+
+Both provider schemas require `problem_details`, including an empty array for
+no model-reported issues. Raw output requires exactly one matching detail per
+model problem; missing, duplicate or orphan details enter the existing bounded
+schema repair path. The same raw boundary enforces the shared schema's full
+required-field list and rejects missing billing-cycle classifications, with the
+affected field in repair feedback. Nullable fields may explicitly return null.
+The inline prompt example covers every schema-required key. Runtime diagnostics
+added after normalization do not require
+model-authored details. The runtime classifies structured accessory issues after
+all essential checks. Under the reviewed import contract, unresolved accessory
+cadence or supported unit/payment/note uncertainty may include unreadable,
+ambiguous or conflicting evidence: repair first, then retain the import with the
+affected value blank and an explicit review warning. Identity, monetary,
+reference-period, destination and existing-document conflicts remain blocking.
+Matching model detail fields take precedence over cadence-looking text. Runtime
+cadence shortcuts apply only without a matching model detail; inference and
+reviewed overrides clear a model cadence diagnostic only when all its fields
+are canonical `frequency`. Exact configured frequency headers are normalized
+to that field once at extraction, before overrides and every cadence consumer;
+the existing localized alias map supplies the identity without new model
+instructions or parameters. Essential, mixed or unknown fields stay unresolved
+and blocking even after cadence is established. Structured affected fields also
+reach the repair feedback, independently of the message wording. Model
+resolution also requires code `missing`: `conflicting`, `ambiguous` and
+`unreadable` cadence diagnostics survive inference, reviewed overrides and
+provenance exemptions, then enter guided repair and eventual blank-cell review.
+Candidate- or deadline-limited history remains partial guidance for the model
+and cannot authorize historical cadence consensus. Independent printed, ordinary
+period or configured cadence evidence remains eligible.
+Unknown free-text diagnostics remain blocking. Eligible accessory fields exclude
+identity, reference dates, monetary and numeric consumption evidence, formula
+columns and unconfigured headers. Secondary accessory admission uses reviewed
+semantic roles for `Unit of measure`, `Payment method`, and `Billing note`
+(and their Italian equivalents), rather than trusting arbitrary header names.
+Other secondary headers remain blocking when uncertain. Re-reading is attempted before accepting an
+accessory warning; it never authorizes a guessed value.
+
+For unprinted cadence, the runtime recognizes `monthly`, `bimonthly`, `quarterly`
+and `four_monthly` from complete calendar or anniversary-aligned ordinary
+periods. The Italian sheet value for the latter is `quadrimestrale`.
+Adjustment/unknown period roles cannot establish cadence from duration alone.
+A formula-free frequency in the verified managed metadata row immediately
+above the detected header can corroborate the current period;
+contradictions with printed cadence, period, or historical consensus leave the
+frequency blank and require guided review. Reviewed configuration overrides
+retain their explicit installation precedence.
+
+Repair prompts receive target-sheet structure and up to three most recent
+independent completed rows of the same supplier and supply. Selection checks
+holder/address, prior date, unique invoice/source identity, readable archived
+source PDF, a positive completed-import record, absence of a mutation journal,
+and monetary readback. Legacy rows require explicit PDF/row revalidation through
+`verifyHistoricalInvoiceForRepair` before selection; a source link alone is
+insufficient. Historical text is bounded reference data, never instructions;
+transaction values always come from the current PDF. The existing maximum of
+three extraction cycles and one absolute deadline applies to all repairs.
+At most 24 relevant historical candidates are inspected per context, including
+rejected candidates; fewer than three accepted rows may therefore be returned.
+The context explicitly reports a candidate or deadline limit, and the model
+must continue using current PDF evidence rather than wait for legacy adoption.
+
+On 2026-10-03, the installation's separately stored Drive policy was updated
+for structured review outcomes, ordinary four-month periods, reviewed accessory
+roles, and bounded PDF/sheet/history re-reading. Supplier mappings and the
+HERA Water-specific bimonthly rule were preserved. Exact UTF-8 readback matched
+23,211 bytes, SHA-256
+`6c34ef9ce47d08838d29354f724ae2852158036b081ca2c134964f2812747ec7`.
+Private source, policy, deployment and invoice evidence for this intervention
+is stored under `.git/invoice-review-live/`, outside the published diff.
+The owner-only API deployment was then moved from version 101 to 102. Both
+project HEAD (used by triggers) and pinned version 102 matched all nine staged
+runtime files; `getSetupStatus` returned application version `0.7.0`, with all
+15 other setup fields preserved. The exact uploaded version's required public
+entrypoints were checked before moving the deployment. The first live HERA
+attempt was deferred for provider high demand; fresh readback showed no invoice
+row and unchanged sheet contents, with the PDF still in intake. Cloud events
+confirmed the existing managed retry path resumed the model chain under `0.7.0`.
+The first completed extraction was blocked with `target_identity_not_configured`;
+no invoice mutation was started. The owner subsequently filled the literal
+holder/address controls in E1/F1. Fresh Sheets readback confirmed both controls,
+no existing row for the invoice, and the source PDF still in intake before one
+owner-requested `processSingleIntakeFile` retry. That retry was deferred for
+provider high demand and handed back to the existing managed retry chain.
+Direct text and visual inspection of the source PDF confirmed the printed holder,
+ordinary May-August period (123 days), and matching net/VAT/total reconciliation.
+The managed retry completed with `IMPORTED` after one successful extraction
+on `gemini-3.6-flash`. Fresh readback found exactly one source-linked invoice row
+(row 13), text invoice/contract/customer identifiers, numeric quantities and VAT,
+`quadrimestrale`, 123 billed days, and preserved formulas displaying net 44.67,
+VAT 4.27 and total 48.94. Drive readback confirmed the same untrashed PDF was
+renamed and moved out of intake into the configured archive. The completion and
+`report-email-sent` events share one Apps Script process ID under `0.7.0`;
+mailbox receipt was not independently inspected.
+The complete remote-review closure batch was then deployed as owner-only
+version 103. Exact uploaded entrypoints and all nine runtime files were checked
+before promotion; post-update HEAD/pinned readback matched the final source.
+Setup's 16 fields were unchanged, and post-deployment Sheets readback was
+identical to the verified imported invoice. The closure tests cover migrated
+metadata controls, rejected-candidate limits, bounded proof migration and
+interrupted persistence; independent delta audit found no contract violation.
+The final structured-diagnostic closure was deployed as owner-only version 104.
+Both provider schemas and raw validation now require `problem_details`; prompt
+prose and the JSON example agree. Focused and full checks and independent delta
+audit passed. Exact uploaded entrypoints were checked before promotion;
+HEAD and pinned version 104 matched all nine runtime files. All 16 setup fields
+and the verified HERA row were unchanged. The separate live policy update now
+requires the array even when empty; exact UTF-8 readback matched 23,300 bytes,
+SHA-256 `8f0c868aa953a0e513982ab1393c0c691968b4fbe2093508bfd7eaec23871724`.
+The one-to-one problem/detail validation closure was subsequently deployed as
+owner-only version 105. The exact uploaded entrypoints and nine runtime files
+were verified before promotion, then HEAD/pinned readback matched the source.
+All 16 setup fields, the live policy and the verified HERA row were unchanged.
+Focused/full checks and an independent convergence audit passed; model output
+with incomplete details exhausts the bounded repair without invoice mutations.
+The complete raw required-shape correction was deployed as owner-only version
+106. Exact uploaded entrypoints and all nine files were verified before
+promotion; HEAD and pinned readback matched the runtime source. Setup's 16 fields,
+live policy and the verified HERA row remained unchanged. Focused/full gates and
+independent recovery audit passed, including every required-field omission,
+nullable compatibility, prompt example parity and bounded no-mutation exhaustion.
+The structured cadence-field authority correction was deployed as owner-only
+version 107. Exact uploaded entrypoints and nine runtime files were verified
+before promotion, with matching HEAD/pinned readback afterward. All 16 setup
+fields, the live policy and the verified HERA row remained unchanged. Frozen
+focused/full checks cover essential diagnostics through unresolved, inferred,
+override and provenance paths, with three-call blocking and zero mutations;
+runtime and frequency-only controls retain warning and resolved import behavior.
+The repair-feedback field propagation was subsequently deployed as owner-only
+version 108 after focused and full validation passed. Matching structured fields
+reach the existing feedback path even when the prose describes cadence.
+Exact uploaded entrypoints and HEAD/pinned source were verified; all 16 setup
+fields, live policy and the HERA spreadsheet snapshot remain unchanged.
+The structured-code resolution recovery was deployed as owner-only version 109
+with exact uploaded entrypoints and HEAD/pinned runtime source verified. All 16
+setup fields, live policy and HERA snapshot remained unchanged. The four-code
+matrix across inference, override and provenance resolves only missing cadence;
+other codes retain guided repair and a blank-cell review warning. Focused/full
+checks and the independent recovery audit passed.
+The incomplete-history consensus guard was deployed as owner-only version 110
+with exact uploaded entrypoints and HEAD/pinned source verified. A metadata read
+returned the identity-valid pre-update version 109; one read-only retry observed
+110. All 16 setup fields, live policy and HERA snapshot remained unchanged.
+Focused/full checks and independent convergence audit cover partial history,
+complete-history consensus and independent ordinary-period inference.
+After explicit approval to resume, the configured diagnostic-header identity
+correction was deployed as owner-only version 111. Exact uploaded entrypoints
+and HEAD/pinned source were verified; all 16 setup fields, live policy and HERA
+snapshot remained unchanged. Focused/full checks and independent audit cover
+English/Italian configured headers through resolution, blanking and repair,
+while mixed essential fields and unconfigured names still block. Model prompts,
+schemas and parameters are unchanged.
 
 On 2026-09-05, the live Drive policy was updated to return null cadence and
 provenance when cadence is unprinted, without reporting that absence alone as
@@ -411,8 +582,10 @@ the source repository.
 
 Explicit absence or non-applicability of a configured writable secondary field
 is non-blocking only after monetary reconciliation and only when the matching
-normalized `sheet_values` entry is omitted or exactly `null`. Unreadable,
-ambiguous, non-null, or duplicate evidence blocks import. The narrow reviewed
+normalized `sheet_values` entry is omitted or exactly `null`. Unreadable or
+ambiguous essential/non-eligible fields, non-null absence values, and duplicate
+evidence block import. Reviewed accessory roles follow the bounded repair and
+blank-value admission contract above. The narrow reviewed
 subscriber-identifier, tax-inclusion, and supplier-default exceptions remain in
 force. `IMPORTED WITH WARNINGS` is reserved for a retained import whose
 electricity dashboard refresh failed.

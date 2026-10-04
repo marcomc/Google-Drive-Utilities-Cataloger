@@ -5,6 +5,23 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
 
 ## Propositions
 
+- [ ] **Import optional environmental-waste delivery details**
+  - Assessment: HERA environmental-hygiene invoices may report fixed-quota
+    deliveries, actual delivered volume, and recycling-center credits. Capturing
+    these fields would make quadrimestral imports more useful, while optional
+    blank values preserve compatibility with invoices that omit the details.
+  - Actions:
+    - Inspect representative HERA invoices and the destination sheet to define
+      optional fields for delivery count, fixed-quota liters, and actual liters.
+    - Define optional recycling-center weights by paper, plastic, metals, and
+      glass, plus the corresponding invoice credit; keep units and signs clear.
+    - Let Gemini reason over the whole invoice and the latest two or three rows
+      for the same supply and supplier when resolving unfamiliar labels, without
+      over-specifying extraction parameters.
+    - Add fixtures for present, absent, ambiguous, and conflicting details;
+      leave missing values blank and preserve monetary reconciliation.
+    - Implement and validate this separately from release 0.7.0.
+
 - [ ] **Evaluate adaptive templates for first-pass invoice extraction**
   - Assessment: compact, automatically generated format guides may reduce
     extraction repairs, but adding a template to a full-PDF prompt does not

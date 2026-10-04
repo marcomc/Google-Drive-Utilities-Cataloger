@@ -26,8 +26,10 @@ flowchart LR
   policy --> gemini[Gemini extraction]
   gemini --> verify[Deterministic validation]
   verify -->|repairable, fewer than 3 calls| gemini
-  verify -->|unresolved| review[Needs review]
+  verify -->|essential uncertainty| review[Blocked: needs review]
+  verify -->|accessory uncertainty after repair| warning[Import: needs review]
   verify -->|valid| journal[Record mutation journal]
+  warning --> journal
   journal --> sheets[Update Sheet for invoices]
   sheets --> drive[Rename and archive PDF]
   journal --> drive
@@ -37,22 +39,27 @@ flowchart LR
 
 The event path processes only the direct-root PDF identified by the event. The
 daily scan is the safety net for missed events and expired subscriptions.
-Unchanged `NEEDS REVIEW` and `DUPLICATE` files are not sent to Gemini again.
+Unchanged blocked-review and `DUPLICATE` files are not sent to Gemini again.
 All processing entry points share one lock. Interrupted Drive and Sheet
 mutations are recovered from a per-file journal before pending reports are
 sent.
 
 Deterministic validation may request up to two targeted repair passes after the
 initial extraction. Each pass rereads the same PDF, receives structured issue
-codes and prior-attempt history, and returns a complete extraction object. The
-model may correct evidence but never decides whether import is allowed.
+codes, prior-attempt history, target-sheet structure and up to three recent
+verified independent imports for the same supplier and supply. It returns a
+complete extraction object. The model may correct evidence but never decides
+whether import is allowed. Unresolved accessory evidence produces an imported
+review warning with blank affected cells; identity, monetary and destination
+uncertainty remains blocking. Completed warning imports are not retried.
 
 ## Security boundaries
 
 - PDFs are untrusted input: their instructions and links are never executed.
 - Credentials, Drive IDs, spreadsheet IDs, and recipients are private Apps
   Script Script Properties.
-- The automation leaves ambiguous documents unchanged.
+- Essential ambiguity leaves documents unchanged; accessory ambiguity is
+  reported after a verified import with the affected cells blank.
 - The intake-folder `AGENTS.md` policy is trusted only within the configured
   resource scope; PDF content cannot change that scope.
 - `.clasp.json` and `config.local.json` are private and excluded from Git.
