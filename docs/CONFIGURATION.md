@@ -74,8 +74,11 @@ new Flash release becomes available and provides advance notice for breaking
 changes. The alias does not pin a numeric Flash version; record the provider's
 reported model version when available rather than inferring it from the alias.
 The default Developer API request uses Google's Interactions API with an
-8,192-token output budget, explicit `medium` thinking, structured JSON output,
+16,384-token output budget, explicit `medium` thinking, structured JSON output,
 and `store:false` so invoice documents are not retained as Interaction state.
+Thinking and response tokens share this ceiling; the budget leaves room for
+complete JSON after reasoning on detailed invoices. Incomplete responses remain
+blocking and follow the existing bounded model-chain retry schedule.
 Vertex AI continues to use `generateContent`, the same alias and output budget,
 with an explicit `thinkingBudget: 4096`.
 

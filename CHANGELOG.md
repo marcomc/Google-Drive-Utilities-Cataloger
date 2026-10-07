@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-10-07 - complete extraction after Gemini thinking
+
+### Fixed
+
+- Increase the shared Gemini extraction response ceiling from 8,192 to 16,384
+  tokens so medium thinking leaves enough room for complete structured JSON on
+  detailed invoices. Preserve explicit reasoning controls, strict terminal-status
+  validation, and the existing bounded retry and paid-fallback eligibility rules.
+
 ## [0.7.0] - 2026-10-03 - guided invoice review and quadrimestral billing
 
 ### Added

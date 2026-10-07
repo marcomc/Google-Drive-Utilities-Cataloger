@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.7.0',
+  APP_VERSION: '0.7.1',
   // Google hot-swaps this alias to the newest Flash release for the model
   // variation. Keep the default moving without a Script Properties update.
   DEFAULT_MODEL: 'gemini-flash-latest',
@@ -34,8 +34,9 @@ const CONFIG = Object.freeze({
   // Script Properties have a 500 KB total limit. Reserve most of that space
   // for configuration, per-file state, mutation journals, and transport data.
   MAX_PENDING_REPORT_BYTES: 256 * 1024,
-  // Keep invoice extraction below the model's response ceiling.
-  GEMINI_MAX_OUTPUT_TOKENS: 8192,
+  // Thinking and JSON share the response ceiling. Leave room for the complete
+  // extraction after medium reasoning on detailed multi-page invoices.
+  GEMINI_MAX_OUTPUT_TOKENS: 16384,
   // Use backend-specific explicit reasoning controls for PDF cost extraction.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
   GEMINI_VERTEX_THINKING_BUDGET: 4096,
