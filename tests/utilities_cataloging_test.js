@@ -4382,12 +4382,12 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
         assert.equal(payload.store, false);
         assert.equal(Object.hasOwn(payload, 'previous_interaction_id'), false);
         assert.deepEqual(payload.generation_config, Object.assign(
-          { max_output_tokens: 8192 }, level ? { thinking_level: level } : {}
+          { max_output_tokens: 16384 }, level ? { thinking_level: level } : {}
         ), model);
         assert.equal(Object.hasOwn(payload, 'generationConfig'), false);
       } else {
         assert.ok(requests[0].url.endsWith('/' + model + ':generateContent'));
-        assert.equal(payload.generationConfig.maxOutputTokens, 8192);
+        assert.equal(payload.generationConfig.maxOutputTokens, 16384);
         assert.deepEqual(payload.generationConfig.thinkingConfig,
           vertexBudget ? { thinkingBudget: 4096 } : undefined, model);
         assert.deepEqual(Object.keys(payload.generationConfig).sort(),
@@ -4971,13 +4971,13 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour(model = 'gemini-2
     assert.equal(payload.model, model);
     assert.equal(payload.store, false);
     assert.deepEqual(payload.generation_config, {
-      max_output_tokens: 8192, thinking_level: 'medium'
+      max_output_tokens: 16384, thinking_level: 'medium'
     });
   }
   for (const index of [1, 2]) {
     assert.ok(requests[index].url.endsWith('/' + model + ':generateContent'));
     const payload = JSON.parse(requests[index].options.payload);
-    assert.equal(payload.generationConfig.maxOutputTokens, 8192);
+    assert.equal(payload.generationConfig.maxOutputTokens, 16384);
     assert.deepEqual(payload.generationConfig.thinkingConfig,
       model === 'gemini-2.5-flash' ? { thinkingBudget: 4096 } : undefined);
     assert.equal(Object.hasOwn(payload, 'generation_config'), false);
@@ -5181,7 +5181,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.0',
+      applicationVersion: '0.7.1',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5192,7 +5192,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.0',
+      applicationVersion: '0.7.1',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',

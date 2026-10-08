@@ -751,7 +751,7 @@ count, the event also includes
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
 The default `gemini-flash-latest` Developer API runtime uses Google's
-Interactions API with explicit `medium` thinking, an 8,192-token JSON response
+Interactions API with explicit `medium` thinking, a 16,384-token shared thinking and JSON response
 budget, the shared JSON Schema contract, and `store:false` for stateless invoice
 processing. Vertex AI continues to use `generateContent` with the same alias
 and output budget plus an explicit `thinkingBudget: 4096` to retain reasoning
