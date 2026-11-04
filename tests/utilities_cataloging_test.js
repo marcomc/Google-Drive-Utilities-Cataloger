@@ -6615,6 +6615,7 @@ function testGeminiModelChainReservesTimeToPersistDeferredState() {
     }) },
     UrlFetchApp: { fetch: (_url, options) => {
       requests.push(JSON.parse(options.payload).model);
+      vm.runInContext('modelChainClock = 60000;', context);
       return {
         getResponseCode: () => 500,
         getContentText: () => JSON.stringify({
@@ -6624,9 +6625,7 @@ function testGeminiModelChainReservesTimeToPersistDeferredState() {
     } }
   });
   vm.runInContext(
-    'let modelChainClockRead = 0; const modelChainClock = [0, 0, 60000]; ' +
-      'Date.now = () => modelChainClockRead < modelChainClock.length ? ' +
-      'modelChainClock[modelChainClockRead++] : 60000;',
+    'let modelChainClock = 0; Date.now = () => modelChainClock;',
     context
   );
   context.buildExtractionPrompt_ = () => 'test-prompt';
@@ -11565,3 +11564,71 @@ function testDetailedRepairThinkingReachesBothProviderRequests() {
   }
 }
 testDetailedRepairThinkingReachesBothProviderRequests();
+
+function testVertexCandidateFallbackRespectsAbsoluteDeadline() {
+  for (const expires of [true, false]) {
+    let now = 100000;
+    let requests = 0;
+    const events = [];
+    class FakeDate extends Date { static now() { return now; } }
+    const c = loadCataloger({ Date: FakeDate, UrlFetchApp: { fetch: () => {
+      requests += 1;
+      if (requests === 1) {
+        now = expires ? 300001 : 100001;
+        return { getResponseCode: () => 404,
+          getContentText: () => JSON.stringify({ error: { message: 'Model not found' } }) };
+      }
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{
+        finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] }) };
+    } } });
+    c.getEffectiveGeminiBackend_ = () => 'vertex_ai';
+    c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+    c.getGeminiModelCandidatesForBackend_ = () => ['gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'];
+    c.getScriptProperty_ = () => 'fixture-project';
+    c.buildExtractionPrompt_ = () => 'prompt';
+    c.logCatalogEvent_ = event => events.push(event);
+    const run = () => c.callGeminiForPdf_({ getBytes: () => [1] }, {}, '',
+      { getId: () => 'file-id' }, null, null, 300000);
+    if (expires) assert.throws(run, error => error.extractionRepairDeferred === true);
+    else assert.equal(run(), '{}');
+    assert.equal(requests, expires ? 1 : 2);
+    assert.equal(events.filter(e => e === 'gemini-generation-request').length, requests);
+    now = 300001;
+    assert.throws(() => c.callGeminiForPdf_({ getBytes: () => [1] }, {}, '',
+      { getId: () => 'file-id' }, { modelOverride: 'gemini-3.5-flash-lite' }, null, 300000),
+    error => error.extractionRepairDeferred === true);
+    assert.equal(requests, expires ? 1 : 2, 'Expired model overrides cannot send another request');
+  }
+}
+testVertexCandidateFallbackRespectsAbsoluteDeadline();
+
+function testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest() {
+  for (const networkError of [true, false]) {
+    for (const expires of [true, false]) {
+      let now = 100000, requests = 0, waits = 0;
+      class FakeDate extends Date { static now() { return now; } }
+      const c = loadCataloger({ Date: FakeDate, UrlFetchApp: { fetch: () => {
+        requests += 1;
+        if (requests === 1) {
+          now = expires ? 300001 : 100001;
+          if (networkError) throw new Error('fixture network error');
+          return { getResponseCode: () => 503, getContentText: () => '{}' };
+        }
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{
+          finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] }) };
+      } } });
+      c.Utilities.sleep = () => { waits += 1; };
+      c.getScriptProperty_ = () => 'fixture-project';
+      c.buildExtractionPrompt_ = () => 'prompt';
+      c.logCatalogEvent_ = () => {};
+      const run = () => c.callGeminiForPdfWithBackend_({ getBytes: () => [1] }, {}, '',
+        { getId: () => 'file-id' }, 'vertex_ai', '', null, null,
+        'gemini-3.5-flash-lite', false, 300000);
+      if (expires) assert.throws(run, error => error.extractionRepairDeferred === true);
+      else assert.equal(run(), '{}');
+      assert.equal(requests, expires ? 1 : 2);
+      assert.equal(waits, expires ? 0 : 1);
+    }
+  }
+}
+testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest();

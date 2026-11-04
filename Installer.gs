@@ -940,10 +940,11 @@ function validateConfiguredGenerationResponse_(response, provider, interactions)
     finishReason: finishReason,
     modelVersion: modelVersion,
     promptTokenCount: Number(usageMetadata.promptTokenCount ||
-      usageMetadata.input_tokens || 0),
+      usageMetadata.total_input_tokens || usageMetadata.input_tokens || 0),
     candidatesTokenCount: Number(usageMetadata.candidatesTokenCount ||
-      usageMetadata.output_tokens || 0),
-    thoughtsTokenCount: Number(usageMetadata.thoughtsTokenCount || 0)
+      usageMetadata.total_output_tokens || usageMetadata.output_tokens || 0),
+    thoughtsTokenCount: Number(usageMetadata.thoughtsTokenCount ||
+      usageMetadata.total_thought_tokens || 0)
   };
 }
 

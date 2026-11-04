@@ -9,6 +9,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Carry the absolute execution deadline through provider/model fallback and
+  transient retries, reserving time before another request or wait. Preserve
+  Interactions API input, output and thinking-token counts in readiness telemetry.
+
 - Default new installations and unconfigured runtimes to the explicit
   `gemini-3.5-flash-lite` model ID; resolve stable Flash-Lite candidates
   independently for each provider and require bounded generation probes before

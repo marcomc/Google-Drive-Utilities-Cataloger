@@ -3079,3 +3079,24 @@ testTimeZoneReconfigurationRollsBackRemoteState();
 testTimeZoneTransactionLifecycle();
 
 console.log('Apps Script installer tests passed.');
+
+function testDiscoveryProbeReportsProviderTokenFields() {
+  for (const backend of ['gemini_api', 'vertex_ai']) {
+    const context = loadInstallerWithRuntimeConfig(() => response(200,
+      backend === 'gemini_api' ? { status: 'completed',
+        usage: { total_input_tokens: 17, total_output_tokens: 9, total_thought_tokens: 4 },
+        steps: [{ type: 'model_output', content: [{ type: 'text', text: '{"ready":true}' }] }] } : {
+        usageMetadata: { promptTokenCount: 17, candidatesTokenCount: 9, thoughtsTokenCount: 4 },
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"ready":true}' }] } }] }),
+    { GEMINI_API_KEY: 'fixture-key', GOOGLE_CLOUD_PROJECT_ID: 'fixture-project' });
+    const events = [];
+    context.logCatalogEvent_ = (event, details) => events.push({ event, ...details });
+    context.probeGeminiModelForBackend_(backend, 'gemini-3.5-flash-lite');
+    const usage = events.find(e => e.event === 'gemini-model-generation-probe');
+    assert.equal(usage.successful, true);
+    assert.equal(usage.promptTokenCount, 17);
+    assert.equal(usage.candidatesTokenCount, 9);
+    assert.equal(usage.thoughtsTokenCount, 4);
+  }
+}
+testDiscoveryProbeReportsProviderTokenFields();
