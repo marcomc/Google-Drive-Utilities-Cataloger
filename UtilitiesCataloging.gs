@@ -3836,6 +3836,19 @@ function normalizeElectricityBandConsumption_(value) {
   return quantity !== null && quantity >= 0 ? quantity : null;
 }
 
+function getBlockingInvoiceProblems_(extracted, options) {
+  return (extracted.problems || []).filter(function (problem) {
+    return !(options && options.allowAccessory && classifyAccessoryInvoiceProblem_(problem, extracted)) &&
+      !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
+      !isInformationalElectricityBandAbsenceProblem_(problem, extracted) &&
+      !isInformationalElectricityBandMappingProblem_(problem, extracted) &&
+      !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) &&
+      !isInformationalTaxInclusionProblem_(problem, extracted) &&
+      classifyConfiguredSecondaryInvoiceProblem_(problem, extracted).disposition !==
+        'explicit-absence';
+  });
+}
+
 function validateExtraction_(extracted, options) {
   if (['Invoice', 'Contract', 'Report'].indexOf(extracted.document_type) === -1) {
     return invalidExtraction_('Document type cannot be identified.',
@@ -3884,16 +3897,7 @@ function validateExtraction_(extracted, options) {
           fields: ['contract_number', 'customer_code']
         });
     }
-    const blockingProblems = extracted.problems.filter(function (problem) {
-      return !(options && options.allowAccessory && classifyAccessoryInvoiceProblem_(problem, extracted)) &&
-        !isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) &&
-        !isInformationalElectricityBandAbsenceProblem_(problem, extracted) &&
-        !isInformationalElectricityBandMappingProblem_(problem, extracted) &&
-        !isInformationalMissingFrequencyProvenanceProblem_(problem, extracted) &&
-        !isInformationalTaxInclusionProblem_(problem, extracted) &&
-        classifyConfiguredSecondaryInvoiceProblem_(problem, extracted).disposition !==
-          'explicit-absence';
-    });
+    const blockingProblems = getBlockingInvoiceProblems_(extracted, options);
     if (blockingProblems.length > 0) {
       return invalidExtraction_('Extraction validation: ' + blockingProblems.join('; '),
         'Manually verify the PDF and correct missing or ambiguous data.', {

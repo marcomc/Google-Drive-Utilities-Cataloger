@@ -299,8 +299,10 @@ function testExtractionCallerUsesTrustedContractAndUniversalPeriod() {
       identifier: 'INV-001', issue_date: '2026-10-01', billing_cycle_kind: 'ordinary',
       frequency: null, frequency_source_evidence: null, reference_year: 2026, reference_month: '08',
       period_start: '2026-05-01', period_end: '2026-08-31',
-      problem_details: [{ code: 'missing', fields: ['Ricalcoli'], message: 'Ricalcoli non presente nel documento.' }],
-      problems: ['Ricalcoli non presente nel documento.']
+      contract_number: '',
+      problem_details: [{ code: 'missing', fields: ['Ricalcoli'], message: 'Ricalcoli non presente nel documento.' },
+        { code: 'missing', fields: ['contract_number'], message: 'Numero contratto non presente.' }],
+      problems: ['Ricalcoli non presente nel documento.', 'Numero contratto non presente.']
     });
     raw.sheet_values.push({ header: 'Quantità consumi', value: 5 }, { header: 'Costo unitario', value: 0.496 });
     let calls = 0;
@@ -328,6 +330,20 @@ function testExtractionCallerUsesTrustedContractAndUniversalPeriod() {
     assert.equal(result.extracted.vat, 3.37);
     assert.equal(result.extracted.total, 21.35);
     assert.ok(c.getInvoiceContract_(result.extracted));
+    c.callGeminiForPdf_ = () => JSON.stringify(raw);
+    const immediate = c.extractUtilityDataWithRepair_(file, trustedPolicy, Date.now() + 120000);
+    assert.equal(immediate.validation.valid, true);
+    assert.equal(immediate.aiCallCount, 1, 'Non-blocking absence must not consume extra model calls');
+    assert.equal(immediate.extracted.cost_non_consumption, 15.5);
+    assert.ok(immediate.extracted.problems.includes('Numero contratto non presente.'));
+    const cadence = JSON.parse(JSON.stringify(raw)); cadence.period_end = null;
+    c.callGeminiForPdf_ = () => JSON.stringify(cadence);
+    const review = c.extractUtilityDataWithRepair_(file, trustedPolicy, Date.now() + 120000);
+    assert.equal(review.validation.valid, true);
+    assert.equal(review.aiCallCount, 3);
+    assert.equal(review.extracted.cost_non_consumption, 15.5);
+    assert.equal(review.extracted.review_issues.length, 1);
+    assert.equal(review.extracted.review_issues[0].fields[0], 'frequency');
     assert.equal(result.extracted.sheet_values.find(x => x.header === 'Costo unitario').value, 0.496);
     assert.equal(result.extracted.sheet_values.find(x => x.header === 'Quantità consumi').value, 5);
     for (const [header, value] of [['Costo unitario', 'unreadable'], ['Quantità consumi', '1.234']]) {
@@ -376,6 +392,30 @@ function testProductChecksRequireTypedConfiguredIndependentInputs() {
   ]) assert.throws(() => c.parseInvoiceContract_('```invoice-contract\n' + JSON.stringify({ ...data, products: [bad] }) + '\n```'));
 }
 
+function testValidatedMappingRetainsNonBlockingDiagnostics() {
+  const c = runtime();
+  for (const [problem, missing] of [
+    ['Numero contratto non presente.', 'contract_number'],
+    ['Codice cliente non presente.', 'customer_code'],
+    ['Gli importi sono riportati comprensivi di IVA.', ''],
+    ['Billing frequency could not be established from the billed period or prior invoices.', '']
+  ]) {
+    const e = invoice(c); e[missing] = ''; e.problems = [problem];
+    assert.equal(c.evaluateInvoiceContract_(e, true).valid, true);
+    assert.equal(e.cost_non_consumption, 15.5, 'Optional identifier absence must not suppress a valid mapping');
+    assert.deepEqual(e.problems, [problem], 'Keep the original diagnostic for downstream classification');
+  }
+  for (const problem of ['Quota fissa ambigua.', 'Numero contratto illeggibile.',
+    'Numero contratto non presente. La quota fissa è in conflitto.', 'Unclassified extraction problem.']) {
+    const e = invoice(c); e.contract_number = ''; e.problems = [problem];
+    c.evaluateInvoiceContract_(e, true);
+    assert.equal(e.cost_non_consumption, 13.07, 'Conflicting diagnostics retain the original snapshot');
+    assert.equal(c.validateInvoiceCostEvidence_(e).valid, false);
+    assert.equal(e.sheet_values.find(x => x.header === 'Quota fissa').value, 13.07);
+    assert.deepEqual(e.problems, [problem]);
+  }
+}
+
 testSupplierRenamingDoesNotChangeExecution();
 testSourceContradictionsRemainBlocking();
 testProfileTrustAndLanguageAreBounded();
@@ -386,4 +426,5 @@ testSameSupplierMayHaveDisjointSupplyProfiles();
 testWorkspaceSelectionOnlyBindsExplicitExistingResources();
 testExtractionCallerUsesTrustedContractAndUniversalPeriod();
 testProductChecksRequireTypedConfiguredIndependentInputs();
+testValidatedMappingRetainsNonBlockingDiagnostics();
 console.log('Generic invoice contracts and model-family tests passed.');

@@ -55,7 +55,9 @@ Unreadable or ambiguous evidence is never absence.
 
 The response returns `source_components` with each declared ID, finite native
 numeric `amount`, and `source_evidence` of `printed` or `explicit_absence`.
-Missing, extra or duplicate components block admission. Checks compare printed
+Missing, extra or duplicate components block admission. Retained diagnostics
+classified as non-blocking by import validation do not suppress a validated
+allocation; ambiguous, conflicting or unrecognized problems still block it. Checks compare printed
 parents and children independently; no residual balancing is permitted.
 Cycles, repeated leaves and duplicate targets are rejected. Collections are
 bounded to 100 entries, supplies to 20 and literal strings to 200 characters.

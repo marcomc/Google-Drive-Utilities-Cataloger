@@ -17,7 +17,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Validate printed components against independent subtotals, preserve conflicting
   evidence and reject double counting before writing invoice costs. Check declared
-  quantity/rate products against independently printed amounts. Use generic
+  quantity/rate products against independently printed amounts. Apply validated
+  allocations when retained absence diagnostics are non-blocking; keep
+  conflicting evidence blocking. Use generic
   monetary repair codes and bounded reasoning escalation across suppliers.
 - Use the first month of the actual billed service period as the reference month
   for every supply, including advance billing and periods spanning calendar years.

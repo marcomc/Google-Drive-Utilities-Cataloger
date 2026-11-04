@@ -426,7 +426,7 @@ function evaluateInvoiceContract_(extracted, applyMapping) {
   }
   if (!validateInvoiceMonetaryOverlays_(candidate,
     'invoice_cost_reconciliation_mismatch', 'Invoice').valid) { return fail(); }
-  if (applyMapping && !(extracted.problems || []).length) {
+  if (applyMapping && !getBlockingInvoiceProblems_(candidate, { allowAccessory: true }).length) {
     extracted.cost_consumption = candidate.cost_consumption;
     extracted.cost_non_consumption = candidate.cost_non_consumption;
     extracted.sheet_values = candidate.sheet_values;
