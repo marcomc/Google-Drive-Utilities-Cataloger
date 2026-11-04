@@ -88,7 +88,8 @@ assert.deepEqual(events, [
   'create:runDailyUtilitiesCataloging',
   'create:processDriveEventQueue',
   'create:processDueGeminiOverloadRetries',
-  'create:renewDriveEventSubscription'
+  'create:renewDriveEventSubscription',
+  'create:maintainGeminiModelSelections'
 ]);
 assert.deepEqual(JSON.parse(JSON.stringify(installed)), {
   applicationVersion,
@@ -96,7 +97,8 @@ assert.deepEqual(JSON.parse(JSON.stringify(installed)), {
     runDailyUtilitiesCataloging: 1,
     processDriveEventQueue: 1,
     processDueGeminiOverloadRetries: 1,
-    renewDriveEventSubscription: 1
+    renewDriveEventSubscription: 1,
+    maintainGeminiModelSelections: 1
   },
   missingTriggerHandlers: [],
   duplicateTriggerHandlers: []
@@ -119,7 +121,8 @@ assert.deepEqual(
     runDailyUtilitiesCataloging: { frequency: 'daily', hour: 7 },
     processDriveEventQueue: { frequency: 'minutes', interval: 15 },
     processDueGeminiOverloadRetries: { frequency: 'minutes', interval: 1 },
-    renewDriveEventSubscription: { frequency: 'hours', interval: 6 }
+    renewDriveEventSubscription: { frequency: 'hours', interval: 6 },
+    maintainGeminiModelSelections: { frequency: 'hours', interval: 1 }
   }
 );
 
@@ -193,7 +196,8 @@ context.installAutomationTriggers();
 assert.deepEqual(events, [
   'create:processDriveEventQueue',
   'create:processDueGeminiOverloadRetries',
-  'create:renewDriveEventSubscription'
+  'create:renewDriveEventSubscription',
+  'create:maintainGeminiModelSelections'
 ]);
 assert.equal(context.getAutomationTriggerStatus_().missingTriggerHandlers.length, 0);
 
@@ -216,7 +220,7 @@ assert.equal(activeTriggers.length, 5);
 failDeletionFor = '';
 events.length = 0;
 context.installAutomationTriggers();
-assert.deepEqual(events, ['delete:daily-two']);
+assert.deepEqual(events, ['delete:daily-two', 'create:maintainGeminiModelSelections']);
 assert.equal(context.getAutomationTriggerStatus_().duplicateTriggerHandlers.length, 0);
 
 events.length = 0;
@@ -235,12 +239,14 @@ assert.deepEqual(JSON.parse(JSON.stringify(unhealthy)), {
     runDailyUtilitiesCataloging: 2,
     processDriveEventQueue: 0,
     processDueGeminiOverloadRetries: 0,
-    renewDriveEventSubscription: 0
+    renewDriveEventSubscription: 0,
+    maintainGeminiModelSelections: 0
   },
   missingTriggerHandlers: [
     'processDriveEventQueue',
     'processDueGeminiOverloadRetries',
-    'renewDriveEventSubscription'
+    'renewDriveEventSubscription',
+    'maintainGeminiModelSelections'
   ],
   duplicateTriggerHandlers: ['runDailyUtilitiesCataloging']
 });

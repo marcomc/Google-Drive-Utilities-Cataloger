@@ -14,9 +14,11 @@ LICENSE
 config.example.json
 config.local.json
 config.local.json.tmp*
+.git/**
 .gitignore
 .markdownlint.json
 .installer/**
 docs/**
 scripts/**
 tests/**
+supplier-profiles/**

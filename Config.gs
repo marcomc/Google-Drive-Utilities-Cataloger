@@ -1,17 +1,8 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.7.1',
-  // Google hot-swaps this alias to the newest Flash release for the model
-  // variation. Keep the default moving without a Script Properties update.
-  DEFAULT_MODEL: 'gemini-flash-latest',
-  // Keep the moving alias separate from the latest explicitly verified Flash
-  // releases. Add new releases here without changing the fallback algorithm.
-  GEMINI_DEVELOPER_FALLBACK_MODELS: Object.freeze([
-    'gemini-flash-latest',
-    'gemini-3.8-flash',
-    'gemini-3.7-flash',
-    'gemini-3.6-flash',
-    'gemini-3.5-flash'
-  ]),
+  APP_VERSION: '0.8.0',
+  // Bootstrap fallback for explicit pins; automatic selection is the default
+  // for new installations and resolves each provider's catalog independently.
+  DEFAULT_MODEL: 'gemini-3.5-flash-lite',
   DAILY_TRIGGER_HOUR: 7,
   EVENT_POLL_MINUTES: 15,
   MAX_RUNTIME_MS: 280000,
@@ -39,7 +30,14 @@ const CONFIG = Object.freeze({
   GEMINI_MAX_OUTPUT_TOKENS: 16384,
   // Use backend-specific explicit reasoning controls for PDF cost extraction.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
+  GEMINI_FLASH_LITE_THINKING_LEVEL: 'low',
   GEMINI_VERTEX_THINKING_BUDGET: 4096,
+  GEMINI_MODEL_SELECTION_REFRESH_MS: 24 * 60 * 60 * 1000,
+  GEMINI_MODEL_SELECTION_MAX_CANDIDATES: 8,
+  GEMINI_MODEL_CATALOG_MAX_PAGES: 10,
+  GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS: 1024,
+  // Model Garden rejects list requests above 300 results per page.
+  GEMINI_VERTEX_CATALOG_PAGE_SIZE: 300,
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
   // Bound remote reads independently of the three accepted historical rows.
@@ -81,6 +79,10 @@ const CONFIG = Object.freeze({
     AUTOMATION_TRIGGER_SCHEDULES: 'AUTOMATION_TRIGGER_SCHEDULES',
     GEMINI_BACKEND: 'GEMINI_BACKEND',
     GEMINI_MODEL: 'GEMINI_MODEL',
+    GEMINI_MODEL_AUTO_SELECTION: 'GEMINI_MODEL_AUTO_SELECTION',
+    GEMINI_MODEL_SELECTIONS: 'GEMINI_MODEL_SELECTIONS',
+    GEMINI_MODEL_ESCALATION_SELECTIONS: 'GEMINI_MODEL_ESCALATION_SELECTIONS',
+    GEMINI_MODEL_MAINTENANCE_ATTEMPTS: 'GEMINI_MODEL_MAINTENANCE_ATTEMPTS',
     VERTEX_AI_LOCATION: 'VERTEX_AI_LOCATION',
     GEMINI_AUTO_VERTEX_FALLBACK: 'GEMINI_AUTO_VERTEX_FALLBACK',
     GEMINI_VERTEX_FALLBACK_UNTIL: 'GEMINI_VERTEX_FALLBACK_UNTIL',
@@ -132,6 +134,7 @@ function getSetupStatus() {
     geminiBackend: getGeminiBackend_(),
     geminiEffectiveBackend: getEffectiveGeminiBackend_(),
     geminiAutoVertexFallbackEnabled: isAutomaticVertexFallbackEnabled_(),
+    geminiModelSelection: getGeminiModelSelectionStatus_(),
     serviceAddressIdentityEnforced: isServiceAddressIdentityEnforced_(),
     geminiVertexFallbackUntil: getTemporaryVertexFallbackUntilIso_(),
     geminiModel: getGeminiModel_(),
@@ -200,25 +203,31 @@ function normalizeGeminiModel_(model) {
 }
 
 function getGeminiReasoningConfig_(model, backend) {
-  const gemini25Models = [
-    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
-  ];
+  const family = /^gemini-(\d+)(?:\.\d+)*-(flash-lite|flash|pro)(?:-preview(?:-[a-z0-9-]+)?)?$/.exec(String(model || ''));
+  const alias = /^gemini-(flash-lite|flash)-latest$/.exec(String(model || ''));
+  if (!family && !alias) { return {}; }
+  const major = family ? Number(family[1]) : null;
+  const tier = family ? family[2] : alias[1];
+  // The legacy protocol uses a token budget; current families use a level.
+  if (backend === 'vertex_ai' && major === 2) {
+    return { thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET } };
+  }
+  const level = major === 2 ? 'medium' : tier === 'pro' ? 'high' :
+    tier === 'flash-lite' ? CONFIG.GEMINI_FLASH_LITE_THINKING_LEVEL : CONFIG.GEMINI_FLASH_THINKING_LEVEL;
   if (backend === 'vertex_ai') {
-    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
-      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
-    } : {};
+    return family ? { thinkingConfig: { thinkingLevel: level.toUpperCase() } } : {};
   }
-  if (model === 'gemini-3-pro-preview') {
-    return { thinking_level: 'high' };
-  }
-  const mediumLevelModels = gemini25Models.concat([
-    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
-    'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
-    'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
-  ]);
-  return mediumLevelModels.indexOf(model) !== -1 ? {
-    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
-  } : {};
+  return { thinking_level: level };
+}
+
+function getGeminiThinkingLevel_(model) {
+  return isGeminiFlashLiteModel_(model) ?
+    CONFIG.GEMINI_FLASH_LITE_THINKING_LEVEL :
+    CONFIG.GEMINI_FLASH_THINKING_LEVEL;
+}
+
+function isGeminiFlashLiteModel_(model) {
+  return /^gemini-\d+(?:\.\d+)*-flash-lite$/.test(String(model || ''));
 }
 
 /**
@@ -234,6 +243,8 @@ function configureGeminiModel(model) {
     CONFIG.PROPERTY_KEYS.GEMINI_MODEL,
     normalizeGeminiModel_(normalizedModel)
   );
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.GEMINI_MODEL_AUTO_SELECTION, 'false');
   return getSetupStatus();
 }
 
@@ -254,26 +265,28 @@ function configureGeminiBackend(backend) {
 }
 
 /**
- * Migrate the installed Energygas supplier identity to the canonical casing
- * used by the imported spreadsheet history and the extraction prompt.
+ * Rename one configured supplier identity and its configuration references.
  */
-function migrateCatalogerEnergygasCanonicalSpelling() {
+function renameCatalogerSupplierIdentity(previous, target) {
+  if (typeof previous !== 'string' || typeof target !== 'string' || !previous.trim() ||
+    !target.trim() || previous !== previous.trim() || target !== target.trim()) {
+    throw new Error('Previous and target supplier identities are required.');
+  }
   assertCatalogConfiguration_();
-  return withCatalogLifecycleLock_('energygas-canonical-spelling-migration',
+  return withCatalogLifecycleLock_('supplier-identity-rename',
     function () {
       const properties = PropertiesService.getScriptProperties();
       const automationConfig = getAutomationConfig_();
-      const target = 'Energygas Italia';
       const matches = automationConfig.canonical_suppliers.filter(function (item) {
-        return normalizeConfigIdentity_(item) === 'energygas' ||
-          normalizeConfigIdentity_(item) === 'energygas italia';
+        return normalizeConfigIdentity_(item) === normalizeConfigIdentity_(previous) ||
+          normalizeConfigIdentity_(item) === normalizeConfigIdentity_(target);
       });
       if (matches.length > 1) {
-        throw new Error('Energygas canonical supplier values are ambiguous.');
+        throw new Error('Supplier identities are ambiguous.');
       }
       const current = matches[0] || '';
       if (!current) {
-        return { updated: false, reason: 'energygas-not-configured' };
+        return { updated: false, reason: 'supplier-not-configured' };
       }
       if (current === target) {
         return { updated: false, canonicalSupplier: target };
@@ -290,13 +303,16 @@ function migrateCatalogerEnergygasCanonicalSpelling() {
           delete automationConfig.supplier_aliases[alias];
         }
       });
+      if (normalizeConfigIdentity_(current) !== normalizeConfigIdentity_(target)) {
+        automationConfig.supplier_aliases[current] = target;
+      }
       const destinationTemplates = Object.create(null);
       Object.keys(automationConfig.destination_templates).forEach(function (key) {
         const parts = key.split('|');
         const migratedKey = parts[1] === current ? parts[0] + '|' + target : key;
         if (destinationTemplates[migratedKey] &&
           destinationTemplates[migratedKey] !== automationConfig.destination_templates[key]) {
-          throw new Error('Energygas destination templates are ambiguous.');
+          throw new Error('Supplier destination templates are ambiguous.');
         }
         destinationTemplates[migratedKey] = automationConfig.destination_templates[key];
       });

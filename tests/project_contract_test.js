@@ -133,7 +133,7 @@ function testCommittedJsonAndRuntimeConfig() {
   const applicationVersion = vm.runInContext('CONFIG.APP_VERSION', context);
   assert.equal(
     vm.runInContext('CONFIG.DEFAULT_MODEL', context),
-    'gemini-flash-latest'
+    'gemini-3.5-flash-lite'
   );
   assert.match(applicationVersion, /^\d+\.\d+\.\d+$/);
   const latestReleaseMatch = changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m);
@@ -145,7 +145,7 @@ function testCommittedJsonAndRuntimeConfig() {
 function testRequiredEntrypointValidationIsTopLevelAndNegativeSafe() {
   const { requiredEntrypoints, missingEntrypoints, sourceSyntaxError } = require(
     '../scripts/lib/apps-script-entrypoints.js');
-  assert.equal(requiredEntrypoints.length, 22);
+  assert.equal(requiredEntrypoints.length, 28);
   const sources = requiredEntrypoints.map((name) => `function ${name}() {}`);
   assert.deepEqual(missingEntrypoints(sources), [], 'cross-file declarations');
   const temporaryDirectory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gduc-entrypoints-'));

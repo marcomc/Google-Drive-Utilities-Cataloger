@@ -855,6 +855,7 @@ collect_installation_inputs() {
   local spreadsheet_title
   local gemini_mode
   local gemini_model
+  local gemini_model_auto_selection
   local vertex_ai_location
   local initial_settings
   local reuse_project_value
@@ -969,7 +970,11 @@ collect_installation_inputs() {
     "${project_name} - Utilities" \
     "${GDUC_SPREADSHEET_TITLE:-}"
   gemini_mode="$(select_gemini_mode)"
-  gemini_model="${GDUC_GEMINI_MODEL:-gemini-flash-latest}"
+  gemini_model="${GDUC_GEMINI_MODEL:-gemini-3.5-flash-lite}"
+  gemini_model_auto_selection=true
+  if [[ -n "${GDUC_GEMINI_MODEL:-}" ]]; then
+    gemini_model_auto_selection=false
+  fi
   vertex_ai_location="${GDUC_VERTEX_AI_LOCATION:-global}"
   evaluate_predicate is_valid_gemini_model "${gemini_model}"
   if [[ "${PREDICATE_STATUS}" -ne 0 ]]; then
@@ -994,6 +999,7 @@ collect_installation_inputs() {
     --arg spreadsheetTitle "${spreadsheet_title}" \
     --arg geminiMode "${gemini_mode}" \
     --arg geminiModel "${gemini_model}" \
+    --argjson geminiModelAutoSelection "${gemini_model_auto_selection}" \
     --arg vertexAiLocation "${vertex_ai_location}" \
     '{
       projectName: $projectName,
@@ -1007,6 +1013,7 @@ collect_installation_inputs() {
       spreadsheetTitle: $spreadsheetTitle,
       geminiMode: $geminiMode,
       geminiModel: $geminiModel,
+      geminiModelAutoSelection: $geminiModelAutoSelection,
       vertexAiLocation: $vertexAiLocation
     }')"
   write_initial_state "${initial_settings}"
@@ -2155,6 +2162,9 @@ build_bootstrap_payload() {
           geminiBackend: $installerState[0].geminiBackend,
           geminiApiKey: .,
           geminiModel: $installerState[0].geminiModel,
+          geminiModelAutoSelection:
+            ($installerState[0].geminiModelAutoSelection == true or
+              $installerState[0].geminiModelAutoSelection == "true"),
           autoVertexFallback: $installerState[0].geminiAutoVertexFallback,
           vertexLocation: $installerState[0].vertexAiLocation,
           automationConfig: $automationConfig,
@@ -2346,6 +2356,7 @@ apply_resume_overrides() {
         "${INSTALL_DOC}#gemini-runtime"
     fi
     state_set "geminiModel" "${gemini_model}"
+    state_set "geminiModelAutoSelection" "false"
     success "Updated the pending Gemini model"
   fi
   if [[ -n "${vertex_ai_location}" ]]; then

@@ -12,7 +12,7 @@ function bootstrapCatalogerInstallation(options) {
   const validated = validateInstallerOptions_(
     readInstallerBootstrapOptions_(options)
   );
-  validateInstallerGeminiAccess_(validated);
+  const modelSelections = validateInstallerGeminiAccess_(validated);
   const properties = PropertiesService.getScriptProperties();
   const priorRootFolderId = properties.getProperty(
     CONFIG.PROPERTY_KEYS.ROOT_FOLDER_ID
@@ -45,6 +45,7 @@ function bootstrapCatalogerInstallation(options) {
   const propertyValues = {
     GEMINI_BACKEND: validated.geminiBackend,
     GEMINI_MODEL: validated.geminiModel,
+    GEMINI_MODEL_AUTO_SELECTION: String(validated.geminiModelAutoSelection),
     GEMINI_AUTO_VERTEX_FALLBACK: String(validated.autoVertexFallback),
     VERTEX_AI_LOCATION: validated.vertexLocation,
     NOTIFICATION_RECIPIENT: validated.notificationRecipient,
@@ -54,12 +55,18 @@ function bootstrapCatalogerInstallation(options) {
     GOOGLE_CLOUD_PROJECT_ID: validated.projectId,
     INSTALLER_COMPLETED_AT: new Date().toISOString()
   };
+  if (validated.geminiModelAutoSelection) {
+    propertyValues.GEMINI_MODEL_SELECTIONS = JSON.stringify(modelSelections);
+  }
   if (validated.geminiApiKey) {
     propertyValues.GEMINI_API_KEY = validated.geminiApiKey;
   } else {
     properties.deleteProperty(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY);
   }
   properties.setProperties(propertyValues, false);
+  if (!validated.geminiModelAutoSelection) {
+    properties.deleteProperty(CONFIG.PROPERTY_KEYS.GEMINI_MODEL_SELECTIONS);
+  }
   properties.deleteProperty(CONFIG.PROPERTY_KEYS.GEMINI_VERTEX_FALLBACK_UNTIL);
 
   // Reuse the runtime validators before creating any event transport.
@@ -650,23 +657,58 @@ function validateCatalogerInstallation() {
 function validateConfiguredGeminiAccess() {
   const backend = getGeminiBackend_();
   const autoVertexFallback = isAutomaticVertexFallbackEnabled_();
-  const model = getGeminiModel_();
+  const geminiApiEnabled = backend === 'gemini_api';
+  const vertexEnabled = backend === 'vertex_ai' ||
+    (backend === 'gemini_api' && autoVertexFallback);
+  let geminiApiModel = getGeminiModel_();
+  let vertexModel = getGeminiModel_();
+  let geminiApiSelectionError = null;
+  let vertexSelectionError = null;
+  if (isAutomaticGeminiModelSelectionEnabled_()) {
+    if (geminiApiEnabled) {
+      try {
+        geminiApiModel = getGeminiModelForBackend_('gemini_api');
+      } catch (error) {
+        geminiApiModel = '';
+        geminiApiSelectionError = error;
+      }
+    }
+    if (vertexEnabled) {
+      try {
+        vertexModel = getGeminiModelForBackend_('vertex_ai');
+      } catch (error) {
+        vertexModel = '';
+        vertexSelectionError = error;
+      }
+    }
+  }
   const options = {
     projectId: getScriptProperty_(CONFIG.PROPERTY_KEYS.GOOGLE_CLOUD_PROJECT_ID),
     geminiBackend: backend,
     geminiApiKey: getScriptProperty_(CONFIG.PROPERTY_KEYS.GEMINI_API_KEY),
-    geminiModel: model,
     autoVertexFallback: autoVertexFallback,
     vertexLocation: getVertexAiLocation_()
   };
-  const geminiApi = validateConfiguredGeminiBackend_(
-    'gemini_api', backend === 'gemini_api', options);
-  const vertexAi = validateConfiguredGeminiBackend_(
-    'vertex_ai', backend === 'vertex_ai' || autoVertexFallback, options);
+  const geminiApiOptions = Object.assign({}, options, {
+    geminiModel: geminiApiModel
+  });
+  const vertexOptions = Object.assign({}, options, { geminiModel: vertexModel });
+  const geminiApi = geminiApiSelectionError ?
+    buildConfiguredGeminiSelectionFailure_(geminiApiSelectionError) :
+    validateConfiguredGeminiBackend_(
+      'gemini_api', geminiApiEnabled, geminiApiOptions);
+  const vertexAi = vertexSelectionError ?
+    buildConfiguredGeminiSelectionFailure_(vertexSelectionError) :
+    validateConfiguredGeminiBackend_(
+      'vertex_ai', vertexEnabled, vertexOptions);
   return {
     applicationVersion: CONFIG.APP_VERSION,
     geminiBackend: backend,
-    geminiModel: model,
+    geminiModel: getGeminiModel_(),
+    geminiModels: {
+      gemini_api: geminiApiModel,
+      vertex_ai: vertexModel
+    },
     ready: (!geminiApi.enabled || geminiApi.available) &&
       (!vertexAi.enabled || vertexAi.available),
     geminiApiValidated: geminiApi.metadataValidated,
@@ -678,6 +720,28 @@ function validateConfiguredGeminiAccess() {
       vertex_ai: vertexAi
     }
   };
+}
+
+function buildConfiguredGeminiSelectionFailure_(error) {
+  const result = {
+    enabled: true,
+    metadataValidated: false,
+    generationValidated: false,
+    available: false,
+    failureStage: 'model-selection',
+    reason: error && (error.geminiModelProbeAuthFailure === true ||
+      error.geminiCatalogAuthFailure === true) ?
+      'authentication-failed' :
+      error && (error.geminiCatalogTransient === true ||
+        error.geminiModelProbeTransient === true) ?
+        'provider-temporarily-unavailable' : 'no-verified-model'
+  };
+  const statusMatch = String(error && error.message || error)
+    .match(/HTTP ([0-9]{3})/);
+  if (statusMatch) {
+    result.httpStatus = Number(statusMatch[1]);
+  }
+  return result;
 }
 
 function validateConfiguredGeminiBackend_(backend, enabled, options) {
@@ -725,9 +789,25 @@ function addConfiguredGeminiFailure_(result, stage, error) {
   return result;
 }
 
+function usesLevelControlledFlashProbe_(model) {
+  const family = /^gemini-(\d+)(?:\.\d+)*-flash(?:-lite)?$/.exec(String(model || ''));
+  return Boolean(family && Number(family[1]) >= 3);
+}
+
 function validateConfiguredGeminiDeveloperGeneration_(options) {
-  const generationConfig = Object.assign({ max_output_tokens: 256 },
+  const probePdf = buildGeminiModelProbePdfData_();
+  const responseSchema = {
+    type: 'object',
+    properties: { ready: { type: 'boolean' } },
+    required: ['ready']
+  };
+  const generationConfig = Object.assign({
+    max_output_tokens: CONFIG.GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS
+  },
     getGeminiReasoningConfig_(options.geminiModel, 'gemini_api'));
+  if (usesLevelControlledFlashProbe_(options.geminiModel)) {
+    generationConfig.thinking_level = 'low';
+  }
   const response = UrlFetchApp.fetch(
     'https://generativelanguage.googleapis.com/v1beta/interactions', {
       method: 'post',
@@ -735,16 +815,27 @@ function validateConfiguredGeminiDeveloperGeneration_(options) {
       headers: { 'x-goog-api-key': options.geminiApiKey },
       payload: JSON.stringify({
         model: options.geminiModel,
-        input: 'Reply with exactly OK.',
+        input: [
+          {
+            type: 'text',
+            text: 'Read the attached PDF. Return JSON with ready=true only if it contains the word READY.'
+          },
+          { type: 'document', data: probePdf, mime_type: 'application/pdf' }
+        ],
+        response_format: [{
+          type: 'text', mime_type: 'application/json', schema: responseSchema
+        }],
         generation_config: generationConfig,
         store: false
       }),
       muteHttpExceptions: true
     });
-  validateConfiguredGenerationResponse_(response, 'Gemini Developer API', true);
+  return validateConfiguredGenerationResponse_(
+    response, 'Gemini Developer API', true);
 }
 
 function validateConfiguredVertexGeneration_(options) {
+  const probePdf = buildGeminiModelProbePdfData_();
   const endpoint = 'https://aiplatform.googleapis.com/v1/projects/' +
     encodeURIComponent(options.projectId) +
     '/locations/' + encodeURIComponent(options.vertexLocation) +
@@ -752,24 +843,45 @@ function validateConfiguredVertexGeneration_(options) {
     ':generateContent';
   const productionReasoning = getGeminiReasoningConfig_(
     options.geminiModel, 'vertex_ai');
-  const generationConfig = { maxOutputTokens: 256 };
+  const generationConfig = {
+    maxOutputTokens: CONFIG.GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: 'OBJECT',
+      properties: { ready: { type: 'BOOLEAN' } },
+      required: ['ready']
+    }
+  };
   if (productionReasoning.thinkingConfig) {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: Math.min(
-        productionReasoning.thinkingConfig.thinkingBudget, 128)
-    };
+    generationConfig.thinkingConfig = Object.assign(
+      {}, productionReasoning.thinkingConfig);
+    if (typeof generationConfig.thinkingConfig.thinkingBudget === 'number') {
+      generationConfig.thinkingConfig.thinkingBudget = Math.min(
+        generationConfig.thinkingConfig.thinkingBudget, 128);
+    }
+  }
+  if (usesLevelControlledFlashProbe_(options.geminiModel)) {
+    generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
   }
   const response = UrlFetchApp.fetch(endpoint, {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
     payload: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: 'Reply with exactly OK.' }] }],
+      contents: [{
+        role: 'user',
+        parts: [
+          {
+            text: 'Read the attached PDF. Return JSON with ready=true only if it contains the word READY.'
+          },
+          { inlineData: { mimeType: 'application/pdf', data: probePdf } }
+        ]
+      }],
       generationConfig: generationConfig
     }),
     muteHttpExceptions: true
   });
-  validateConfiguredGenerationResponse_(response, 'Vertex AI', false);
+  return validateConfiguredGenerationResponse_(response, 'Vertex AI', false);
 }
 
 function validateConfiguredGenerationResponse_(response, provider, interactions) {
@@ -788,26 +900,83 @@ function validateConfiguredGenerationResponse_(response, provider, interactions)
     throw new Error(provider +
       ' generation readiness validation returned invalid JSON.');
   }
-  const completed = interactions ?
-    body.status === 'completed' && Array.isArray(body.steps) &&
-      body.steps.some(function (step) {
-        return step && step.type === 'model_output' &&
-          Array.isArray(step.content) && step.content.some(function (content) {
-            return content && content.type === 'text' &&
-              String(content.text || '').trim() === 'OK';
-          });
-      }) :
-    Array.isArray(body.candidates) && body.candidates.some(function (candidate) {
-      const parts = candidate && candidate.content && candidate.content.parts;
-      return candidate && candidate.finishReason === 'STOP' &&
-        Array.isArray(parts) && parts.some(function (part) {
-          return part && String(part.text || '').trim() === 'OK';
+  let outputText = '';
+  let finishReason = 'COMPLETED';
+  let usageMetadata = {};
+  let modelVersion = String(body.modelVersion || body.model || 'UNSPECIFIED');
+  if (interactions) {
+    const outputSteps = Array.isArray(body.steps) ? body.steps : [];
+    outputSteps.forEach(function (step) {
+      if (step && step.type === 'model_output' && Array.isArray(step.content)) {
+        step.content.forEach(function (content) {
+          if (content && content.type === 'text') {
+            outputText += String(content.text || '');
+          }
         });
+      }
     });
-  if (!completed) {
-    throw new Error(provider +
-      ' generation readiness validation did not complete successfully.');
+    usageMetadata = body.usage || {};
+  } else {
+    const candidate = Array.isArray(body.candidates) ? body.candidates[0] : null;
+    const parts = candidate && candidate.content && candidate.content.parts;
+    finishReason = String(candidate && candidate.finishReason || 'UNSPECIFIED');
+    if (Array.isArray(parts)) {
+      parts.forEach(function (part) { outputText += String(part.text || ''); });
+    }
+    usageMetadata = body.usageMetadata || {};
   }
+  let ready = false;
+  try {
+    const parsed = JSON.parse(outputText);
+    ready = parsed && parsed.ready === true;
+  } catch (error) {
+    ready = false;
+  }
+  const completed = interactions ? body.status === 'completed' && ready :
+    finishReason === 'STOP' && ready;
+  if (!completed) {
+    const incomplete = new Error(provider +
+      ' generation readiness validation did not complete successfully.');
+    incomplete.geminiProbeHttpStatus = 200;
+    incomplete.geminiProbeFinishReason = finishReason;
+    throw incomplete;
+  }
+  return {
+    finishReason: finishReason,
+    modelVersion: modelVersion,
+    promptTokenCount: Number(usageMetadata.promptTokenCount ||
+      usageMetadata.total_input_tokens || usageMetadata.input_tokens || 0),
+    candidatesTokenCount: Number(usageMetadata.candidatesTokenCount ||
+      usageMetadata.total_output_tokens || usageMetadata.output_tokens || 0),
+    thoughtsTokenCount: Number(usageMetadata.thoughtsTokenCount ||
+      usageMetadata.total_thought_tokens || 0)
+  };
+}
+
+function buildGeminiModelProbePdfData_() {
+  const stream = 'BT /F1 12 Tf 10 50 Td (READY) Tj ET';
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] ' +
+      '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    '<< /Length ' + stream.length + ' >>\nstream\n' + stream + '\nendstream',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objects.forEach(function (object, index) {
+    offsets.push(pdf.length);
+    pdf += (index + 1) + ' 0 obj\n' + object + '\nendobj\n';
+  });
+  const xrefOffset = pdf.length;
+  pdf += 'xref\n0 ' + (objects.length + 1) + '\n0000000000 65535 f \n';
+  offsets.slice(1).forEach(function (offset) {
+    pdf += String(offset).padStart(10, '0') + ' 00000 n \n';
+  });
+  pdf += 'trailer\n<< /Size ' + (objects.length + 1) + ' /Root 1 0 R >>\n' +
+    'startxref\n' + xrefOffset + '\n%%EOF';
+  return Utilities.base64Encode(pdf);
 }
 
 function isConfiguredGeminiHighDemandResponse_(response) {
@@ -892,6 +1061,7 @@ function validateInstallerOptions_(options) {
     geminiBackend: options.geminiBackend,
     geminiApiKey: String(options.geminiApiKey || '').trim(),
     geminiModel: normalizeGeminiModel_(options.geminiModel),
+    geminiModelAutoSelection: options.geminiModelAutoSelection === true,
     autoVertexFallback: options.autoVertexFallback === true,
     vertexLocation: String(options.vertexLocation).trim(),
     automationConfig: config,
@@ -1004,12 +1174,23 @@ function rotateGeminiDeveloperApiKeyFromSecret(options) {
 }
 
 function validateInstallerGeminiAccess_(options) {
+  const modelSelections = options.geminiModelAutoSelection ?
+    discoverInstallerGeminiModels_(options) : {};
+  const geminiApiModel = modelSelections.gemini_api &&
+    modelSelections.gemini_api.model || options.geminiModel;
+  const vertexModel = modelSelections.vertex_ai &&
+    modelSelections.vertex_ai.model || options.geminiModel;
   if (options.geminiBackend === 'gemini_api') {
-    validateInstallerGeminiDeveloperApi_(options);
+    validateInstallerGeminiDeveloperApi_(Object.assign({}, options, {
+      geminiModel: geminiApiModel
+    }));
   }
   if (options.geminiBackend === 'vertex_ai' || options.autoVertexFallback) {
-    validateInstallerVertexAi_(options);
+    validateInstallerVertexAi_(Object.assign({}, options, {
+      geminiModel: vertexModel
+    }));
   }
+  return modelSelections;
 }
 
 function validateInstallerGeminiDeveloperApi_(options) {

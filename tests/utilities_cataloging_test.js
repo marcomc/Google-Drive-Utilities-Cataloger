@@ -9,9 +9,18 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 const sources = ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs',
-  'UtilitiesCataloging.gs'].map((file) =>
+  'GeminiModelSelection.gs', 'InvoiceContracts.gs', 'UtilitiesCataloging.gs'].map((file) =>
   fs.readFileSync(path.join(projectRoot, file), 'utf8')
 );
+
+// These are explicitly installed profile fixtures, not production fallbacks.
+// The generic engine is also tested without these fixtures in invoice_contracts_test.js.
+const approvedProfileFixtures = JSON.parse(fs.readFileSync(
+  path.join(projectRoot, 'tests/fixtures/approved-invoice-profiles.json'), 'utf8'));
+function profileFixtureDefaults(locale) {
+  return approvedProfileFixtures.filter(x => x.locale === locale)
+    .flatMap(x => x.legacy_defaults);
+}
 
 function loadCataloger(overrides = {}) {
   const context = vm.createContext({
@@ -62,11 +71,553 @@ function loadCataloger(overrides = {}) {
   sources.forEach((source, index) => {
     vm.runInContext(source, context, {
       filename: ['Config.gs', 'locales/en.gs', 'locales/it.gs',
-        'Localization.gs', 'UtilitiesCataloging.gs'][index]
+        'Localization.gs', 'GeminiModelSelection.gs', 'InvoiceContracts.gs',
+        'UtilitiesCataloging.gs'][index]
     });
   });
+  const realGetContract = context.getInvoiceContract_;
+  context.getInvoiceContract_ = extracted => {
+    const bound = realGetContract(extracted);
+    if (bound) return bound;
+    if (!extracted || extracted.document_type !== 'Invoice') return null;
+    let config;
+    try { config = context.getAutomationConfig_(); } catch { config = { locale: 'it' }; }
+    const fixture = approvedProfileFixtures.find(x => x.locale === (config.locale || 'it') &&
+      context.normalizeCellText_(x.supplier) === context.normalizeCellText_(
+        (config.supplier_aliases || {})[extracted.supplier] || extracted.supplier) &&
+      context.normalizeCellText_(x.supply) === context.normalizeCellText_(
+        (config.supply_aliases || {})[extracted.supply_type] || extracted.supply_type));
+    if (!fixture) return null;
+    const data = JSON.parse(JSON.stringify(fixture.contract));
+    const available = extracted.configured_writable_headers || (extracted.sheet_values || []).map(x => x.header);
+    if ((fixture.detail_headers || []).length && fixture.detail_headers.every(h =>
+      available.some(x => context.normalizeHeader_(x) === context.normalizeHeader_(h)))) {
+      data.checks.push({ total: 'field:cost_non_consumption', parts: fixture.detail_headers.map(h => 'header:' + h) });
+    }
+    return context.parseInvoiceContract_('```invoice-contract\n' + JSON.stringify(data) + '\n```');
+  };
   return context;
 }
+
+// These transport/backoff tests supply an explicit discovered-candidate fixture.
+// Catalog eligibility and pinned exact-ID behavior are tested independently.
+function installAutomaticChainFixture(context) {
+  const models = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
+    'gemini-3.6-flash', 'gemini-3.5-flash'];
+  context.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  context.getGeminiModelCandidatesForBackend_ = backend =>
+    backend === 'gemini_api' ? models.slice() : [models[0]];
+}
+
+function testAutomaticGeminiModelSelectionIsProviderSpecificAndStable() {
+  const stored = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL: 'gemini-pinned-model'
+  };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; },
+        deleteProperty: key => { delete stored[key]; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const probeCalls = [];
+  context.listGeminiDeveloperFlashLiteCandidates_ = () => [
+    'gemini-3.7-flash-lite', 'gemini-3.5-flash-lite'
+  ];
+  context.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'
+  ];
+  context.probeGeminiModelForBackend_ = (backend, model) => {
+    probeCalls.push([backend, model]);
+  };
+
+  context.getGeminiModelCandidatesForBackend_('gemini_api', true);
+  context.getGeminiModelCandidatesForBackend_('vertex_ai', true);
+  assert.equal(context.getGeminiModelForBackend_('gemini_api'),
+    'gemini-3.7-flash-lite');
+  assert.equal(context.getGeminiModelForBackend_('vertex_ai'),
+    'gemini-3.6-flash-lite');
+  assert.deepEqual(probeCalls, [
+    ['gemini_api', 'gemini-3.7-flash-lite'],
+    ['gemini_api', 'gemini-3.5-flash-lite'],
+    ['vertex_ai', 'gemini-3.6-flash-lite'],
+    ['vertex_ai', 'gemini-3.5-flash-lite']
+  ]);
+  const selections = JSON.parse(stored.GEMINI_MODEL_SELECTIONS);
+  assert.equal(selections.gemini_api.model, 'gemini-3.7-flash-lite');
+  assert.equal(selections.vertex_ai.model, 'gemini-3.6-flash-lite');
+  assert.deepEqual(selections.gemini_api.candidates,
+    ['gemini-3.7-flash-lite', 'gemini-3.5-flash-lite']);
+  assert.deepEqual(selections.vertex_ai.candidates,
+    ['gemini-3.6-flash-lite', 'gemini-3.5-flash-lite']);
+  assert.equal(context.getGeminiModelForBackend_('gemini_api'),
+    'gemini-3.7-flash-lite');
+  assert.equal(probeCalls.length, 4, 'fresh cache avoids repeated probes');
+}
+
+function testAutomaticGeminiSelectionFallsBackAndRetainsLastGood() {
+  const stored = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL_SELECTIONS: JSON.stringify({
+      vertex_ai: {
+        model: 'gemini-3.5-flash-lite',
+        candidates: ['gemini-3.5-flash-lite'],
+        checkedAtMs: Date.now() - 2 * 24 * 60 * 60 * 1000
+      }
+    })
+  };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const tried = [];
+  context.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.7-flash-lite', 'gemini-3.6-flash-lite'
+  ];
+  context.probeGeminiModelForBackend_ = (_backend, model) => {
+    tried.push(model);
+    if (model === 'gemini-3.7-flash-lite') {
+      const error = new Error('candidate unavailable');
+      error.geminiModelProbeReason = 'provider-rejected-candidate';
+      throw error;
+    }
+  };
+  assert.deepEqual(Array.from(context.getGeminiModelCandidatesForBackend_(
+    'vertex_ai', true)), ['gemini-3.6-flash-lite']);
+  assert.deepEqual(tried, ['gemini-3.7-flash-lite', 'gemini-3.6-flash-lite']);
+
+  const saved = JSON.parse(stored.GEMINI_MODEL_SELECTIONS);
+  saved.vertex_ai.checkedAtMs = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  stored.GEMINI_MODEL_SELECTIONS = JSON.stringify(saved);
+  const refresh = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  refresh.logCatalogEvent_ = () => {};
+  refresh.listVertexFlashLiteCandidates_ = () => {
+    throw new Error('PDF processing must never refresh catalogs.');
+  };
+  assert.equal(refresh.getGeminiModelForBackend_('vertex_ai'),
+    'gemini-3.6-flash-lite');
+
+  const probeFailure = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  probeFailure.logCatalogEvent_ = () => {};
+  probeFailure.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.8-flash-lite'
+  ];
+  probeFailure.probeGeminiModelForBackend_ = () => {
+    const error = new Error('temporary generation outage');
+    error.geminiModelProbeTransient = true;
+    throw error;
+  };
+  assert.deepEqual(Array.from(probeFailure.getGeminiModelCandidatesForBackend_(
+    'vertex_ai', true)), ['gemini-3.6-flash-lite']);
+}
+
+function testLatestFlashEscalationIsCachedAndProviderScoped() {
+  const stored = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const probes = [];
+  context.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.6-flash'
+  ];
+  context.listVertexFlashCandidates_ = () => [
+    'gemini-3.7-flash', 'gemini-3.5-flash'
+  ];
+  context.probeGeminiModelForBackend_ = (backend, model) => {
+    probes.push([backend, model]);
+  };
+  assert.equal(context.refreshGeminiFlashEscalationModelForBackend_('gemini_api'),
+    'gemini-3.8-flash');
+  assert.equal(context.refreshGeminiFlashEscalationModelForBackend_('vertex_ai'),
+    'gemini-3.7-flash');
+  assert.deepEqual(probes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['vertex_ai', 'gemini-3.7-flash']
+  ]);
+  assert.equal(context.getGeminiFlashEscalationModelForBackend_('gemini_api'),
+    'gemini-3.8-flash', 'recent provider probe is cached');
+
+  const retained = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  retained.GEMINI_MODEL_ESCALATION_SELECTIONS = JSON.stringify({
+    gemini_api: { model: 'gemini-3.7-flash', checkedAtMs: 1 }
+  });
+  const transientProbe = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => retained[key] || '',
+        setProperty: (key, value) => { retained[key] = value; }
+      })
+    }
+  });
+  transientProbe.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  transientProbe.logCatalogEvent_ = () => {};
+  transientProbe.listGeminiDeveloperFlashCandidates_ = () => ['gemini-3.8-flash'];
+  transientProbe.probeGeminiModelForBackend_ = () => {
+    const error = new Error('temporary probe outage');
+    error.geminiModelProbeTransient = true;
+    throw error;
+  };
+  assert.equal(transientProbe.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.equal(transientProbe.getGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash',
+    'a stale last-known-good model remains usable after a transient refresh');
+
+  const noPriorSelection = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  const newestAvailable = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => noPriorSelection[key] || '',
+        setProperty: (key, value) => { noPriorSelection[key] = value; }
+      })
+    }
+  });
+  newestAvailable.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  newestAvailable.logCatalogEvent_ = () => {};
+  newestAvailable.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.7-flash'
+  ];
+  const escalationProbes = [];
+  newestAvailable.probeGeminiModelForBackend_ = (backend, model) => {
+    escalationProbes.push([backend, model]);
+    if (model === 'gemini-3.8-flash') {
+      const error = new Error('candidate temporarily overloaded');
+      error.geminiModelProbeTransient = true;
+      throw error;
+    }
+  };
+  assert.equal(newestAvailable.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.deepEqual(escalationProbes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['gemini_api', 'gemini-3.7-flash']
+  ]);
+
+  const priorGood = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL_ESCALATION_SELECTIONS: JSON.stringify({
+      gemini_api: {
+        model: 'gemini-3.6-flash',
+        checkedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000
+      }
+    })
+  };
+  const refreshPastTransient = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => priorGood[key] || '',
+        setProperty: (key, value) => { priorGood[key] = value; }
+      })
+    }
+  });
+  refreshPastTransient.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  refreshPastTransient.logCatalogEvent_ = () => {};
+  refreshPastTransient.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.7-flash'
+  ];
+  const priorSelectionProbes = [];
+  refreshPastTransient.probeGeminiModelForBackend_ = (backend, model) => {
+    priorSelectionProbes.push([backend, model]);
+    if (model === 'gemini-3.8-flash') {
+      const error = new Error('candidate temporarily overloaded');
+      error.geminiModelProbeTransient = true;
+      throw error;
+    }
+  };
+  assert.equal(refreshPastTransient.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.deepEqual(priorSelectionProbes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['gemini_api', 'gemini-3.7-flash']
+  ]);
+  assert.deepEqual(Array.from(context.sortGeminiModelsForTier_([
+    'gemini-3.8-flash', 'gemini-3.10-flash-preview',
+    'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.9-flash-lite'
+  ], 'flash')), ['gemini-3.8-flash', 'gemini-3.7-flash']);
+
+  let catalogRequests = 0;
+  const noBudget = loadCataloger({ UrlFetchApp: { fetch: () => {
+    catalogRequests += 1;
+    throw new Error('The budget guard should prevent a request.');
+  } } });
+  noBudget.getScriptProperty_ = key => key === 'GEMINI_API_KEY' ? 'api-key' : '';
+  assert.throws(() => noBudget.listGeminiDeveloperFlashCandidates_('',
+    Date.now() + 100), error =>
+    error.extractionEscalationBudgetExhausted === true);
+  assert.equal(catalogRequests, 0, 'catalog reads stop before the repair reserve');
+
+  const coldCache = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({ getProperty: () => '' })
+    }
+  });
+  coldCache.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  assert.throws(() => coldCache.getGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), error =>
+    error.geminiModelCatalogRefreshRequired === true);
+  assert.throws(() => coldCache.getGeminiModelForBackend_('gemini_api'), error =>
+    error.geminiModelSelectionRefreshRequired === true);
+
+  const refreshedProviders = [];
+  const maintenance = loadCataloger({ Date });
+  maintenance.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  maintenance.withCatalogProcessingLock_ = (_source, callback) => callback();
+  maintenance.getGeminiBackend_ = () => 'gemini_api';
+  maintenance.isAutomaticVertexFallbackEnabled_ = () => true;
+  maintenance.getGeminiModelCandidatesForBackend_ = (backend, refresh) => {
+    refreshedProviders.push(['flash-lite', backend, refresh]);
+    return ['gemini-3.8-flash-lite'];
+  };
+  maintenance.refreshGeminiFlashEscalationModelForBackend_ = backend => {
+    refreshedProviders.push(['flash', backend]);
+    return 'gemini-3.8-flash';
+  };
+  maintenance.readGeminiModelSelections_ = () => ({
+    gemini_api: { checkedAt: '2026-11-04T00:00:00.000Z' },
+    vertex_ai: { checkedAt: '2026-11-04T00:00:00.000Z' }
+  });
+  maintenance.getScriptProperty_ = () => JSON.stringify({
+    gemini_api: { checkedAtMs: Date.now() },
+    vertex_ai: { checkedAtMs: Date.now() }
+  });
+  assert.equal(maintenance.refreshGeminiModelSelectionCaches().refreshed.length, 2);
+  assert.deepEqual(refreshedProviders, [
+    ['flash-lite', 'gemini_api', true], ['flash', 'gemini_api'],
+    ['flash-lite', 'vertex_ai', true], ['flash', 'vertex_ai']
+  ]);
+}
+
+function testGenericMonetaryMismatchGetsOneBoundedFlashEscalation() {
+  const context = loadCataloger({ Date, console: { ...console, error: () => {} } });
+  context.logCatalogEvent_ = () => {};
+  context.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  context.getEffectiveGeminiBackend_ = () => 'gemini_api';
+  context.getGeminiFlashEscalationModelForBackend_ = () => 'gemini-3.8-flash';
+  context.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  const repairContexts = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return { document_type: 'Invoice', supplier: 'OENERGY', supply_type: 'Gas',
+      problems: [], sheet_values: [] };
+  };
+  let validations = 0;
+  context.validateExtractedUtilityDataForImport_ = () => {
+    validations += 1;
+    return validations < 4 ? {
+      valid: false,
+      repairable: true,
+      code: 'invoice_cost_reconciliation_mismatch',
+      fields: ['Quota fissa', 'Trasporto e oneri', 'Accise', 'cost_non_consumption'],
+      problem: 'OENERGY gas detail reconciliation mismatch.',
+      action: 'Re-read the OENERGY summary rows.'
+    } : { valid: true };
+  };
+  context.buildExtractionRepairSnapshot_ = extracted => ({
+    document_type: extracted.document_type,
+    supplier: extracted.supplier,
+    supply_type: extracted.supply_type
+  });
+  context.getExtractionResponseSchema_ = () => ({ properties: {} });
+  const file = { getId: () => 'file-id', getName: () => 'invoice.pdf' };
+  const result = context.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.aiCallCount, 4);
+  assert.equal(validations, 4);
+  assert.equal(repairContexts.length, 4);
+  assert.equal(repairContexts[2].modelOverride, '');
+  assert.equal(repairContexts[3].modelOverride, 'gemini-3.8-flash');
+  assert.equal(repairContexts[3].maxAttempts, 4);
+
+  const nonOenergy = loadCataloger({ Date, console: { ...console, error: () => {} } });
+  nonOenergy.logCatalogEvent_ = () => {};
+  nonOenergy.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  nonOenergy.getGeminiFlashEscalationModelForBackend_ = () => {
+    throw new Error('non-OENERGY issues must not escalate');
+  };
+  nonOenergy.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  nonOenergy.extractUtilityData_ = () => ({ document_type: 'Invoice',
+    supplier: 'OTHER', supply_type: 'Gas', problems: [], sheet_values: [] });
+  nonOenergy.buildExtractionRepairSnapshot_ = () => ({});
+  let otherCalls = 0;
+  nonOenergy.validateExtractedUtilityDataForImport_ = () => {
+    otherCalls += 1;
+    return { valid: false, repairable: true, code: 'other_issue', fields: ['identifier'],
+      problem: 'Other issue.', action: 'Re-read the identifier.' };
+  };
+  const otherResult = nonOenergy.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(otherResult.aiCallCount, 3);
+  assert.equal(otherCalls, 3);
+
+  const budgetLimited = loadCataloger({ Date,
+    console: { ...console, error: () => {} } });
+  budgetLimited.logCatalogEvent_ = () => {};
+  budgetLimited.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  budgetLimited.getGeminiFlashEscalationModelForBackend_ = () => {
+    const error = new Error('runtime reserve exhausted');
+    error.extractionEscalationBudgetExhausted = true;
+    throw error;
+  };
+  budgetLimited.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  budgetLimited.extractUtilityData_ = () => ({ document_type: 'Invoice',
+    supplier: 'OENERGY', supply_type: 'Gas', problems: [], sheet_values: [] });
+  budgetLimited.buildExtractionRepairSnapshot_ = () => ({});
+  let budgetLimitedCalls = 0;
+  budgetLimited.validateExtractedUtilityDataForImport_ = () => {
+    budgetLimitedCalls += 1;
+    return { valid: false, repairable: true,
+      code: 'invoice_cost_reconciliation_mismatch',
+      fields: ['Quota fissa'], problem: 'Mismatch.', action: 'Re-read.' };
+  };
+  const budgetResult = budgetLimited.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(budgetResult.aiCallCount, 3);
+  assert.equal(budgetResult.validation.valid, false);
+  assert.equal(budgetLimitedCalls, 3,
+    'deadline exhaustion returns the validated blocked extraction without a fourth request');
+}
+
+function testRepairEscalationPassesTheSelectedModelToCurrentProvider() {
+  const context = loadCataloger();
+  context.getEffectiveGeminiBackend_ = () => 'vertex_ai';
+  let call;
+  context.callGeminiForPdfWithBackend_ = (...args) => {
+    call = args;
+    return 'response';
+  };
+  assert.equal(context.callGeminiForPdf_({}, {}, '', {}, {
+    attempt: 4,
+    modelOverride: 'gemini-3.7-flash'
+  }, null, Date.now() + 100000), 'response');
+  assert.equal(call[4], 'vertex_ai');
+  assert.equal(call[8], 'gemini-3.7-flash');
+}
+
+function testFlashLiteModelOrderingRejectsPreviewAndUnversionedAliases() {
+  const context = loadCataloger();
+  context.logCatalogEvent_ = () => {};
+  assert.deepEqual(Array.from(context.sortFlashLiteModelIds_([
+    'gemini-3.6-flash-lite', 'gemini-3.8-flash-lite-preview-09-2026',
+    'gemini-flash-lite-latest', 'gemini-3.7-flash-lite',
+    'gemini-3.6-flash-lite'
+  ])), ['gemini-3.7-flash-lite', 'gemini-3.6-flash-lite']);
+}
+
+function testProviderCatalogsAdmitOnlySupportedStableFlashLiteModels() {
+  const requests = [];
+  const pages = [
+    { models: [
+      { baseModelId: 'gemini-3.6-flash-lite',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.8-flash-lite-preview-09-2026',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.7-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.8-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.6-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.9-flash-preview',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.5-flash-lite',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.9-flash-lite',
+        supportedGenerationMethods: ['embedContent'] }
+    ] },
+    { publisherModels: [
+      { name: 'publishers/google/models/gemini-3.5-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.7-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.8-flash-lite',
+        launchStage: 'PUBLIC_PREVIEW', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.9-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_UNSTABLE' },
+      { name: 'publishers/google/models/gemini-3.4-flash-lite',
+        launchStage: 'GA' },
+      { name: 'publishers/google/models/gemini-3.8-flash',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.9-flash-preview',
+        launchStage: 'PUBLIC_PREVIEW', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.6-flash',
+        launchStage: 'GA', versionState: 'VERSION_STATE_UNSTABLE' }
+    ] }
+  ];
+  pages.push(pages[0], pages[1]);
+  const context = loadCataloger({ UrlFetchApp: { fetch: (url, options) => {
+    requests.push({ url, options });
+    const body = pages.shift();
+    return {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify(body)
+    };
+  } } });
+  context.logCatalogEvent_ = () => {};
+  context.getScriptProperty_ = key => key === 'GEMINI_API_KEY' ? 'api-key' : '';
+  assert.deepEqual(Array.from(context.listGeminiDeveloperFlashLiteCandidates_()), [
+    'gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'
+  ]);
+  assert.equal(requests[0].options.headers['x-goog-api-key'], 'api-key');
+  assert.deepEqual(Array.from(context.listVertexFlashLiteCandidates_()), [
+    'gemini-3.7-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.4-flash-lite'
+  ]);
+  assert.deepEqual(Array.from(context.listGeminiDeveloperFlashCandidates_()), [
+    'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'
+  ]);
+  assert.deepEqual(Array.from(context.listVertexFlashCandidates_()), [
+    'gemini-3.8-flash'
+  ]);
+  assert.equal(requests[1].options.headers.Authorization, 'Bearer oauth-token');
+  assert.match(requests[1].url, /pageSize=300/);
+  assert.match(requests[1].url, /listAllVersions=true/);
+}
+
+testAutomaticGeminiModelSelectionIsProviderSpecificAndStable();
+testAutomaticGeminiSelectionFallsBackAndRetainsLastGood();
+testLatestFlashEscalationIsCachedAndProviderScoped();
+testGenericMonetaryMismatchGetsOneBoundedFlashEscalation();
+testRepairEscalationPassesTheSelectedModelToCurrentProvider();
+testFlashLiteModelOrderingRejectsPreviewAndUnversionedAliases();
+testProviderCatalogsAdmitOnlySupportedStableFlashLiteModels();
 
 function validInvoice() {
   return {
@@ -770,7 +1321,7 @@ function testManagedSupplierProfileWorkspaceIdentityIsRequired() {
       return profileRoot;
     } }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
       managedSupplierProfileWorkspaceState('root-folder-id',
@@ -788,7 +1339,7 @@ function testSupplierProfilesAreOmittedWithoutWorkspaceState() {
   const context = loadCataloger({
     DriveApp: { getFolderById: () => { throw new Error('must not resolve'); } }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context);
   const rootFolder = {
     getFoldersByName: () => { throw new Error('must not inspect profiles'); }
@@ -796,7 +1347,7 @@ function testSupplierProfilesAreOmittedWithoutWorkspaceState() {
   context.loadDriveAgentsPolicy_ = () => 'root policy';
 
   assert.equal(context.loadApprovedSupplierProfiles_(rootFolder), '');
-  assert.equal(context.loadTrustedExtractionPolicy_(rootFolder), 'root policy');
+  assert.throws(() => context.loadTrustedExtractionPolicy_(rootFolder), /workspace is not configured/);
 }
 
 function testSupplierProfilesSkipStateLookupForMinimalRootAdapter() {
@@ -813,7 +1364,7 @@ function testSupplierProfilesSkipStateLookupForMinimalRootAdapter() {
 
 function testSupplierProfileWorkspaceRejectsIncompleteState() {
   const context = loadCataloger();
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   const { store } = installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify({
       rootFolderId: 'root-folder-id',
@@ -849,7 +1400,7 @@ function testSupplierProfileWorkspaceRejectsSameNamedReplacement() {
   const context = loadCataloger({
     DriveApp: { getFolderById: () => recordedProfileRoot }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
       managedSupplierProfileWorkspaceState('root-folder-id',
@@ -869,7 +1420,7 @@ function testSupplierProfileWorkspaceRejectsUnavailableRecordedRoot() {
   const context = loadCataloger({
     DriveApp: { getFolderById: () => { throw new Error('not found'); } }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
       managedSupplierProfileWorkspaceState('root-folder-id',
@@ -910,7 +1461,7 @@ function testSupplierProfileContextLimitIncludesRenderedMetadata() {
   const context = loadCataloger({
     DriveApp: { getFolderById: () => profileRoot }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
       managedSupplierProfileWorkspaceState('root-folder-id',
@@ -954,7 +1505,7 @@ function testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders() {
   const context = loadCataloger({
     DriveApp: { getFolderById: () => profileRoot }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   installScriptPropertyStore(context, {
     SUPPLIER_PROFILE_WORKSPACE_STATE: JSON.stringify(
       managedSupplierProfileWorkspaceState('root-folder-id',
@@ -1011,7 +1562,7 @@ function testExtractionSchemaAndCalendarValidation() {
   context.getAutomationConfig_ = () => ({
     locale: 'it',
     canonical_suppliers: ['SUPPLIER', 'ILIAD', 'Energygas Italia'],
-    supplier_aliases: {},
+    supplier_aliases: { ENERGYGAS: 'Energygas Italia' },
     canonical_supplies: ['Water', 'Internet', 'Gas', 'Luce', 'Electricity'],
     supply_aliases: {},
     address_rules: [],
@@ -1031,7 +1582,7 @@ function testExtractionSchemaAndCalendarValidation() {
   });
   assert.equal(normalized.contract_number, 'CONTRACT-2');
   assert.equal(normalized.customer_code, 'CUSTOMER-2');
-  assert.equal(normalized.reference_month, '07');
+  assert.equal(normalized.reference_month, '06', 'Actual period start overrides a contradictory extracted month');
   assert.equal(typeof normalized.reference_month, 'string');
 
   const digitOnlyIdentifiers = context.normalizeExtraction_({
@@ -1058,7 +1609,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ["Spese d'incasso non presente nel documento."],
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(iliadDefault, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadDefault, ["Spese d'incasso"]);
   assert.equal(JSON.stringify(iliadDefault.sheet_values), JSON.stringify([
     { header: "Spese d'incasso", value: 0 }
   ]));
@@ -1070,7 +1621,7 @@ function testExtractionSchemaAndCalendarValidation() {
     supply_type: 'Internet',
     sheet_values: [{ header: "Spese d'incasso", value: 1.25 }]
   });
-  context.applySupplierFieldDefaults_(iliadPrintedCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadPrintedCharge, ["Spese d'incasso"]);
   assert.equal(JSON.stringify(iliadPrintedCharge.sheet_values), JSON.stringify([
     { header: "Spese d'incasso", value: 1.25 }
   ]));
@@ -1085,7 +1636,7 @@ function testExtractionSchemaAndCalendarValidation() {
       source_evidence: 'printed'
     }]
   });
-  context.applySupplierFieldDefaults_(iliadPrintedZeroCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadPrintedZeroCharge, ["Spese d'incasso"]);
   assert.equal(iliadPrintedZeroCharge.sheet_values[0].value, 0);
   assert.deepEqual(iliadPrintedZeroCharge.problems, []);
 
@@ -1095,7 +1646,7 @@ function testExtractionSchemaAndCalendarValidation() {
     supply_type: 'Internet',
     sheet_values: [{ header: "Spese d'incasso", value: 0 }]
   });
-  context.applySupplierFieldDefaults_(iliadUnprovenZeroCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadUnprovenZeroCharge, ["Spese d'incasso"]);
   assert.equal(context.validateExtraction_(iliadUnprovenZeroCharge).valid, false);
   assert.match(iliadUnprovenZeroCharge.problems[0], /not established by printed evidence/);
 
@@ -1106,7 +1657,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ["Spese d'incasso non presente nel documento."],
     sheet_values: [{ header: "Spese d'incasso", value: null }]
   });
-  context.applySupplierFieldDefaults_(iliadEmptyCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadEmptyCharge, ["Spese d'incasso"]);
   assert.equal(iliadEmptyCharge.sheet_values[0].value, 0);
 
   const iliadUnreadableCharge = context.normalizeExtraction_({
@@ -1116,7 +1667,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ["Spese d'incasso amount missing or unreadable."],
     sheet_values: [{ header: "Spese d'incasso", value: null }]
   });
-  context.applySupplierFieldDefaults_(iliadUnreadableCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadUnreadableCharge, ["Spese d'incasso"]);
   assert.equal(iliadUnreadableCharge.sheet_values[0].value, null);
   assert.equal(context.validateExtraction_(iliadUnreadableCharge).valid, false);
 
@@ -1127,7 +1678,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ['Ricalcoli non presente nel documento.'],
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(oenergyAbsentRecalculation, [
+  context.applyApprovedProfileFieldDefaults_(oenergyAbsentRecalculation, [
     'Ricalcoli'
   ]);
   assert.equal(JSON.stringify(oenergyAbsentRecalculation.sheet_values), JSON.stringify([{
@@ -1145,7 +1696,7 @@ function testExtractionSchemaAndCalendarValidation() {
     ],
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(oenergyVerboseAbsentRecalculation, [
+  context.applyApprovedProfileFieldDefaults_(oenergyVerboseAbsentRecalculation, [
     'Ricalcoli'
   ]);
   assert.equal(JSON.stringify(oenergyVerboseAbsentRecalculation.sheet_values),
@@ -1163,7 +1714,7 @@ function testExtractionSchemaAndCalendarValidation() {
     ],
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(energygasAbsentCharges, [
+  context.applyApprovedProfileFieldDefaults_(energygasAbsentCharges, [
     'Trasporto e gestione contatore',
     'Oneri di sistema',
     'Ricalcoli'
@@ -1184,7 +1735,7 @@ function testExtractionSchemaAndCalendarValidation() {
     ],
     sheet_values: [{ header: 'Oneri di sistema', value: '0' }]
   });
-  context.applySupplierFieldDefaults_(energygasAggregateAbsence, [
+  context.applyApprovedProfileFieldDefaults_(energygasAggregateAbsence, [
     'Oneri di sistema'
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(energygasAggregateAbsence.sheet_values)), [{
@@ -1199,7 +1750,7 @@ function testExtractionSchemaAndCalendarValidation() {
       ...raw, supplier: 'ENERGYGAS', supply_type: 'Luce',
       problems: [problem], sheet_values: []
     });
-    context.applySupplierFieldDefaults_(invoice, ['Oneri di sistema']);
+    context.applyApprovedProfileFieldDefaults_(invoice, ['Oneri di sistema']);
     assert.equal(invoice.problems.includes(problem), true);
     assert.equal(invoice.sheet_values.length, 0);
     assert.equal(context.validateExtraction_(invoice).valid, false);
@@ -1211,7 +1762,7 @@ function testExtractionSchemaAndCalendarValidation() {
       problems: ['Ricalcoli non presente nel documento.'],
       sheet_values: [{ header: 'Ricalcoli', value: zero }]
     });
-    context.applySupplierFieldDefaults_(textualZero, ['Ricalcoli']);
+    context.applyApprovedProfileFieldDefaults_(textualZero, ['Ricalcoli']);
     assert.deepEqual(textualZero.problems, []);
     assert.equal(textualZero.sheet_values[0].value, 0);
   }
@@ -1221,7 +1772,7 @@ function testExtractionSchemaAndCalendarValidation() {
       problems: ['Ricalcoli non presente nel documento.'],
       sheet_values: [{ header: 'Ricalcoli', value }]
     });
-    context.applySupplierFieldDefaults_(notZero, ['Ricalcoli']);
+    context.applyApprovedProfileFieldDefaults_(notZero, ['Ricalcoli']);
     assert.equal(notZero.problems.length, 1);
     assert.equal(notZero.sheet_values[0].value, value);
   }
@@ -1268,7 +1819,7 @@ function testExtractionSchemaAndCalendarValidation() {
       { header: 'Rete e oneri non scorporabili', value: '26,14' }
     ]
   };
-  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(
+  assert.equal(context.validateInvoiceCostEvidence_(
     energygasDetailedReconciliation).valid, true);
   const sellingRateInvoice = {
     ...energygasDetailedReconciliation,
@@ -1278,24 +1829,24 @@ function testExtractionSchemaAndCalendarValidation() {
         .map(header => ({ header, value: '0.135338' }))
     ])
   };
-  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(sellingRateInvoice).valid, true);
+  assert.equal(context.validateInvoiceCostEvidence_(sellingRateInvoice).valid, true);
   const baseRateInvoice = {
     ...sellingRateInvoice,
     sheet_values: sellingRateInvoice.sheet_values.map(entry =>
       entry.header.startsWith('Costo unitario') ? { ...entry, value: '0.112' } : entry)
   };
-  const rateValidation = context.validateEnergygasLuceDetailedReconciliation_(baseRateInvoice);
+  const rateValidation = context.validateInvoiceCostEvidence_(baseRateInvoice);
   assert.equal(rateValidation.valid, false);
-  assert.equal(rateValidation.code, 'energygas_selling_rate_reconciliation_mismatch');
+  assert.equal(rateValidation.code, 'invoice_consumption_reconciliation_mismatch');
   assert.equal(rateValidation.fields.includes('Costo unitario F3'), true);
   assert.equal(context.validateExtractedUtilityDataForImport_(baseRateInvoice).code,
-    'energygas_selling_rate_reconciliation_mismatch');
+    'invoice_consumption_reconciliation_mismatch');
   const differentBandRates = {
     ...sellingRateInvoice,
     sheet_values: sellingRateInvoice.sheet_values.map(entry =>
       entry.header === 'Costo unitario F1' ? { ...entry, value: '0.15' } : entry)
   };
-  assert.equal(context.validateEnergygasLuceDetailedReconciliation_(differentBandRates).valid, true);
+  assert.equal(context.validateInvoiceCostEvidence_(differentBandRates).valid, true);
   for (const [quantity, rate] of [[23.45, 0.2], [704.12, 0.151234], [1800, 0.087654]]) {
     const consumption = Math.round(quantity * rate * 100) / 100;
     const futureInvoice = {
@@ -1308,8 +1859,8 @@ function testExtractionSchemaAndCalendarValidation() {
         return entry;
       })
     };
-    assert.equal(context.validateEnergygasLuceDetailedReconciliation_(futureInvoice).valid, true);
-    assert.equal(context.validateEnergygasLuceDetailedReconciliation_({
+    assert.equal(context.validateInvoiceCostEvidence_(futureInvoice).valid, true);
+    assert.equal(context.validateInvoiceCostEvidence_({
       ...futureInvoice,
       sheet_values: futureInvoice.sheet_values.map(entry =>
         entry.header.startsWith('Costo unitario') ? { ...entry, value: rate / 2 } : entry)
@@ -1321,7 +1872,7 @@ function testExtractionSchemaAndCalendarValidation() {
     sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
       entry.header === 'Ricalcoli' ? { ...entry, value: '0' } : entry)
   });
-  context.applySupplierFieldDefaults_(textualZeroInvoice, ['Ricalcoli']);
+  context.applyApprovedProfileFieldDefaults_(textualZeroInvoice, ['Ricalcoli']);
   assert.equal(context.validateExtraction_(textualZeroInvoice).valid, true);
   const unprovenTextualZeroInvoice = context.normalizeExtraction_({
     ...energygasDetailedReconciliation,
@@ -1329,9 +1880,9 @@ function testExtractionSchemaAndCalendarValidation() {
     sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
       entry.header === 'Ricalcoli' ? { ...entry, value: '0' } : entry)
   });
-  context.applySupplierFieldDefaults_(unprovenTextualZeroInvoice, ['Ricalcoli']);
+  context.applyApprovedProfileFieldDefaults_(unprovenTextualZeroInvoice, ['Ricalcoli']);
   assert.equal(context.validateExtraction_(unprovenTextualZeroInvoice).valid, false);
-  assert.equal(context.validateEnergygasLuceDetailedReconciliation_({
+  assert.equal(context.validateInvoiceCostEvidence_({
     ...energygasDetailedReconciliation,
     sheet_values: energygasDetailedReconciliation.sheet_values.map((entry) =>
       entry.header === 'Rete e oneri non scorporabili' ?
@@ -1361,44 +1912,8 @@ function testExtractionSchemaAndCalendarValidation() {
     feedback: { issues: [{ fields: repairFields }] }
   });
   assert.equal(correctedRepair.cost_consumption, 51.68);
-  const oenergyGasDetailedReconciliation = {
-    ...validInvoice(),
-    supplier: 'OENERGY',
-    supply_type: 'Gas',
-    cost_consumption: 2.48,
-    cost_non_consumption: 15.62,
-    vat: 3.39,
-    total: 21.49,
-    sheet_values: [
-      { header: 'Totale costi consumo', value: '2,48' },
-      { header: 'Quota fissa', value: '9,00' },
-      { header: 'Trasporto e oneri', value: '5,59' },
-      { header: 'Accise', value: '1,03' },
-      { header: 'Ricalcoli', value: 0 }
-    ]
-  };
-  assert.equal(context.validateOenergyGasDetailedReconciliation_(
-    oenergyGasDetailedReconciliation).valid, true);
-  assert.equal(context.validateOenergyGasDetailedReconciliation_({
-    ...oenergyGasDetailedReconciliation,
-    sheet_values: oenergyGasDetailedReconciliation.sheet_values.map((entry) =>
-      entry.header === 'Accise' ? { ...entry, value: '0,88' } : entry)
-  }).valid, false);
-  const gasWithDetailMismatchAndFrequencyProblem = {
-    ...oenergyGasDetailedReconciliation,
-    frequency: '',
-    problems: ['Frequenza non trovata in fattura.'],
-    cost_non_consumption: 14.59,
-    vat: 4.42,
-    sheet_values: oenergyGasDetailedReconciliation.sheet_values.map((entry) =>
-      entry.header === 'Trasporto e oneri' ? { ...entry, value: '4,19' } : entry)
-  };
-  const gasDetailValidation = context.validateExtractedUtilityDataForImport_(
-    gasWithDetailMismatchAndFrequencyProblem
-  );
-  assert.equal(gasDetailValidation.valid, false);
-  assert.equal(gasDetailValidation.code,
-    'oenergy_gas_detail_reconciliation_mismatch');
+  // Source-component allocation regressions live in invoice_contracts_test.js,
+  // where the same approved contract is exercised with unrelated suppliers.
   assert.throws(
     () => context.processSingleIntakeFile('invoice-id', '{}'),
     /extraction must be automatic/
@@ -1411,7 +1926,7 @@ function testExtractionSchemaAndCalendarValidation() {
     problems: ["Spese d'incasso non presente nel documento."],
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(iliadWithoutConfiguredChargeColumn, []);
+  context.applyApprovedProfileFieldDefaults_(iliadWithoutConfiguredChargeColumn, []);
   assert.deepEqual(iliadWithoutConfiguredChargeColumn.sheet_values, []);
   assert.deepEqual(iliadWithoutConfiguredChargeColumn.problems, []);
 
@@ -1422,12 +1937,13 @@ function testExtractionSchemaAndCalendarValidation() {
     supply_type: 'Internet',
     sheet_values: []
   });
-  context.applySupplierFieldDefaults_(iliadReport, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(iliadReport, ["Spese d'incasso"]);
   assert.deepEqual(iliadReport.sheet_values, []);
 
   const energygas = context.normalizeExtraction_({
     ...raw,
     supplier: 'Energygas Italia',
+    supply_type: 'Luce',
     contract_number: 'CL000001',
     customer_code: ''
   });
@@ -1438,6 +1954,7 @@ function testExtractionSchemaAndCalendarValidation() {
     const formattedEnergygas = context.normalizeExtraction_({
       ...raw,
       supplier: 'Energygas Italia',
+      supply_type: 'Luce',
       contract_number: contractNumber,
       customer_code: ''
     });
@@ -1448,6 +1965,7 @@ function testExtractionSchemaAndCalendarValidation() {
   const duplicatedEnergygas = context.normalizeExtraction_({
     ...raw,
     supplier: 'Energygas Italia',
+    supply_type: 'Luce',
     contract_number: 'CL000001',
     customer_code: 'CL000001'
   });
@@ -1518,6 +2036,7 @@ function testExtractionSchemaAndCalendarValidation() {
   assert.equal(context.validateExtraction_({
     ...onlyCustomerCode,
     supplier: 'Energygas Italia',
+    supply_type: 'Luce',
     customer_code: 'CL317598',
     problems: [
       'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL317598 è codice cliente).'
@@ -1928,7 +2447,7 @@ function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
   for (const locale of ['en', 'it']) {
     const context = loadCataloger();
     const localization = context.getLocalizationRegistry_()[locale];
-    const defaults = Array.from(localization.supplierFieldDefaults);
+    const defaults = profileFixtureDefaults(locale);
     const suppliers = [...new Set(defaults.map(rule => rule.supplier).concat('OTHER'))];
     const supplies = [...new Set(defaults.map(rule => rule.supply_type).concat('Water'))];
     context.getAutomationConfig_ = () => ({ locale, canonical_suppliers: suppliers,
@@ -2263,9 +2782,9 @@ function testInformationalDiagnosticsConsumeWholeStatements() {
       [{ ...validInvoice(), contract_number: '', customer_code: 'CL123' },
         'Numero di contratto assente nel documento.'],
       [{ ...validInvoice(), customer_code: '' }, 'ID utente missing from the document.'],
-      [{ ...validInvoice(), supplier: 'Energygas Italia', contract_number: '', customer_code: 'CL123' },
+      [{ ...validInvoice(), supplier: 'Energygas Italia', supply_type: locale === 'it' ? 'Luce' : 'Electricity', contract_number: '', customer_code: 'CL123' },
         'Contract number not present; customer code CL123'],
-      [{ ...validInvoice(), supplier: 'Energygas Italia', contract_number: '', customer_code: 'CL123' },
+      [{ ...validInvoice(), supplier: 'Energygas Italia', supply_type: locale === 'it' ? 'Luce' : 'Electricity', contract_number: '', customer_code: 'CL123' },
         'Il numero di contratto non è presente o non è identificabile per Energygas Italia (CL123 è codice cliente).'],
       [electricity, 'Unit cost F1/F2/F3 populated from selling unit cost for monorate.'],
       [electricity, 'Il Costo unitario F1/F2/F3 è stato popolato con il costo unitario di vendita del consumo come previsto per un contratto monorario.'],
@@ -2326,20 +2845,20 @@ function testInformationalDiagnosticsConsumeWholeStatements() {
       assert.equal(context.validateExtraction_({ ...electricity, problems: [problem] }).valid,
         false, problem);
     }
-    for (const rule of context.getLocalization_().supplierFieldDefaults) {
+    for (const rule of profileFixtureDefaults(locale)) {
       for (const separator of [' ', ': ', ' : ', ':', '  :  ']) {
         for (const label of new Set([rule.header, rule.header.replace(/'/g, '’')])) {
           const statement = label + separator + (locale === 'it' ? 'non presente nel documento.' :
             'not present in the document.');
           const invoice = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
             sheet_values: [], problems: [statement] };
-          context.applySupplierFieldDefaults_(invoice, [rule.header]);
-          assert.equal(invoice.sheet_values[0].value, 0, statement);
+          context.applyApprovedProfileFieldDefaults_(invoice, [rule.header]);
+          assert.equal(invoice.sheet_values[0]?.value, 0, statement);
           assert.equal(invoice.problems.length, 0, statement);
           for (const problem of contradictory(statement)) {
             const blocked = { ...validInvoice(), supplier: rule.supplier, supply_type: rule.supply_type,
               sheet_values: [], problems: [problem] };
-            context.applySupplierFieldDefaults_(blocked, [rule.header]);
+            context.applyApprovedProfileFieldDefaults_(blocked, [rule.header]);
             assert.equal(blocked.sheet_values.length, 0, problem);
             assert.equal(blocked.problems.includes(problem), true, problem);
             assert.equal(context.validateExtraction_(blocked).valid, false, problem);
@@ -2502,7 +3021,7 @@ function testPendingDashboardRefreshRetriesWithoutProcessingPdfs() {
       })
     }
   });
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   context.getSpreadsheetId_ = () => 'spreadsheet-id';
   context.SpreadsheetApp.openById = (id) => ({ id });
   const events = [];
@@ -2580,7 +3099,7 @@ function testSupplierDefaultsNormalizeConfiguredIdentities() {
     sheet_values: []
   });
 
-  context.applySupplierFieldDefaults_(explicitAbsence, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(explicitAbsence, ["Spese d'incasso"]);
   assert.equal(JSON.stringify(explicitAbsence.sheet_values), JSON.stringify([{
     header: "Spese d'incasso", value: 0
   }]));
@@ -2593,7 +3112,7 @@ function testSupplierDefaultsNormalizeConfiguredIdentities() {
     problems: ["Spese d'incasso amount missing or unreadable."],
     sheet_values: [{ header: "Spese d'incasso", value: null }]
   });
-  context.applySupplierFieldDefaults_(unreadableCharge, ["Spese d'incasso"]);
+  context.applyApprovedProfileFieldDefaults_(unreadableCharge, ["Spese d'incasso"]);
   assert.equal(unreadableCharge.sheet_values[0].value, null);
   assert.equal(context.validateExtraction_(unreadableCharge).valid, false);
 }
@@ -3031,10 +3550,10 @@ function testLocalizedConfiguredReconciliationPipeline() {
     for (const supplier of ['Energygas Italia', 'OENERGY']) {
       const context = loadCataloger();
       const localization = context.getLocalizationRegistry_()[locale];
-      const contract = localization.supplierReconciliation;
+      const contract = localization.invoiceReconciliation;
       const electricity = supplier === 'Energygas Italia';
       const supply = electricity ? contract.electricitySupply : 'Gas';
-      const detailHeaders = Array.from(electricity ? contract.energygasDetails : contract.oenergyDetails);
+      const detailHeaders = Array.from(electricity ? approvedProfileFixtures.find(x => x.locale === locale && x.contract.electricity_consumption).detail_headers : approvedProfileFixtures.find(x => x.locale === locale && x.supply === 'Gas').detail_headers);
       let headers = detailHeaders.slice();
       context.getAutomationConfig_ = () => ({
         locale, canonical_suppliers: ['Energygas Italia', 'OENERGY'],
@@ -3052,11 +3571,20 @@ function testLocalizedConfiguredReconciliationPipeline() {
       const total = detailHeaders.reduce((sum, _, index) => sum + index + 1, 0);
       const invoice = {
         ...validInvoice(), supplier: electricity ? 'eg' : supplier, supply_type: 'utility',
+        ...(!electricity ? { oenergy_gas_summary: { selling_consumption: 25,
+          network_consumption: 1, consumption_subtotal: 26, selling_fixed: 1,
+          network_fixed: 1, fixed_subtotal: 2 } } : {}),
         cost_consumption: 25, cost_non_consumption: total, vat: 1, total: total + 26,
         sheet_values: detailHeaders.map((header, index) => ({ header, value: index + 1 }))
       };
+      // Legacy optional-role fixtures represent an unprinted role and therefore
+      // have no complete printed parent/child summary. Complete evidence can
+      // instead construct omitted derived cells (covered in the role regression).
+      const sourceFixture = raw => !electricity && !detailHeaders.slice(0, 2).every(header =>
+        raw.sheet_values.some(entry => entry.header === header && entry.value != null)) ?
+        { ...raw, oenergy_gas_summary: null } : raw;
       const extract = (raw, repairContext) => {
-        context.callGeminiForPdf_ = () => JSON.stringify(raw);
+        context.callGeminiForPdf_ = () => JSON.stringify(sourceFixture(raw));
         return context.extractUtilityData_(file, 'policy', repairContext);
       };
       const validate = (raw) => context.validateExtractedUtilityDataForImport_(extract(raw));
@@ -3167,12 +3695,12 @@ function testLocalizedConfiguredReconciliationPipeline() {
       assert.equal(mutations, 0, 'Detail repair exhaustion cannot journal, write, move, or rename');
       for (const absenceCase of absenceCases) {
         let absenceCalls = 0;
-        context.callGeminiForPdf_ = () => JSON.stringify(absenceCalls++ === 0 ? absenceCase.invalid : absenceCase.valid);
+        context.callGeminiForPdf_ = () => JSON.stringify(sourceFixture(absenceCalls++ === 0 ? absenceCase.invalid : absenceCase.valid));
         const absenceRepair = context.extractUtilityDataWithRepair_(file, 'policy');
         assert.equal(absenceRepair.aiCallCount, 2);
         assert.equal(absenceRepair.validation.valid, true);
         absenceCalls = 0;
-        context.callGeminiForPdf_ = () => { absenceCalls += 1; return JSON.stringify(absenceCase.invalid); };
+        context.callGeminiForPdf_ = () => { absenceCalls += 1; return JSON.stringify(sourceFixture(absenceCase.invalid)); };
         assert.equal(context.processIntakeFile_({ ...file, getSize: () => 100 }, {}, 'policy').status, 'VERIFY');
         assert.equal(absenceCalls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
         assert.equal(mutations, 0, 'Unreconciled partition with absent members cannot reach a mutation');
@@ -3428,8 +3956,8 @@ function testSpacedGroupingThroughExtractionAdmissionWriteAndRepair() {
       context.classifyAddress_ = () => 'import';
       context.validateServiceIdentityForInvoice_ = () => ({ valid: true });
       context.logCatalogEvent_ = () => {};
-      const quantityHeader = localization.supplierReconciliation.quantity;
-      const rateHeader = localization.supplierReconciliation.rates[0];
+      const quantityHeader = localization.invoiceReconciliation.quantity;
+      const rateHeader = localization.invoiceReconciliation.rates[0];
       const moneyHeader = localization.headerAliases.consumptionCost[0];
       const raw = { ...invoice, cost_consumption: expected, cost_non_consumption: 2,
         vat: 1, total: expected + 3, sheet_values: invoice.sheet_values.map(entry =>
@@ -3479,7 +4007,7 @@ function testElectricityRateReconciliationUsesActualInstallerSchemas() {
     vm.runInContext(fs.readFileSync(path.join(projectRoot, 'Installer.gs'), 'utf8'), context,
       { filename: 'Installer.gs' });
     const localization = context.getLocalizationRegistry_()[locale];
-    const contract = localization.supplierReconciliation;
+    const contract = localization.invoiceReconciliation;
     const supply = contract.electricitySupply;
     const installerHeaders = Array.from(context.getInstallerSheetHeaders_(locale, true));
     const bandHeaders = Array.from(localization.electricityBandHeaders);
@@ -3594,7 +4122,7 @@ function testElectricityAggregateAndWeightedRepresentations() {
     const fixture = createInvoiceVerificationFixture(locale);
     const { context, localization, layout, sheet, values, formats, formulas } = fixture;
     vm.runInContext(fs.readFileSync(path.join(projectRoot, 'Installer.gs'), 'utf8'), context);
-    const contract = localization.supplierReconciliation;
+    const contract = localization.invoiceReconciliation;
     const supply = contract.electricitySupply;
     const installer = Array.from(context.getInstallerSheetHeaders_(locale, true));
     const bands = Array.from(localization.electricityBandHeaders);
@@ -3729,7 +4257,7 @@ function testElectricityAggregateAndWeightedRepresentations() {
     assertValid({ ...weighted, problems: [contract.quantity, contract.rates[0]].map(absence) },
       'generic secondary absence admits absent aggregate headers with complete weighted bands');
     const otherLocale = context.getLocalizationRegistry_()[locale === 'en' ? 'it' : 'en'];
-    const rateAlias = otherLocale.supplierReconciliation.rates[1];
+    const rateAlias = otherLocale.invoiceReconciliation.rates[1];
     setHeaders(installer.concat(rateAlias));
     assertInvalid({ ...weighted, sheet_values: bandValues.concat({ header: rateAlias, value: 0.2 }) },
       'duplicate semantic band aliases');
@@ -3814,7 +4342,7 @@ function testMalformedRepairDoesNotFreezeInvalidFields() {
   context.normalizeExtraction_ = (value) => value;
   context.validateRawExtractionShape_ = () => {};
   context.inferInvoiceFrequency_ = () => {};
-  context.applySupplierFieldDefaults_ = () => {};
+  context.applyApprovedProfileFieldDefaults_ = () => {};
   context.getConfiguredSecondaryInvoiceHeaders_ = () => [];
   context.validateExtractedUtilityDataForImport_ = (value) => context.validateExtraction_(value);
   context.logCatalogEvent_ = () => {};
@@ -4129,7 +4657,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getGeminiModel_ = () => 'gemini-3.5-flash-lite';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -4153,7 +4681,7 @@ function testDeveloperApiKeyUsesHeader() {
   assert.equal(requests[0].url.includes('?key='), false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
   const payload = JSON.parse(requests[0].options.payload);
-  assert.equal(payload.model, 'gemini-flash-latest');
+  assert.equal(payload.model, 'gemini-3.5-flash-lite');
   assert.equal(payload.store, false);
   assert.equal(
     payload.generation_config.max_output_tokens,
@@ -4161,7 +4689,7 @@ function testDeveloperApiKeyUsesHeader() {
   );
   assert.equal(
     payload.generation_config.thinking_level,
-    vm.runInContext('CONFIG.GEMINI_FLASH_THINKING_LEVEL', context)
+    vm.runInContext('CONFIG.GEMINI_FLASH_LITE_THINKING_LEVEL', context)
   );
   assert.equal(payload.response_format.length, 1);
   assert.equal(payload.response_format[0].type, 'text');
@@ -4249,7 +4777,7 @@ function testProviderFinishReasonsStayBackendSpecific() {
 }
 testProviderFinishReasonsStayBackendSpecific();
 
-function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
+function testVertexFlashLiteUsesSupportedThinkingLevel() {
   const requests = [];
   const context = loadCataloger({
     UrlFetchApp: {
@@ -4267,7 +4795,7 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getGeminiModel_ = () => 'gemini-3.5-flash-lite';
   context.getScriptProperty_ = (key) => key === 'GOOGLE_CLOUD_PROJECT_ID' ?
     'vertex-project' : '';
   context.buildExtractionPrompt_ = () => 'prompt';
@@ -4287,10 +4815,10 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
 
   const payload = JSON.parse(requests[0].options.payload);
   assert.equal(requests[0].options.headers.Authorization, 'Bearer oauth-token');
-  assert.equal(payload.generationConfig.thinkingConfig.thinkingBudget, 4096);
+  assert.equal(payload.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
   assert.equal(
     Object.prototype.hasOwnProperty.call(
-      payload.generationConfig.thinkingConfig, 'thinkingLevel'
+      payload.generationConfig.thinkingConfig, 'thinkingBudget'
     ),
     false
   );
@@ -4329,21 +4857,21 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
 
 function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
   const models = [
-    ['gemini-flash-latest', 'medium', true],
-    ['gemini-2.5-pro', 'medium', true],
-    ['gemini-2.5-flash', 'medium', true],
-    ['gemini-2.5-flash-lite', 'medium', true],
-    ['gemini-3.6-flash', 'medium', false],
-    ['gemini-3.7-flash', 'medium', false],
-    ['gemini-3.8-flash', 'medium', false],
-    ['gemini-3.5-flash', 'medium', false],
-    ['gemini-3.5-flash-lite', 'medium', false],
-    ['gemini-3-flash-preview', 'medium', false],
-    ['gemini-3.1-pro-preview', 'medium', false],
-    ['gemini-3-pro-preview', 'high', false],
-    ['gemini-unverified-model', null, false]
+    ['gemini-flash-latest', 'medium', null],
+    ['gemini-2.5-pro', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-2.5-flash', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-2.5-flash-lite', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-3.6-flash', 'medium', { thinkingLevel: 'MEDIUM' }],
+    ['gemini-3.7-flash', 'medium', { thinkingLevel: 'MEDIUM' }],
+    ['gemini-3.8-flash', 'medium', { thinkingLevel: 'MEDIUM' }],
+    ['gemini-3.5-flash', 'medium', { thinkingLevel: 'MEDIUM' }],
+    ['gemini-3.5-flash-lite', 'low', { thinkingLevel: 'LOW' }],
+    ['gemini-3-flash-preview', 'medium', { thinkingLevel: 'MEDIUM' }],
+    ['gemini-3.1-pro-preview', 'high', { thinkingLevel: 'HIGH' }],
+    ['gemini-3-pro-preview', 'high', { thinkingLevel: 'HIGH' }],
+    ['gemini-unverified-model', null, null]
   ];
-  for (const [model, level, vertexBudget] of models) {
+  for (const [model, level, vertexThinkingConfig] of models) {
     for (const backend of ['gemini_api', 'vertex_ai']) {
       const requests = [];
       const usageEvents = [];
@@ -4389,10 +4917,10 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
         assert.ok(requests[0].url.endsWith('/' + model + ':generateContent'));
         assert.equal(payload.generationConfig.maxOutputTokens, 16384);
         assert.deepEqual(payload.generationConfig.thinkingConfig,
-          vertexBudget ? { thinkingBudget: 4096 } : undefined, model);
+          vertexThinkingConfig || undefined, model);
         assert.deepEqual(Object.keys(payload.generationConfig).sort(),
           ['maxOutputTokens', 'responseMimeType', 'responseSchema']
-            .concat(vertexBudget ? ['thinkingConfig'] : []).sort());
+            .concat(vertexThinkingConfig ? ['thinkingConfig'] : []).sort());
         assert.equal(Object.hasOwn(payload, 'generation_config'), false);
         assert.equal(Object.hasOwn(payload, 'cachedContent'), false);
       }
@@ -4414,9 +4942,9 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   };
   const context = loadCataloger(overrides);
 
-  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.5-flash-lite');
   properties.GEMINI_MODEL = '  ';
-  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.5-flash-lite');
   assert.equal(properties.GEMINI_MODEL, '  ');
   for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash',
     'gemini-2.5-flash', 'gemini-unverified-model']) {
@@ -4484,20 +5012,20 @@ function testEnergygasMigrationRejectsAmbiguityBeforeOrderingOrMutation() {
     }) } });
     context.withCatalogLifecycleLock_ = (_operation, callback) => callback();
     if (entry.ambiguous || entry.duplicate) {
-      assert.throws(() => context.migrateCatalogerEnergygasCanonicalSpelling(),
-        entry.duplicate ? /normalized duplicates/ : /canonical supplier values are ambiguous/,
+      assert.throws(() => context.renameCatalogerSupplierIdentity('ENERGYGAS', 'Energygas Italia'),
+        entry.duplicate ? /normalized duplicates/ : /Supplier identities are ambiguous/,
         JSON.stringify(entry.names));
       assert.equal(writes, 0);
       assert.deepEqual(properties, before);
     } else {
-      const result = context.migrateCatalogerEnergygasCanonicalSpelling();
+      const result = context.renameCatalogerSupplierIdentity('ENERGYGAS', 'Energygas Italia');
       assert.equal(result.updated, entry.updated);
       assert.equal(writes, entry.updated ? 1 : 0);
       if (!entry.updated) assert.deepEqual(properties, before);
       if (entry.updated) {
         const saved = JSON.parse(properties.AUTOMATION_CONFIG_JSON);
         assert.equal(saved.canonical_suppliers.filter(name => name === 'Energygas Italia').length, 1);
-        assert.deepEqual(context.migrateCatalogerEnergygasCanonicalSpelling().updated, false);
+        assert.deepEqual(context.renameCatalogerSupplierIdentity('ENERGYGAS', 'Energygas Italia').updated, false);
         assert.equal(writes, 1, 'Repeated migration must not write again');
       }
     }
@@ -4534,7 +5062,7 @@ function testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences() {
     assert.ok(value.canonical_suppliers.includes('Energygas Italia'));
   };
 
-  const result = context.migrateCatalogerEnergygasCanonicalSpelling();
+  const result = context.renameCatalogerSupplierIdentity('ENERGYGAS', 'Energygas Italia');
 
   assert.equal(result.updated, true);
   assert.deepEqual(config.canonical_suppliers, ['Energygas Italia', 'OENERGY']);
@@ -4979,7 +5507,7 @@ function testDepletedPrepaymentCreditsSwitchToVertexForOneHour(model = 'gemini-2
     const payload = JSON.parse(requests[index].options.payload);
     assert.equal(payload.generationConfig.maxOutputTokens, 16384);
     assert.deepEqual(payload.generationConfig.thinkingConfig,
-      model === 'gemini-2.5-flash' ? { thinkingBudget: 4096 } : undefined);
+      model === 'gemini-2.5-flash' ? { thinkingBudget: 4096 } : { thinkingLevel: 'MEDIUM' });
     assert.equal(Object.hasOwn(payload, 'generation_config'), false);
   }
   assert.equal(properties.GEMINI_MODEL, model);
@@ -5181,7 +5709,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.1',
+      applicationVersion: '0.8.0',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5192,7 +5720,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.1',
+      applicationVersion: '0.8.0',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -5568,6 +6096,7 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     } }
   });
   context.Utilities.sleep = ms => sleeps.push(ms);
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
   const file = { getId: () => 'file-id' };
@@ -5645,6 +6174,7 @@ function testGeminiHighDemandUsesDurableBackoffBeforeVertexFallback() {
     })[key] || '' }) },
     UrlFetchApp: { fetch: () => response(highDemand) }
   });
+  installAutomaticChainFixture(noFallback);
   noFallback.buildExtractionPrompt_ = () => 'test-prompt';
   noFallback.logCatalogEvent_ = () => {};
   let disabledRetryContext = {
@@ -5703,6 +6233,7 @@ function testGeminiIncompleteResponseFallsBackBeforeRepairAttempt() {
       return responses.shift();
     } }
   });
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
@@ -5747,6 +6278,7 @@ function testGeminiIncompleteModelChainUsesDurableRetryWithoutVertexFallback() {
       return mockedInteractionsResponse('', 'incomplete');
     } }
   });
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = () => {};
 
@@ -5797,6 +6329,7 @@ function testGeminiModelSpecific429FallsBackToNextModel() {
       } : mockedInteractionsResponse();
     } }
   });
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
@@ -5847,6 +6380,7 @@ function testGeminiTransientResponseFallsBackBeforeTerminalError() {
     } }
   });
   context.Utilities.sleep = () => {};
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
@@ -5896,6 +6430,7 @@ function testGeminiNetworkFailureResumesWithFreshModelExecution() {
     } }
   });
   context.Utilities.sleep = () => {};
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
@@ -5950,6 +6485,7 @@ function testGeminiTransientModelChainUsesDurableRetryWithoutVertexFallback() {
     } }
   });
   context.Utilities.sleep = () => {};
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = () => {};
 
@@ -5989,6 +6525,7 @@ function testGeminiModelChainReservesTimeToPersistDeferredState() {
     }) },
     UrlFetchApp: { fetch: (_url, options) => {
       requests.push(JSON.parse(options.payload).model);
+      vm.runInContext('modelChainClock = 60000;', context);
       return {
         getResponseCode: () => 500,
         getContentText: () => JSON.stringify({
@@ -5998,11 +6535,10 @@ function testGeminiModelChainReservesTimeToPersistDeferredState() {
     } }
   });
   vm.runInContext(
-    'let modelChainClockRead = 0; const modelChainClock = [0, 0, 60000]; ' +
-      'Date.now = () => modelChainClockRead < modelChainClock.length ? ' +
-      'modelChainClock[modelChainClockRead++] : 60000;',
+    'let modelChainClock = 0; Date.now = () => modelChainClock;',
     context
   );
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = () => {};
 
@@ -6093,6 +6629,7 @@ function testGeminiPartialModelChainResumesBeforeVertexFallback() {
       return responses.shift();
     } }
   });
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = () => {};
 
@@ -6163,6 +6700,7 @@ function testGeminiModelQuotaMovesToNextKnownFlashModel() {
       return responses.shift();
     } }
   });
+  installAutomaticChainFixture(context);
   context.buildExtractionPrompt_ = () => 'test-prompt';
   context.logCatalogEvent_ = (event, details) => events.push({ event, details });
 
@@ -6276,7 +6814,11 @@ function testGeminiModelQuotaMovesToNextKnownFlashModel() {
 }
 
 function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
-  const context = loadCataloger();
+  const initialNow = Date.now();
+  const FixedDate = class extends Date {
+    static now() { return initialNow; }
+  };
+  const context = loadCataloger({ Date: FixedDate });
   const file = {
     getId: () => 'file-id', getName: () => 'invoice.pdf',
     getUrl: () => 'https://drive.test/file-id', getLastUpdated: () => new Date(0),
@@ -6284,7 +6826,6 @@ function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
   };
   const delays = Array.from(vm.runInContext('CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS', context));
   const state = {};
-  const initialNow = Date.now();
   context.logCatalogEvent_ = () => {};
   const result = context.buildGeminiOverloadDeferredResult_(file, {
     overloadFailureCount: 1
@@ -6558,7 +7099,7 @@ function testReportFieldsCannotInjectExtraLines() {
 
 function testDashboardRefreshWarningIsReported() {
   const context = loadCataloger();
-  context.getAutomationConfig_ = () => ({ locale: 'en' });
+  context.getAutomationConfig_ = () => ({ locale: 'en', canonical_suppliers: ['SUPPLIER', 'ILIAD'], supplier_aliases: {}, canonical_supplies: ['Water'], supply_aliases: {} });
   const dashboardResult = context.buildSuccessResult_(
     { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
     'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
@@ -6625,30 +7166,12 @@ function testPromptKeepsHeadersScopedBySupply() {
     /Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence/);
   assert.match(prompt,
     /never copy a transaction-specific value from another invoice into this one/);
-  assert.match(prompt, /source_evidence "printed"/);
-  assert.doesNotMatch(prompt,
-    /If a field is genuinely not printed or not applicable, leave it absent and add a concise problem/);
-  assert.match(prompt, /recurring Iliad Internet charges/);
-  assert.match(prompt, /localized supplier field defaults/);
-  assert.match(prompt, /numeric value 0/);
+  assert.match(prompt, /source_components for exactly its component IDs/);
+  assert.match(prompt, /Only the matching approved profile may define numeric absence defaults/);
   assert.match(prompt, /final payable total, that printed total is authoritative/);
   assert.match(prompt, /never recalculate a different total/);
-  assert.match(prompt, /verify the arithmetic directly/);
-  assert.match(prompt, /must equal cost_non_consumption within rounding/);
-  assert.match(prompt, /For OENERGY Gas, verify Quota fissa/);
-  assert.match(prompt, /verify Totale costi consumo equals cost_consumption/);
-  assert.match(prompt, /Both printed amounts belong in Trasporto e oneri/);
-  assert.match(prompt, /sum every printed amount in the ACCISE e ADDIZIONALI section/);
-  assert.match(prompt, /selling portion in Costo unitario/);
-  assert.match(prompt, /repeat that common selling rate in Costo unitario F1\/F2\/F3/);
-  assert.match(prompt, /rate printed in the summary row/);
-  assert.match(prompt, /Do not use PREZZO FISSO, DISPACCIAMENTO/);
-  assert.match(prompt, /sum the printed network\/oneri summary amounts/);
-  assert.match(prompt, /do not map subordinate ASOS\/ARIM detail rows/);
-  assert.match(prompt, /Totale da pagare includes the printed Canone TV/);
-  assert.match(prompt, /Totale costi consumo and cost_consumption are the printed selling consumption amount only/);
-  assert.match(prompt, /Accise and Canone TV remain separate/);
-  assert.match(prompt, /never solve a mismatch by changing another field/);
+  assert.match(prompt, /first month of the actual billed service period/);
+  assert.doesNotMatch(prompt, /OENERGY|Energygas|Iliad/);
   assert.match(prompt, /Infer each table role from its headings and units, not its title/);
   assert.match(prompt, /Energy-mix, offer, marketing, and explanatory tables are not required/);
   assert.match(prompt, /documented invoice\/report structure as corroborating classification evidence/);
@@ -8705,8 +9228,8 @@ function createInvoiceVerificationFixture(locale) {
     String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
   context.buildDrivePathLabel_ = () => 'invoice.pdf';
   const headers = Array.from(localization.installerSheetHeaders).concat(
-    Array.from(localization.supplierReconciliation.rates),
-    localization.supplierReconciliation.quantity,
+    Array.from(localization.invoiceReconciliation.rates),
+    localization.invoiceReconciliation.quantity,
     Array.from(localization.electricityBandHeaders).filter((_, index) => index % 2 === 0),
     ['PDR', 'Custom flag']);
   const lookup = Object.fromEntries(headers.map((header, index) => [context.normalizeHeader_(header), index + 1]));
@@ -8736,7 +9259,7 @@ function createInvoiceVerificationFixture(locale) {
   };
   const invoice = { ...validInvoice(), identifier: '1234', contract_number: '00567',
     customer_code: '123456', sheet_values: [
-      ...Array.from(localization.supplierReconciliation.rates).map(header => ({ header, value: 0.135338 })),
+      ...Array.from(localization.invoiceReconciliation.rates).map(header => ({ header, value: 0.135338 })),
       ...headers.filter(header => context.isConsumptionQuantityHeader_(header)).map(header => ({ header, value: 123.456 })),
       { header: 'PDR', value: '001234' }, { header: 'Custom flag', value: true }
     ] };
@@ -9733,7 +10256,7 @@ testDeveloperApiKeyUsesHeader();
 testProviderReasoningPayloadPreservesExplicitModelCapabilities();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences();
-testVertexLatestAliasOmitsUnsupportedThinkingLevel();
+testVertexFlashLiteUsesSupportedThinkingLevel();
 testVertexCostEstimateDoesNotReusePricingForGeminiLatest();
 testGeminiLatestUsageTelemetryOmitsUnpricedEstimate();
 testIncompleteGeminiResponseReportsFinishReason();
@@ -9862,7 +10385,7 @@ function testQuadrimestralCadenceAndConfiguredEvidence() {
 
 function testAccessoryRepairAdmissionAndEssentialVetoes() {
   const context = loadCataloger();
-  context.getLocalization_ = () => ({supplierReconciliation: {}, headerAliases: {}, subscriberIdentifierProblemPatterns:{}});
+  context.getLocalization_ = () => ({invoiceReconciliation: {}, headerAliases: {}, subscriberIdentifierProblemPatterns:{}});
   context.validateServiceIdentityForInvoice_ = () => ({valid:true});
   context.validateTargetSheetValues_ = () => ({valid:true});
   context.logCatalogEvent_ = () => {};
@@ -10232,7 +10755,7 @@ function testPrintedCadenceContradictionsReachValidationAndSheet() {
     c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:evidence==='history'?'consensus':'empty',
       frequency:evidence==='history'?'four_monthly':''});
     const invoice={...f.invoice,frequency:'monthly',frequency_source_evidence:'printed',problems:[],
-      reference_month:evidence==='period'?'08':'06',
+      reference_month:evidence==='period'?'05':'06',
       issue_date:evidence==='period'?'2026-10-01':'2026-07-16',
       period_start:evidence==='period'?'2026-05-01':'2026-06-01',
       period_end:evidence==='period'?'2026-08-31':'2026-06-30'};
@@ -10249,7 +10772,7 @@ function testPrintedCadenceContradictionsReachValidationAndSheet() {
   f.context.getConfiguredInvoiceFrequency_=()=> 'four_monthly';
   f.context.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'consensus',frequency:'four_monthly'});
   const valid={...f.invoice,frequency:'quadrimestrale',frequency_source_evidence:'printed',problems:[],
-    reference_month:'08',issue_date:'2026-10-01',period_start:'2026-05-01',period_end:'2026-08-31'};
+    reference_month:'05',issue_date:'2026-10-01',period_start:'2026-05-01',period_end:'2026-08-31'};
   f.context.inferInvoiceFrequency_(valid);
   assert.equal(valid.frequency,'four_monthly');
   assert.equal(valid.problems.length,0);
@@ -10373,9 +10896,9 @@ function testProblemDetailsRequiredAcrossProviderSchemasAndGuidedRepair() {
   c.normalizeExtraction_=data=>({...data});
   c.getConfiguredSecondaryInvoiceHeaders_=()=>['Unit of measure'];
   c.inferInvoiceFrequency_=()=>{};
-  c.applySupplierFieldDefaults_=()=>{};
+  c.applyApprovedProfileFieldDefaults_=()=>{};
   c.normalizeSheetValues_=values=>values;
-  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+  c.getLocalization_=()=>({invoiceReconciliation:{},headerAliases:{},
     subscriberIdentifierProblemPatterns:{}});
   c.validateServiceIdentityForInvoice_=()=>({valid:true});
   c.validateTargetSheetValues_=()=>({valid:true});
@@ -10446,9 +10969,9 @@ function testRawExtractionRequiresCompleteDeclaredShape() {
   c.getAutomationConfig_=()=>({frequency_overrides:[]});
   c.getConfiguredInvoiceFrequency_=()=> '';
   c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
-  c.applySupplierFieldDefaults_=()=>{};
+  c.applyApprovedProfileFieldDefaults_=()=>{};
   c.normalizeSheetValues_=values=>values;
-  c.getLocalization_=()=>({supplierReconciliation:{},headerAliases:{},
+  c.getLocalization_=()=>({invoiceReconciliation:{},headerAliases:{},
     subscriberIdentifierProblemPatterns:{}});
   c.validateServiceIdentityForInvoice_=()=>({valid:true});
   c.validateTargetSheetValues_=()=>({valid:true});
@@ -10461,7 +10984,7 @@ function testRawExtractionRequiresCompleteDeclaredShape() {
   assert.equal(repairs[1].feedback.issues[0].code,'invalid_extraction_schema');
   assert.deepEqual(Array.from(repairs[1].feedback.issues[0].fields),['billing_cycle_kind']);
   const ordinary={...validInvoice(),frequency:'',frequency_source_evidence:null,
-    period_start:'2026-05-01',period_end:'2026-08-31',reference_month:'08',issue_date:'2026-10-01'};
+    period_start:'2026-05-01',period_end:'2026-08-31',reference_month:'05',issue_date:'2026-10-01'};
   const missingOrdinary={...ordinary};delete missingOrdinary.billing_cycle_kind;
   calls=0;
   c.getConfiguredInvoiceFrequency_=()=> 'quarterly';
@@ -10500,7 +11023,7 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
   c.getConfiguredSecondaryInvoiceHeaders_=()=>[];
   c.getConfiguredInvoiceFrequency_=()=> '';
   c.getHistoricalInvoiceFrequencyEvidence_=()=>({state:'empty',frequency:''});
-  c.applySupplierFieldDefaults_=()=>{};
+  c.applyApprovedProfileFieldDefaults_=()=>{};
   c.validateServiceIdentityForInvoice_=()=>({valid:true});
   c.validateTargetSheetValues_=()=>({valid:true});
   c.buildInvoiceRepairSupplyContext_=()=>({state:'available',previousInvoices:[]});
@@ -10585,7 +11108,7 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
     c.getLocalization_=()=>header==='Frequenza'?c.getItalianLocalization_():c.getEnglishLocalization_();
     c.getSheetHeadersBySupply_=()=>({Water:[header]});
     const raw={...validInvoice(),frequency:null,frequency_source_evidence:null,
-      period_start:null,period_end:null,problems:[message],
+      period_start:'2026-06-01',period_end:null,problems:[message],
       problem_details:[{code:'missing',fields:[header],message}],
       sheet_values:[{header,value:'monthly'}]};
     const contexts=[];
@@ -10624,7 +11147,7 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
   c.getLocalization_=()=>c.getEnglishLocalization_();
   for(const modelDetail of [false,true]) {
     const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,
-      period_start:null,period_end:null,problems:modelDetail?[message]:[],
+      period_start:'2026-06-01',period_end:null,problems:modelDetail?[message]:[],
       problem_details:modelDetail?[{code:'missing',fields:['frequency'],message}]:[]};
     c.callGeminiForPdf_=()=>JSON.stringify(raw);
     const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
@@ -10646,3 +11169,238 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
   }
 }
 testCadenceTextCannotOverrideStructuredEssentialFields();
+
+function testScheduledGeminiMaintenanceRotationAndBounds() {
+  const values = new Map();
+  const c = loadCataloger({ Date, PropertiesService: { getScriptProperties: () => ({
+    getProperty: key => values.get(key) || '',
+    setProperty: (key, value) => values.set(key, value)
+  }) } });
+  c.logCatalogEvent_ = () => {};
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => false;
+  c.withCatalogProcessingLock_ = () => { throw new Error('Pinned mode must exit before lock'); };
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'pinned-model');
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  c.withCatalogProcessingLock_ = (_source, callback) => callback();
+  c.getGeminiBackend_ = () => 'gemini_api';
+  c.isAutomaticVertexFallbackEnabled_ = () => true;
+  const liteSelections = {
+    gemini_api: { checkedAtMs: Date.now() - 25 * 60 * 60 * 1000 },
+    vertex_ai: { checkedAtMs: Date.now() - 25 * 60 * 60 * 1000 }
+  };
+  c.readGeminiModelSelections_ = () => liteSelections;
+  c.classifyCatalogErrorForLog_ = () => 'provider-unavailable';
+  const calls = [];
+  const request = (backend, tier, deadline) => {
+    const attempts = JSON.parse(values.get('GEMINI_MODEL_MAINTENANCE_ATTEMPTS'));
+    assert.ok(attempts[backend + ':' + tier] > 0, 'attempt checkpoint precedes external I/O');
+    assert.ok(deadline > Date.now());
+    calls.push(backend + ':' + tier);
+    if (backend === 'gemini_api') throw new Error('Provider failure');
+    if (tier === 'flash-lite') liteSelections[backend] = { checkedAtMs: Date.now() };
+    else values.set('GEMINI_MODEL_ESCALATION_SELECTIONS', JSON.stringify({
+      [backend]: { checkedAtMs: Date.now() }
+    }));
+    return 'gemini-3.8-' + tier;
+  };
+  c.getGeminiModelCandidatesForBackend_ = (backend, refresh, deadline) => {
+    assert.equal(refresh, true);
+    return [request(backend, 'flash-lite', deadline)];
+  };
+  c.refreshGeminiFlashEscalationModelForBackend_ = (backend, deadline) => request(backend, 'flash', deadline);
+  assert.equal(c.maintainGeminiModelSelections().deferred, true);
+  assert.equal(c.maintainGeminiModelSelections().model, 'gemini-3.8-flash-lite');
+  assert.equal(c.maintainGeminiModelSelections().deferred, true);
+  assert.equal(c.maintainGeminiModelSelections().model, 'gemini-3.8-flash');
+  assert.deepEqual(calls, ['gemini_api:flash-lite', 'vertex_ai:flash-lite', 'gemini_api:flash', 'vertex_ai:flash']);
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'fresh-model-selections');
+  assert.equal(calls.length, 4);
+  values.set('GEMINI_MODEL_MAINTENANCE_ATTEMPTS', JSON.stringify({
+    ...JSON.parse(values.get('GEMINI_MODEL_MAINTENANCE_ATTEMPTS')), 'gemini_api:flash-lite': 0
+  }));
+  c.getGeminiModelCandidatesForBackend_ = () => ['gemini-3.5-flash-lite'];
+  const retained = c.maintainGeminiModelSelections();
+  assert.equal(retained.refreshed, false);
+  assert.equal(retained.retained, true);
+  assert.equal(retained.deferred, true);
+  c.withCatalogProcessingLock_ = () => ({ skipped: 'already-running' });
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'already-running');
+  assert.equal(calls.length, 4);
+
+  const catalog = loadCataloger({ Date });
+  catalog.logCatalogEvent_ = () => {};
+  catalog.getScriptProperty_ = () => 'test-key';
+  let pages = 0;
+  catalog.fetchGeminiModelCatalog_ = () => {
+    pages += 1;
+    return { getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ models: [], nextPageToken: 'repeated' }) };
+  };
+  assert.throws(() => catalog.listGeminiDeveloperFlashLiteCandidates_('', Date.now() + 240000),
+    error => error.geminiCatalogTransient === true);
+  assert.equal(pages, 10);
+}
+testScheduledGeminiMaintenanceRotationAndBounds();
+
+function testModelMaintenanceLockDefersAndReleasesProcessing() {
+  const values = new Map();
+  let held = true;
+  const c = loadCataloger({ Date,
+    LockService: { getScriptLock: () => ({
+      tryLock: () => { if (held) return false; held = true; return true; },
+      releaseLock: () => { held = false; }
+    }) },
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => values.get(key) || '',
+      setProperty: (key, value) => values.set(key, value)
+    }) }
+  });
+  c.logCatalogEvent_ = () => {};
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  c.getGeminiBackend_ = () => 'gemini_api';
+  c.isAutomaticVertexFallbackEnabled_ = () => false;
+  c.readGeminiModelSelections_ = () => ({});
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'already-running');
+  assert.equal(values.has('GEMINI_MODEL_MAINTENANCE_ATTEMPTS'), false);
+  held = false;
+  c.getGeminiModelCandidatesForBackend_ = () => {
+    assert.equal(c.withCatalogProcessingLock_('daily', () => {
+      throw new Error('Processing cannot overlap cache maintenance');
+    }).skipped, 'already-running');
+    return ['gemini-3.5-flash-lite'];
+  };
+  c.maintainGeminiModelSelections();
+  assert.equal(held, false);
+  assert.equal(c.withCatalogProcessingLock_('daily', () => 'resumed'), 'resumed');
+}
+testModelMaintenanceLockDefersAndReleasesProcessing();
+
+function testReadinessProbePreservesIncompleteFinishReason() {
+  const c = loadCataloger();
+  c.getScriptProperty_ = () => '';
+  c.getVertexAiLocation_ = () => 'global';
+  const events = [];
+  c.logCatalogEvent_ = (event, details) => events.push({ event, ...details });
+  c.validateConfiguredVertexGeneration_ = () => {
+    const error = new Error('Readiness did not complete');
+    error.geminiProbeHttpStatus = 200;
+    error.geminiProbeFinishReason = 'MAX_TOKENS';
+    throw error;
+  };
+  assert.throws(() => c.probeGeminiModelForBackend_('vertex_ai', 'gemini-3.8-flash'));
+  const failure = events.find(event => event.event === 'gemini-model-generation-probe');
+  assert.equal(failure.successful, false);
+  assert.equal(failure.httpStatus, 200);
+  assert.equal(failure.finishReason, 'MAX_TOKENS');
+}
+testReadinessProbePreservesIncompleteFinishReason();
+
+
+
+function testDetailedRepairsIncreaseThinkingWithinFlashLiteOnly() {
+  const c = loadCataloger();
+  const repair = { feedback: { issues: [{ code: 'invoice_cost_reconciliation_mismatch' }] } };
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', repair).thinking_level, 'medium');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'vertex_ai', repair).thinkingConfig.thinkingLevel, 'MEDIUM');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', null).thinking_level, 'low');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', {
+    feedback: { issues: [{ code: 'invoice_identity_mismatch' }] } }).thinking_level, 'low');
+  assert.equal(c.getGeminiReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api').thinking_level, 'low');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-2.5-flash-lite', 'vertex_ai', repair).thinkingConfig.thinkingBudget,
+    vm.runInContext('CONFIG.GEMINI_VERTEX_THINKING_BUDGET', c));
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.8-flash', 'gemini_api', repair).thinking_level,
+    c.getGeminiReasoningConfig_('gemini-3.8-flash', 'gemini_api').thinking_level);
+}
+testDetailedRepairsIncreaseThinkingWithinFlashLiteOnly();
+
+function testDetailedRepairThinkingReachesBothProviderRequests() {
+  for (const backend of ['gemini_api', 'vertex_ai']) {
+    const requests = [];
+    const c = loadCataloger({ UrlFetchApp: { fetch: (url, options) => {
+      requests.push(JSON.parse(options.payload));
+      return backend === 'gemini_api' ? mockedInteractionsResponse() : {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ candidates: [{ finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] } }] }) };
+    } } });
+    c.getScriptProperty_ = key => ({ GEMINI_MODEL: 'gemini-3.5-flash-lite',
+      GEMINI_API_KEY: 'developer-secret', GOOGLE_CLOUD_PROJECT_ID: 'vertex-project' })[key] || '';
+    c.buildExtractionPrompt_ = () => 'prompt';
+    c.logCatalogEvent_ = () => {};
+    c.callGeminiForPdfWithBackend_({ getBytes: () => [1] }, {}, 'policy',
+      { getId: () => 'file-id' }, backend, '', { attempt: 2,
+        feedback: { issues: [{ code: 'invoice_cost_reconciliation_mismatch' }] } });
+    assert.equal(requests.length, 1);
+    if (backend === 'gemini_api') assert.equal(requests[0].generation_config.thinking_level, 'medium');
+    else assert.equal(requests[0].generationConfig.thinkingConfig.thinkingLevel, 'MEDIUM');
+  }
+}
+testDetailedRepairThinkingReachesBothProviderRequests();
+
+function testVertexCandidateFallbackRespectsAbsoluteDeadline() {
+  for (const expires of [true, false]) {
+    let now = 100000;
+    let requests = 0;
+    const events = [];
+    class FakeDate extends Date { static now() { return now; } }
+    const c = loadCataloger({ Date: FakeDate, UrlFetchApp: { fetch: () => {
+      requests += 1;
+      if (requests === 1) {
+        now = expires ? 300001 : 100001;
+        return { getResponseCode: () => 404,
+          getContentText: () => JSON.stringify({ error: { message: 'Model not found' } }) };
+      }
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{
+        finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] }) };
+    } } });
+    c.getEffectiveGeminiBackend_ = () => 'vertex_ai';
+    c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+    c.getGeminiModelCandidatesForBackend_ = () => ['gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'];
+    c.getScriptProperty_ = () => 'fixture-project';
+    c.buildExtractionPrompt_ = () => 'prompt';
+    c.logCatalogEvent_ = event => events.push(event);
+    const run = () => c.callGeminiForPdf_({ getBytes: () => [1] }, {}, '',
+      { getId: () => 'file-id' }, null, null, 300000);
+    if (expires) assert.throws(run, error => error.extractionRepairDeferred === true);
+    else assert.equal(run(), '{}');
+    assert.equal(requests, expires ? 1 : 2);
+    assert.equal(events.filter(e => e === 'gemini-generation-request').length, requests);
+    now = 300001;
+    assert.throws(() => c.callGeminiForPdf_({ getBytes: () => [1] }, {}, '',
+      { getId: () => 'file-id' }, { modelOverride: 'gemini-3.5-flash-lite' }, null, 300000),
+    error => error.extractionRepairDeferred === true);
+    assert.equal(requests, expires ? 1 : 2, 'Expired model overrides cannot send another request');
+  }
+}
+testVertexCandidateFallbackRespectsAbsoluteDeadline();
+
+function testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest() {
+  for (const networkError of [true, false]) {
+    for (const expires of [true, false]) {
+      let now = 100000, requests = 0, waits = 0;
+      class FakeDate extends Date { static now() { return now; } }
+      const c = loadCataloger({ Date: FakeDate, UrlFetchApp: { fetch: () => {
+        requests += 1;
+        if (requests === 1) {
+          now = expires ? 300001 : 100001;
+          if (networkError) throw new Error('fixture network error');
+          return { getResponseCode: () => 503, getContentText: () => '{}' };
+        }
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ candidates: [{
+          finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] }) };
+      } } });
+      c.Utilities.sleep = () => { waits += 1; };
+      c.getScriptProperty_ = () => 'fixture-project';
+      c.buildExtractionPrompt_ = () => 'prompt';
+      c.logCatalogEvent_ = () => {};
+      const run = () => c.callGeminiForPdfWithBackend_({ getBytes: () => [1] }, {}, '',
+        { getId: () => 'file-id' }, 'vertex_ai', '', null, null,
+        'gemini-3.5-flash-lite', false, 300000);
+      if (expires) assert.throws(run, error => error.extractionRepairDeferred === true);
+      else assert.equal(run(), '{}');
+      assert.equal(requests, expires ? 1 : 2);
+      assert.equal(waits, expires ? 0 : 1);
+    }
+  }
+}
+testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest();

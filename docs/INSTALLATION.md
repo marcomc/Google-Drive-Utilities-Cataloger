@@ -376,7 +376,7 @@ non-interactive installation:
 | `GDUC_SPREADSHEET` | Optional spreadsheet URL or ID |
 | `GDUC_SPREADSHEET_TITLE` | Title used when creating a spreadsheet |
 | `GDUC_GEMINI_MODE` | `gemini_api`, `vertex_ai`, or `gemini_api_with_vertex_fallback` |
-| `GDUC_GEMINI_MODEL` | Optional model; default `gemini-flash-latest`; may override the pending value on resume |
+| `GDUC_GEMINI_MODEL` | Optional explicit model pin; unset enables provider-specific stable Flash-Lite discovery; may override and pin the pending value on resume |
 | `GDUC_VERTEX_AI_LOCATION` | Optional Vertex location; default `global`; may override the pending value on resume |
 | `GDUC_OAUTH_CLIENT_JSON` | Optional Desktop OAuth client JSON; otherwise the saved GDUC config path is discovered automatically |
 | `GDUC_GEMINI_API_KEY` | Secret; required on resume for Gemini API |
@@ -624,7 +624,8 @@ The owner-only bootstrap:
 - creates or validates `AGENTS.md` and the spreadsheet;
 - stores Script Properties without returning the Gemini key;
 - creates destination folders, Pub/Sub, and the Drive subscription;
-- installs the daily, 15-minute poll, one-minute overload-retry, and six-hour
+- installs hourly model maintenance, the daily run, 15-minute poll,
+  one-minute overload-retry, and six-hour
   renewal triggers.
 
 After success, the installer removes its local custom `clasp` authorization
@@ -639,7 +640,7 @@ AI. Removing that scope requires splitting the runtime architecture.
 Do not disable an existing automation yet.
 
 1. Open the URLs printed at installation completion.
-2. Confirm the four Apps Script triggers exist.
+2. Confirm the five Apps Script triggers exist.
 3. Add one known, non-duplicate PDF directly to the intake root.
 4. Wait up to 15 minutes.
 5. Verify the renamed Drive file, one spreadsheet row and source link, and one

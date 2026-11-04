@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-11-04 - supplier-independent invoice contracts and model discovery
+
+### Added
+
+- Read bounded, declarative invoice contracts from approved supplier profiles.
+  Keep document-specific component IDs, additive checks, column bindings and
+  explicit-absence defaults in profile data, with generic validation in code.
+
+### Fixed
+
+- Validate printed components against independent subtotals, preserve conflicting
+  evidence and reject double counting before writing invoice costs. Check declared
+  quantity/rate products against independently printed amounts. Apply validated
+  allocations when retained absence diagnostics are non-blocking; keep
+  conflicting evidence blocking. Use generic
+  monetary repair codes and bounded reasoning escalation across suppliers.
+- Use the first month of the actual billed service period as the reference month
+  for every supply, including advance billing and periods spanning calendar years.
+  Exclude historical, payment and next-invoice dates from the current period.
+- Discover and generation-probe stable economical models independently for each
+  backend. Refresh verified selections through bounded scheduled maintenance and
+  retain the last verified model across temporary provider failures.
+- Classify model reasoning by family and protocol instead of curated release
+  lists. Pinned mode uses exactly the configured model ID.
+- Carry one execution deadline through model/provider fallback and transient
+  retries. Preserve provider token usage in readiness telemetry and omit cost
+  estimates for models without a verified price table.
+
 ## [0.7.1] - 2026-10-07 - complete extraction after Gemini thinking
 
 ### Fixed

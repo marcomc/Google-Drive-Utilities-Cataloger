@@ -215,6 +215,16 @@
   Validate existing mutation targets before changing project source or state.
 - Keep `CONFIG.APP_VERSION`, the changelog release, setup status, structured
   logs, and per-file report version synchronized.
+- Before OAuth recovery, verify the actual executable launches with its linked
+  libraries and the subprocess has the intended PATH. Distinguish local runtime
+  failure from authentication failure before changing credentials.
+- Check the exact OAuth client, account, granted scopes, token validity and API
+  service enablement separately. Prove each required service with a minimal
+  supported operation; sign-in alone does not establish API readiness.
+- Keep debugging and deployment iterations under the pending application
+  release version. Apps Script deployment numbers identify deployment artifacts
+  separately; increment the application version only at an authorized release
+  boundary, and check the pending target in release validation.
 - After an accepted Apps Script deployment update, verify metadata with a
   bounded read-only poll. Retry only the exact validated pre-update version;
   treat authorization, identity, entry-point, transport, and any other
