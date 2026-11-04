@@ -65,47 +65,61 @@ then use **Project Settings > Script Properties > Edit script properties**.
 | `SPREADSHEET_ID` | Destination spreadsheet ID. |
 | `AUTOMATION_CONFIG_JSON` | Complete contents of `config.local.json`. |
 | `GOOGLE_CLOUD_PROJECT_ID` | Linked standard Cloud project ID, required for Drive events. |
-| `GEMINI_MODEL` | Optional; defaults to Google's `gemini-flash-latest` alias for both Gemini Developer API and Vertex AI fallback. |
+| `GEMINI_MODEL` | Fallback model ID and optional explicit pin. Automatic selection is enabled by default for new installations. |
+| `GEMINI_MODEL_AUTO_SELECTION` | `true` selects the newest stable Flash-Lite model independently for each enabled provider; `false` pins `GEMINI_MODEL`. |
 | `VERTEX_AI_LOCATION` | Optional for `vertex_ai`; defaults to `global`. |
 
-The default `gemini-flash-latest` alias follows Google's newest release of the
-Flash model variation. Google documents that this alias is hot-swapped when a
-new Flash release becomes available and provides advance notice for breaking
-changes. The alias does not pin a numeric Flash version; record the provider's
-reported model version when available rather than inferring it from the alias.
-The default Developer API request uses Google's Interactions API with an
-16,384-token output budget, explicit `medium` thinking, structured JSON output,
+With automatic selection enabled, the application lists stable Flash-Lite
+models from each provider's own catalog, sorts versioned IDs newest first, and
+probes candidates with a minimal PDF generation request. Gemini API model
+catalogs do not expose a GA launch-stage field, so the selector excludes
+preview-style IDs and confirms generation access with the configured key. The
+Vertex catalog is filtered to `launchStage=GA` and `versionState=STABLE` before
+the same generation probe. Catalog membership alone never marks a model ready.
+Each provider's result is cached for 24 hours; temporary catalog or inference
+failures retain that provider's last verified selection. `refreshGeminiModelSelectionCaches()`
+refreshes all configured provider caches outside invoice processing. PDF
+processing never performs catalog discovery; a missing cache fails closed, and
+a stale verified cache remains usable during refresh failures. The managed hourly
+`maintainGeminiModelSelections` trigger refreshes one due provider/tier pair per
+execution, with a 24-hour cooldown per pair and Flash-Lite pairs first. Pinned
+mode performs no discovery. Gemini
+API and Vertex may resolve to different model IDs. Model discovery has no price metadata; the
+Flash-Lite family is the economical tier policy, not a guarantee of the lowest
+price. `gemini-flash-latest` is not used as a Vertex publisher-model alias.
+After three Flash-Lite attempts fail the OENERGY Gas detailed-cost validator,
+automatic mode can use a separately catalogued and generation-probed stable
+Flash model for one targeted repair. The same maintenance operation refreshes
+its 24-hour cache together with Flash-Lite selections. Catalog calls
+have no caller-configurable timeout in Apps Script, so a missing cache
+disables only this optional escalation and leaves the ordinary validated
+Flash-Lite result path intact.
+
+`configureGeminiModelSelection('latest_ga_flash_lite')` enables discovery;
+`configureGeminiModelSelection('pinned')` disables it, and
+`configureGeminiModel('gemini-3.5-flash-lite')` sets a pin and disables
+discovery. `validateConfiguredGeminiAccess()` reports the independently
+resolved IDs and verifies metadata plus bounded generation readiness for each
+enabled provider. The default Developer API request uses Google's Interactions
+API with a 16,384-token output budget, model-appropriate thinking controls,
+structured JSON output,
 and `store:false` so invoice documents are not retained as Interaction state.
 Thinking and response tokens share this ceiling; the budget leaves room for
 complete JSON after reasoning on detailed invoices. Incomplete responses remain
 blocking and follow the existing bounded model-chain retry schedule.
-Vertex AI continues to use `generateContent`, the same alias and output budget,
-with an explicit `thinkingBudget: 4096`.
+Vertex AI uses `generateContent` with its independently selected model and
+output budget. Versioned Flash-Lite models use low thinking; the API-specific
+configuration retains the supported controls for older model families. Vertex
+uses its REST field casing (`thinkingConfig.thinkingLevel`) while the Gemini
+Interactions API uses `generation_config.thinking_level`.
 
-Every saved model identifier, including `gemini-3.6-flash` and
-`gemini-3.7-flash`, remains an explicit pin after source deployment. The moving
-alias is used only when runtime model configuration is absent or blank, or
-when the operator explicitly selects it. To switch an existing installation,
-call the owner-only `configureGeminiModel('gemini-flash-latest')` function.
-Then `validateConfiguredGeminiAccess()` performs metadata/token validation and
-a bounded stateless text-generation probe against every enabled backend. The
-probe uses no document data, retains no Interaction state, and distinguishes an
-accessible model from one that can currently serve inference. It probes every
-enabled backend independently, so a Developer API outage does not hide Vertex
-AI readiness. The result reports each backend's metadata and generation state,
-failure stage, sanitized HTTP status, and explicit high-demand reason. A former
-default spelling alone does not establish that the operator intended to follow
-future defaults.
+If `GDUC_GEMINI_MODEL` is explicitly set during installation, automatic model
+selection is disabled and that model is pinned. Otherwise new installations
+enable provider-specific discovery. Existing installations remain unchanged
+until `configureGeminiModelSelection('latest_ga_flash_lite')` is called.
 
-For document extraction, the configured Developer API model is tried first.
-The default configuration then tries these distinct identifiers in order,
-skipping duplicates:
-
-1. `gemini-flash-latest`
-2. `gemini-3.8-flash`
-3. `gemini-3.7-flash`
-4. `gemini-3.6-flash`
-5. `gemini-3.5-flash`
+For automatic mode, eligible models from the provider catalog are tried from
+newest to older if a generation request reports that a model is unavailable.
 
 Explicit capacity and model-quota failures advance to the next model. If the
 whole list remains unavailable, the existing persisted 1/5/15/30-minute retry

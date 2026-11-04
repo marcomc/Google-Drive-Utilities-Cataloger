@@ -9,7 +9,7 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 const sources = ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs',
-  'UtilitiesCataloging.gs'].map((file) =>
+  'GeminiModelSelection.gs', 'UtilitiesCataloging.gs'].map((file) =>
   fs.readFileSync(path.join(projectRoot, file), 'utf8')
 );
 
@@ -62,11 +62,522 @@ function loadCataloger(overrides = {}) {
   sources.forEach((source, index) => {
     vm.runInContext(source, context, {
       filename: ['Config.gs', 'locales/en.gs', 'locales/it.gs',
-        'Localization.gs', 'UtilitiesCataloging.gs'][index]
+        'Localization.gs', 'GeminiModelSelection.gs',
+        'UtilitiesCataloging.gs'][index]
     });
   });
   return context;
 }
+
+function testAutomaticGeminiModelSelectionIsProviderSpecificAndStable() {
+  const stored = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL: 'gemini-pinned-model'
+  };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; },
+        deleteProperty: key => { delete stored[key]; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const probeCalls = [];
+  context.listGeminiDeveloperFlashLiteCandidates_ = () => [
+    'gemini-3.7-flash-lite', 'gemini-3.5-flash-lite'
+  ];
+  context.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'
+  ];
+  context.probeGeminiModelForBackend_ = (backend, model) => {
+    probeCalls.push([backend, model]);
+  };
+
+  context.getGeminiModelCandidatesForBackend_('gemini_api', true);
+  context.getGeminiModelCandidatesForBackend_('vertex_ai', true);
+  assert.equal(context.getGeminiModelForBackend_('gemini_api'),
+    'gemini-3.7-flash-lite');
+  assert.equal(context.getGeminiModelForBackend_('vertex_ai'),
+    'gemini-3.6-flash-lite');
+  assert.deepEqual(probeCalls, [
+    ['gemini_api', 'gemini-3.7-flash-lite'],
+    ['gemini_api', 'gemini-3.5-flash-lite'],
+    ['vertex_ai', 'gemini-3.6-flash-lite'],
+    ['vertex_ai', 'gemini-3.5-flash-lite']
+  ]);
+  const selections = JSON.parse(stored.GEMINI_MODEL_SELECTIONS);
+  assert.equal(selections.gemini_api.model, 'gemini-3.7-flash-lite');
+  assert.equal(selections.vertex_ai.model, 'gemini-3.6-flash-lite');
+  assert.deepEqual(selections.gemini_api.candidates,
+    ['gemini-3.7-flash-lite', 'gemini-3.5-flash-lite']);
+  assert.deepEqual(selections.vertex_ai.candidates,
+    ['gemini-3.6-flash-lite', 'gemini-3.5-flash-lite']);
+  assert.equal(context.getGeminiModelForBackend_('gemini_api'),
+    'gemini-3.7-flash-lite');
+  assert.equal(probeCalls.length, 4, 'fresh cache avoids repeated probes');
+}
+
+function testAutomaticGeminiSelectionFallsBackAndRetainsLastGood() {
+  const stored = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL_SELECTIONS: JSON.stringify({
+      vertex_ai: {
+        model: 'gemini-3.5-flash-lite',
+        candidates: ['gemini-3.5-flash-lite'],
+        checkedAtMs: Date.now() - 2 * 24 * 60 * 60 * 1000
+      }
+    })
+  };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const tried = [];
+  context.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.7-flash-lite', 'gemini-3.6-flash-lite'
+  ];
+  context.probeGeminiModelForBackend_ = (_backend, model) => {
+    tried.push(model);
+    if (model === 'gemini-3.7-flash-lite') {
+      const error = new Error('candidate unavailable');
+      error.geminiModelProbeReason = 'provider-rejected-candidate';
+      throw error;
+    }
+  };
+  assert.deepEqual(Array.from(context.getGeminiModelCandidatesForBackend_(
+    'vertex_ai', true)), ['gemini-3.6-flash-lite']);
+  assert.deepEqual(tried, ['gemini-3.7-flash-lite', 'gemini-3.6-flash-lite']);
+
+  const saved = JSON.parse(stored.GEMINI_MODEL_SELECTIONS);
+  saved.vertex_ai.checkedAtMs = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  stored.GEMINI_MODEL_SELECTIONS = JSON.stringify(saved);
+  const refresh = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  refresh.logCatalogEvent_ = () => {};
+  refresh.listVertexFlashLiteCandidates_ = () => {
+    throw new Error('PDF processing must never refresh catalogs.');
+  };
+  assert.equal(refresh.getGeminiModelForBackend_('vertex_ai'),
+    'gemini-3.6-flash-lite');
+
+  const probeFailure = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  probeFailure.logCatalogEvent_ = () => {};
+  probeFailure.listVertexFlashLiteCandidates_ = () => [
+    'gemini-3.8-flash-lite'
+  ];
+  probeFailure.probeGeminiModelForBackend_ = () => {
+    const error = new Error('temporary generation outage');
+    error.geminiModelProbeTransient = true;
+    throw error;
+  };
+  assert.deepEqual(Array.from(probeFailure.getGeminiModelCandidatesForBackend_(
+    'vertex_ai', true)), ['gemini-3.6-flash-lite']);
+}
+
+function testLatestFlashEscalationIsCachedAndProviderScoped() {
+  const stored = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  const context = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => stored[key] || '',
+        setProperty: (key, value) => { stored[key] = value; }
+      })
+    }
+  });
+  context.logCatalogEvent_ = () => {};
+  const probes = [];
+  context.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.6-flash'
+  ];
+  context.listVertexFlashCandidates_ = () => [
+    'gemini-3.7-flash', 'gemini-3.5-flash'
+  ];
+  context.probeGeminiModelForBackend_ = (backend, model) => {
+    probes.push([backend, model]);
+  };
+  assert.equal(context.refreshGeminiFlashEscalationModelForBackend_('gemini_api'),
+    'gemini-3.8-flash');
+  assert.equal(context.refreshGeminiFlashEscalationModelForBackend_('vertex_ai'),
+    'gemini-3.7-flash');
+  assert.deepEqual(probes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['vertex_ai', 'gemini-3.7-flash']
+  ]);
+  assert.equal(context.getGeminiFlashEscalationModelForBackend_('gemini_api'),
+    'gemini-3.8-flash', 'recent provider probe is cached');
+
+  const retained = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  retained.GEMINI_MODEL_ESCALATION_SELECTIONS = JSON.stringify({
+    gemini_api: { model: 'gemini-3.7-flash', checkedAtMs: 1 }
+  });
+  const transientProbe = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => retained[key] || '',
+        setProperty: (key, value) => { retained[key] = value; }
+      })
+    }
+  });
+  transientProbe.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  transientProbe.logCatalogEvent_ = () => {};
+  transientProbe.listGeminiDeveloperFlashCandidates_ = () => ['gemini-3.8-flash'];
+  transientProbe.probeGeminiModelForBackend_ = () => {
+    const error = new Error('temporary probe outage');
+    error.geminiModelProbeTransient = true;
+    throw error;
+  };
+  assert.equal(transientProbe.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.equal(transientProbe.getGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash',
+    'a stale last-known-good model remains usable after a transient refresh');
+
+  const noPriorSelection = { GEMINI_MODEL_AUTO_SELECTION: 'true' };
+  const newestAvailable = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => noPriorSelection[key] || '',
+        setProperty: (key, value) => { noPriorSelection[key] = value; }
+      })
+    }
+  });
+  newestAvailable.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  newestAvailable.logCatalogEvent_ = () => {};
+  newestAvailable.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.7-flash'
+  ];
+  const escalationProbes = [];
+  newestAvailable.probeGeminiModelForBackend_ = (backend, model) => {
+    escalationProbes.push([backend, model]);
+    if (model === 'gemini-3.8-flash') {
+      const error = new Error('candidate temporarily overloaded');
+      error.geminiModelProbeTransient = true;
+      throw error;
+    }
+  };
+  assert.equal(newestAvailable.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.deepEqual(escalationProbes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['gemini_api', 'gemini-3.7-flash']
+  ]);
+
+  const priorGood = {
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_MODEL_ESCALATION_SELECTIONS: JSON.stringify({
+      gemini_api: {
+        model: 'gemini-3.6-flash',
+        checkedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000
+      }
+    })
+  };
+  const refreshPastTransient = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: key => priorGood[key] || '',
+        setProperty: (key, value) => { priorGood[key] = value; }
+      })
+    }
+  });
+  refreshPastTransient.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  refreshPastTransient.logCatalogEvent_ = () => {};
+  refreshPastTransient.listGeminiDeveloperFlashCandidates_ = () => [
+    'gemini-3.8-flash', 'gemini-3.7-flash'
+  ];
+  const priorSelectionProbes = [];
+  refreshPastTransient.probeGeminiModelForBackend_ = (backend, model) => {
+    priorSelectionProbes.push([backend, model]);
+    if (model === 'gemini-3.8-flash') {
+      const error = new Error('candidate temporarily overloaded');
+      error.geminiModelProbeTransient = true;
+      throw error;
+    }
+  };
+  assert.equal(refreshPastTransient.refreshGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), 'gemini-3.7-flash');
+  assert.deepEqual(priorSelectionProbes, [
+    ['gemini_api', 'gemini-3.8-flash'],
+    ['gemini_api', 'gemini-3.7-flash']
+  ]);
+  assert.deepEqual(Array.from(context.sortGeminiModelsForTier_([
+    'gemini-3.8-flash', 'gemini-3.10-flash-preview',
+    'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.9-flash-lite'
+  ], 'flash')), ['gemini-3.8-flash', 'gemini-3.7-flash']);
+
+  let catalogRequests = 0;
+  const noBudget = loadCataloger({ UrlFetchApp: { fetch: () => {
+    catalogRequests += 1;
+    throw new Error('The budget guard should prevent a request.');
+  } } });
+  noBudget.getScriptProperty_ = key => key === 'GEMINI_API_KEY' ? 'api-key' : '';
+  assert.throws(() => noBudget.listGeminiDeveloperFlashCandidates_('',
+    Date.now() + 100), error =>
+    error.extractionEscalationBudgetExhausted === true);
+  assert.equal(catalogRequests, 0, 'catalog reads stop before the repair reserve');
+
+  const coldCache = loadCataloger({
+    Date,
+    PropertiesService: {
+      getScriptProperties: () => ({ getProperty: () => '' })
+    }
+  });
+  coldCache.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  assert.throws(() => coldCache.getGeminiFlashEscalationModelForBackend_(
+    'gemini_api'), error =>
+    error.geminiModelCatalogRefreshRequired === true);
+  assert.throws(() => coldCache.getGeminiModelForBackend_('gemini_api'), error =>
+    error.geminiModelSelectionRefreshRequired === true);
+
+  const refreshedProviders = [];
+  const maintenance = loadCataloger({ Date });
+  maintenance.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  maintenance.withCatalogProcessingLock_ = (_source, callback) => callback();
+  maintenance.getGeminiBackend_ = () => 'gemini_api';
+  maintenance.isAutomaticVertexFallbackEnabled_ = () => true;
+  maintenance.getGeminiModelCandidatesForBackend_ = (backend, refresh) => {
+    refreshedProviders.push(['flash-lite', backend, refresh]);
+    return ['gemini-3.8-flash-lite'];
+  };
+  maintenance.refreshGeminiFlashEscalationModelForBackend_ = backend => {
+    refreshedProviders.push(['flash', backend]);
+    return 'gemini-3.8-flash';
+  };
+  maintenance.readGeminiModelSelections_ = () => ({
+    gemini_api: { checkedAt: '2026-11-04T00:00:00.000Z' },
+    vertex_ai: { checkedAt: '2026-11-04T00:00:00.000Z' }
+  });
+  maintenance.getScriptProperty_ = () => JSON.stringify({
+    gemini_api: { checkedAtMs: Date.now() },
+    vertex_ai: { checkedAtMs: Date.now() }
+  });
+  assert.equal(maintenance.refreshGeminiModelSelectionCaches().refreshed.length, 2);
+  assert.deepEqual(refreshedProviders, [
+    ['flash-lite', 'gemini_api', true], ['flash', 'gemini_api'],
+    ['flash-lite', 'vertex_ai', true], ['flash', 'vertex_ai']
+  ]);
+}
+
+function testOenergyMismatchGetsOneBoundedFlashEscalation() {
+  const context = loadCataloger({ Date, console: { ...console, error: () => {} } });
+  context.logCatalogEvent_ = () => {};
+  context.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  context.getEffectiveGeminiBackend_ = () => 'gemini_api';
+  context.getGeminiFlashEscalationModelForBackend_ = () => 'gemini-3.8-flash';
+  context.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  const repairContexts = [];
+  context.extractUtilityData_ = (_file, _policy, repairContext) => {
+    repairContexts.push(repairContext);
+    return { document_type: 'Invoice', supplier: 'OENERGY', supply_type: 'Gas',
+      problems: [], sheet_values: [] };
+  };
+  let validations = 0;
+  context.validateExtractedUtilityDataForImport_ = () => {
+    validations += 1;
+    return validations < 4 ? {
+      valid: false,
+      repairable: true,
+      code: 'oenergy_gas_detail_reconciliation_mismatch',
+      fields: ['Quota fissa', 'Trasporto e oneri', 'Accise', 'cost_non_consumption'],
+      problem: 'OENERGY gas detail reconciliation mismatch.',
+      action: 'Re-read the OENERGY summary rows.'
+    } : { valid: true };
+  };
+  context.buildExtractionRepairSnapshot_ = extracted => ({
+    document_type: extracted.document_type,
+    supplier: extracted.supplier,
+    supply_type: extracted.supply_type
+  });
+  context.getExtractionResponseSchema_ = () => ({ properties: {} });
+  const file = { getId: () => 'file-id', getName: () => 'invoice.pdf' };
+  const result = context.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(result.validation.valid, true);
+  assert.equal(result.aiCallCount, 4);
+  assert.equal(validations, 4);
+  assert.equal(repairContexts.length, 4);
+  assert.equal(repairContexts[2].modelOverride, '');
+  assert.equal(repairContexts[3].modelOverride, 'gemini-3.8-flash');
+  assert.equal(repairContexts[3].maxAttempts, 4);
+
+  const nonOenergy = loadCataloger({ Date, console: { ...console, error: () => {} } });
+  nonOenergy.logCatalogEvent_ = () => {};
+  nonOenergy.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  nonOenergy.getGeminiFlashEscalationModelForBackend_ = () => {
+    throw new Error('non-OENERGY issues must not escalate');
+  };
+  nonOenergy.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  nonOenergy.extractUtilityData_ = () => ({ document_type: 'Invoice',
+    supplier: 'OTHER', supply_type: 'Gas', problems: [], sheet_values: [] });
+  nonOenergy.buildExtractionRepairSnapshot_ = () => ({});
+  let otherCalls = 0;
+  nonOenergy.validateExtractedUtilityDataForImport_ = () => {
+    otherCalls += 1;
+    return { valid: false, repairable: true, code: 'other_issue', fields: ['identifier'],
+      problem: 'Other issue.', action: 'Re-read the identifier.' };
+  };
+  const otherResult = nonOenergy.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(otherResult.aiCallCount, 3);
+  assert.equal(otherCalls, 3);
+
+  const budgetLimited = loadCataloger({ Date,
+    console: { ...console, error: () => {} } });
+  budgetLimited.logCatalogEvent_ = () => {};
+  budgetLimited.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  budgetLimited.getGeminiFlashEscalationModelForBackend_ = () => {
+    const error = new Error('runtime reserve exhausted');
+    error.extractionEscalationBudgetExhausted = true;
+    throw error;
+  };
+  budgetLimited.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  budgetLimited.extractUtilityData_ = () => ({ document_type: 'Invoice',
+    supplier: 'OENERGY', supply_type: 'Gas', problems: [], sheet_values: [] });
+  budgetLimited.buildExtractionRepairSnapshot_ = () => ({});
+  let budgetLimitedCalls = 0;
+  budgetLimited.validateExtractedUtilityDataForImport_ = () => {
+    budgetLimitedCalls += 1;
+    return { valid: false, repairable: true,
+      code: 'oenergy_gas_detail_reconciliation_mismatch',
+      fields: ['Quota fissa'], problem: 'Mismatch.', action: 'Re-read.' };
+  };
+  const budgetResult = budgetLimited.extractUtilityDataWithRepair_(file, 'policy',
+    Date.now() + 240000);
+  assert.equal(budgetResult.aiCallCount, 3);
+  assert.equal(budgetResult.validation.valid, false);
+  assert.equal(budgetLimitedCalls, 3,
+    'deadline exhaustion returns the validated blocked extraction without a fourth request');
+}
+
+function testRepairEscalationPassesTheSelectedModelToCurrentProvider() {
+  const context = loadCataloger();
+  context.getEffectiveGeminiBackend_ = () => 'vertex_ai';
+  let call;
+  context.callGeminiForPdfWithBackend_ = (...args) => {
+    call = args;
+    return 'response';
+  };
+  assert.equal(context.callGeminiForPdf_({}, {}, '', {}, {
+    attempt: 4,
+    modelOverride: 'gemini-3.7-flash'
+  }, null, Date.now() + 100000), 'response');
+  assert.equal(call[4], 'vertex_ai');
+  assert.equal(call[8], 'gemini-3.7-flash');
+}
+
+function testFlashLiteModelOrderingRejectsPreviewAndUnversionedAliases() {
+  const context = loadCataloger();
+  context.logCatalogEvent_ = () => {};
+  assert.deepEqual(Array.from(context.sortFlashLiteModelIds_([
+    'gemini-3.6-flash-lite', 'gemini-3.8-flash-lite-preview-09-2026',
+    'gemini-flash-lite-latest', 'gemini-3.7-flash-lite',
+    'gemini-3.6-flash-lite'
+  ])), ['gemini-3.7-flash-lite', 'gemini-3.6-flash-lite']);
+}
+
+function testProviderCatalogsAdmitOnlySupportedStableFlashLiteModels() {
+  const requests = [];
+  const pages = [
+    { models: [
+      { baseModelId: 'gemini-3.6-flash-lite',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.8-flash-lite-preview-09-2026',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.7-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.8-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.6-flash',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.9-flash-preview',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.5-flash-lite',
+        supportedGenerationMethods: ['generateContent'] },
+      { baseModelId: 'gemini-3.9-flash-lite',
+        supportedGenerationMethods: ['embedContent'] }
+    ] },
+    { publisherModels: [
+      { name: 'publishers/google/models/gemini-3.5-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.7-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.8-flash-lite',
+        launchStage: 'PUBLIC_PREVIEW', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.9-flash-lite',
+        launchStage: 'GA', versionState: 'VERSION_STATE_UNSTABLE' },
+      { name: 'publishers/google/models/gemini-3.4-flash-lite',
+        launchStage: 'GA' },
+      { name: 'publishers/google/models/gemini-3.8-flash',
+        launchStage: 'GA', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.9-flash-preview',
+        launchStage: 'PUBLIC_PREVIEW', versionState: 'VERSION_STATE_STABLE' },
+      { name: 'publishers/google/models/gemini-3.6-flash',
+        launchStage: 'GA', versionState: 'VERSION_STATE_UNSTABLE' }
+    ] }
+  ];
+  pages.push(pages[0], pages[1]);
+  const context = loadCataloger({ UrlFetchApp: { fetch: (url, options) => {
+    requests.push({ url, options });
+    const body = pages.shift();
+    return {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify(body)
+    };
+  } } });
+  context.logCatalogEvent_ = () => {};
+  context.getScriptProperty_ = key => key === 'GEMINI_API_KEY' ? 'api-key' : '';
+  assert.deepEqual(Array.from(context.listGeminiDeveloperFlashLiteCandidates_()), [
+    'gemini-3.6-flash-lite', 'gemini-3.5-flash-lite'
+  ]);
+  assert.equal(requests[0].options.headers['x-goog-api-key'], 'api-key');
+  assert.deepEqual(Array.from(context.listVertexFlashLiteCandidates_()), [
+    'gemini-3.7-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.4-flash-lite'
+  ]);
+  assert.deepEqual(Array.from(context.listGeminiDeveloperFlashCandidates_()), [
+    'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'
+  ]);
+  assert.deepEqual(Array.from(context.listVertexFlashCandidates_()), [
+    'gemini-3.8-flash'
+  ]);
+  assert.equal(requests[1].options.headers.Authorization, 'Bearer oauth-token');
+  assert.match(requests[1].url, /pageSize=300/);
+  assert.match(requests[1].url, /listAllVersions=true/);
+}
+
+testAutomaticGeminiModelSelectionIsProviderSpecificAndStable();
+testAutomaticGeminiSelectionFallsBackAndRetainsLastGood();
+testLatestFlashEscalationIsCachedAndProviderScoped();
+testOenergyMismatchGetsOneBoundedFlashEscalation();
+testRepairEscalationPassesTheSelectedModelToCurrentProvider();
+testFlashLiteModelOrderingRejectsPreviewAndUnversionedAliases();
+testProviderCatalogsAdmitOnlySupportedStableFlashLiteModels();
 
 function validInvoice() {
   return {
@@ -1365,6 +1876,8 @@ function testExtractionSchemaAndCalendarValidation() {
     ...validInvoice(),
     supplier: 'OENERGY',
     supply_type: 'Gas',
+    oenergy_gas_summary: { selling_consumption: 2.48, network_consumption: 1.52,
+      consumption_subtotal: 4, selling_fixed: 9, network_fixed: 4.07, fixed_subtotal: 13.07 },
     cost_consumption: 2.48,
     cost_non_consumption: 15.62,
     vat: 3.39,
@@ -1384,6 +1897,110 @@ function testExtractionSchemaAndCalendarValidation() {
     sheet_values: oenergyGasDetailedReconciliation.sheet_values.map((entry) =>
       entry.header === 'Accise' ? { ...entry, value: '0,88' } : entry)
   }).valid, false);
+  const oenergyLatestPdfCorrect = {
+    ...validInvoice(),
+    supplier: 'OENERGY',
+    supply_type: 'Gas',
+    oenergy_gas_summary: { selling_consumption: 2.48, network_consumption: 1.4,
+      consumption_subtotal: 3.88, selling_fixed: 9, network_fixed: 4.07, fixed_subtotal: 13.07 },
+    cost_consumption: 2.48,
+    cost_non_consumption: 15.50,
+    vat: 3.37,
+    total: 21.35,
+    sheet_values: [
+      { header: 'Totale costi consumo', value: 2.48 },
+      { header: 'Quota fissa', value: 9.00 },
+      { header: 'Trasporto e oneri', value: 5.47 },
+      { header: 'Accise', value: 1.03 },
+      { header: 'Ricalcoli', value: 0 }
+    ]
+  };
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(
+    oenergyLatestPdfCorrect).valid, true);
+  const wrongRoleSplit = { ...oenergyLatestPdfCorrect,
+    sheet_values: oenergyLatestPdfCorrect.sheet_values.map(entry => entry.header === 'Quota fissa' ?
+      { ...entry, value: 13.07 } : entry.header === 'Trasporto e oneri' ? { ...entry, value: 1.4 } : entry) };
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(wrongRoleSplit).valid, false);
+  context.mapOenergyGasSourceComponents_(wrongRoleSplit);
+  assert.equal(wrongRoleSplit.sheet_values.find(entry => entry.header === 'Quota fissa').value, 9);
+  assert.equal(wrongRoleSplit.sheet_values.find(entry => entry.header === 'Trasporto e oneri').value, 5.47);
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(wrongRoleSplit).valid, true);
+  assert.equal(context.validateOenergyGasDetailedReconciliation_({ ...wrongRoleSplit,
+    oenergy_gas_summary: null }).valid, false);
+  const duplicatedExciseRecap = { ...oenergyLatestPdfCorrect,
+    sheet_values: oenergyLatestPdfCorrect.sheet_values.map(entry => entry.header === 'Accise' ?
+      { ...entry, value: 1.91 } : entry) };
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(duplicatedExciseRecap).valid, false);
+  assert.match(context.validateOenergyGasDetailedReconciliation_(duplicatedExciseRecap).action,
+    /excluding a repeated Accisa complessivamente applicata recap/);
+  const aggregateOnlyMismatch = { ...oenergyLatestPdfCorrect, cost_non_consumption: 13.07 };
+  context.mapOenergyGasSourceComponents_(aggregateOnlyMismatch);
+  assert.equal(aggregateOnlyMismatch.cost_non_consumption, 15.50);
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(aggregateOnlyMismatch).valid, true);
+  const repeatedAggregate = { ...oenergyLatestPdfCorrect, cost_non_consumption: 13.07,
+    sheet_values: oenergyLatestPdfCorrect.sheet_values.concat({ header: 'Totale costi non consumo', value: 13.07 }) };
+  context.mapOenergyGasSourceComponents_(repeatedAggregate);
+  assert.equal(repeatedAggregate.cost_non_consumption, 15.50);
+  assert.equal(repeatedAggregate.sheet_values.find(entry => entry.header === 'Totale costi non consumo').value, 15.50);
+  assert.equal(context.validateOenergyGasDetailedReconciliation_(repeatedAggregate).valid, true);
+  for (const invalid of [
+    { ...oenergyLatestPdfCorrect, total: 22 },
+    { ...oenergyLatestPdfCorrect, problems: ['Accise ambiguous.'] },
+    { ...oenergyLatestPdfCorrect, supplier: 'Other' },
+    { ...oenergyLatestPdfCorrect, sheet_values: oenergyLatestPdfCorrect.sheet_values.slice(0, -1) },
+    { ...oenergyLatestPdfCorrect, sheet_values: oenergyLatestPdfCorrect.sheet_values.concat({ header: 'Quota fissa', value: 9 }) },
+    { ...oenergyLatestPdfCorrect, oenergy_gas_summary: null },
+    { ...oenergyLatestPdfCorrect, oenergy_gas_summary: { ...oenergyLatestPdfCorrect.oenergy_gas_summary, fixed_subtotal: 99 } }
+  ]) {
+    invalid.cost_non_consumption = 13.07;
+    context.mapOenergyGasSourceComponents_(invalid);
+    assert.equal(invalid.cost_non_consumption, 13.07);
+  }
+  const oenergyLatestPdfPriorFailure = {
+    ...oenergyLatestPdfCorrect,
+    cost_consumption: 2.48,
+    cost_non_consumption: 13.07,
+    sheet_values: [
+      { header: 'Totale costi consumo', value: 2.48 },
+      { header: 'Quota fissa', value: 13.07 },
+      { header: 'Trasporto e oneri', value: 5.47 },
+      { header: 'Accise', value: 0.88 },
+      { header: 'Ricalcoli', value: 0 }
+    ]
+  };
+  const oenergyRepairFeedback = context.validateOenergyGasDetailedReconciliation_(
+    oenergyLatestPdfPriorFailure);
+  assert.equal(oenergyRepairFeedback.valid, false);
+  assert.match(oenergyRepairFeedback.action,
+    /OENERGY Gas summary rows and the ACCISE e ADDIZIONALI section/);
+  assert.match(oenergyRepairFeedback.action,
+    /network\/oneri amounts under both consumption and fixed quota exactly once/);
+  assert.match(oenergyRepairFeedback.action,
+    /Accise sums mutually exclusive excise charges and regional addizionali once each/);
+  assert.deepEqual(JSON.parse(JSON.stringify(oenergyRepairFeedback.reconciliation)), {
+    type: 'configured-detail-sum',
+    aggregate_field: 'cost_non_consumption',
+    aggregate_value: 13.07,
+    detail_sum: 19.42,
+    difference_detail_sum_minus_aggregate: 6.35,
+    components: [
+      { header: 'Quota fissa', value: 13.07, explicitly_absent: false },
+      { header: 'Trasporto e oneri', value: 5.47, explicitly_absent: false },
+      { header: 'Accise', value: 0.88, explicitly_absent: false },
+      { header: 'Ricalcoli', value: 0, explicitly_absent: false }
+    ]
+  });
+  const oenergyFeedback = context.buildExtractionRepairFeedback_(
+    oenergyRepairFeedback, 1, 3);
+  const oenergyRepairPrompt = context.buildExtractionRepairPromptLines_({
+    attempt: 2,
+    maxAttempts: 3,
+    previousExtraction: oenergyLatestPdfPriorFailure,
+    feedback: oenergyFeedback
+  }).join('\n');
+  assert.match(oenergyRepairPrompt, /"detail_sum":19\.42/);
+  assert.match(oenergyRepairPrompt,
+    /numeric reconciliation diagnostics are arithmetic over the prior extraction/);
   const gasWithDetailMismatchAndFrequencyProblem = {
     ...oenergyGasDetailedReconciliation,
     frequency: '',
@@ -3052,11 +3669,20 @@ function testLocalizedConfiguredReconciliationPipeline() {
       const total = detailHeaders.reduce((sum, _, index) => sum + index + 1, 0);
       const invoice = {
         ...validInvoice(), supplier: electricity ? 'eg' : supplier, supply_type: 'utility',
+        ...(!electricity ? { oenergy_gas_summary: { selling_consumption: 25,
+          network_consumption: 1, consumption_subtotal: 26, selling_fixed: 1,
+          network_fixed: 1, fixed_subtotal: 2 } } : {}),
         cost_consumption: 25, cost_non_consumption: total, vat: 1, total: total + 26,
         sheet_values: detailHeaders.map((header, index) => ({ header, value: index + 1 }))
       };
+      // Legacy optional-role fixtures represent an unprinted role and therefore
+      // have no complete printed parent/child summary. Complete evidence can
+      // instead construct omitted derived cells (covered in the role regression).
+      const sourceFixture = raw => !electricity && !detailHeaders.slice(0, 2).every(header =>
+        raw.sheet_values.some(entry => entry.header === header && entry.value != null)) ?
+        { ...raw, oenergy_gas_summary: null } : raw;
       const extract = (raw, repairContext) => {
-        context.callGeminiForPdf_ = () => JSON.stringify(raw);
+        context.callGeminiForPdf_ = () => JSON.stringify(sourceFixture(raw));
         return context.extractUtilityData_(file, 'policy', repairContext);
       };
       const validate = (raw) => context.validateExtractedUtilityDataForImport_(extract(raw));
@@ -3167,12 +3793,12 @@ function testLocalizedConfiguredReconciliationPipeline() {
       assert.equal(mutations, 0, 'Detail repair exhaustion cannot journal, write, move, or rename');
       for (const absenceCase of absenceCases) {
         let absenceCalls = 0;
-        context.callGeminiForPdf_ = () => JSON.stringify(absenceCalls++ === 0 ? absenceCase.invalid : absenceCase.valid);
+        context.callGeminiForPdf_ = () => JSON.stringify(sourceFixture(absenceCalls++ === 0 ? absenceCase.invalid : absenceCase.valid));
         const absenceRepair = context.extractUtilityDataWithRepair_(file, 'policy');
         assert.equal(absenceRepair.aiCallCount, 2);
         assert.equal(absenceRepair.validation.valid, true);
         absenceCalls = 0;
-        context.callGeminiForPdf_ = () => { absenceCalls += 1; return JSON.stringify(absenceCase.invalid); };
+        context.callGeminiForPdf_ = () => { absenceCalls += 1; return JSON.stringify(sourceFixture(absenceCase.invalid)); };
         assert.equal(context.processIntakeFile_({ ...file, getSize: () => 100 }, {}, 'policy').status, 'VERIFY');
         assert.equal(absenceCalls, vm.runInContext('CONFIG.EXTRACTION_MAX_AI_CALLS', context));
         assert.equal(mutations, 0, 'Unreconciled partition with absent members cannot reach a mutation');
@@ -4129,7 +4755,7 @@ function testDeveloperApiKeyUsesHeader() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getGeminiModel_ = () => 'gemini-3.5-flash-lite';
   context.getScriptProperty_ = () => 'developer-secret';
   context.buildExtractionPrompt_ = () => 'prompt';
   context.logCatalogEvent_ = () => {};
@@ -4153,7 +4779,7 @@ function testDeveloperApiKeyUsesHeader() {
   assert.equal(requests[0].url.includes('?key='), false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
   const payload = JSON.parse(requests[0].options.payload);
-  assert.equal(payload.model, 'gemini-flash-latest');
+  assert.equal(payload.model, 'gemini-3.5-flash-lite');
   assert.equal(payload.store, false);
   assert.equal(
     payload.generation_config.max_output_tokens,
@@ -4161,7 +4787,7 @@ function testDeveloperApiKeyUsesHeader() {
   );
   assert.equal(
     payload.generation_config.thinking_level,
-    vm.runInContext('CONFIG.GEMINI_FLASH_THINKING_LEVEL', context)
+    vm.runInContext('CONFIG.GEMINI_FLASH_LITE_THINKING_LEVEL', context)
   );
   assert.equal(payload.response_format.length, 1);
   assert.equal(payload.response_format[0].type, 'text');
@@ -4249,7 +4875,7 @@ function testProviderFinishReasonsStayBackendSpecific() {
 }
 testProviderFinishReasonsStayBackendSpecific();
 
-function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
+function testVertexFlashLiteUsesSupportedThinkingLevel() {
   const requests = [];
   const context = loadCataloger({
     UrlFetchApp: {
@@ -4267,7 +4893,7 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
       }
     }
   });
-  context.getGeminiModel_ = () => 'gemini-flash-latest';
+  context.getGeminiModel_ = () => 'gemini-3.5-flash-lite';
   context.getScriptProperty_ = (key) => key === 'GOOGLE_CLOUD_PROJECT_ID' ?
     'vertex-project' : '';
   context.buildExtractionPrompt_ = () => 'prompt';
@@ -4287,10 +4913,10 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
 
   const payload = JSON.parse(requests[0].options.payload);
   assert.equal(requests[0].options.headers.Authorization, 'Bearer oauth-token');
-  assert.equal(payload.generationConfig.thinkingConfig.thinkingBudget, 4096);
+  assert.equal(payload.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
   assert.equal(
     Object.prototype.hasOwnProperty.call(
-      payload.generationConfig.thinkingConfig, 'thinkingLevel'
+      payload.generationConfig.thinkingConfig, 'thinkingBudget'
     ),
     false
   );
@@ -4329,21 +4955,21 @@ function testVertexLatestAliasOmitsUnsupportedThinkingLevel() {
 
 function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
   const models = [
-    ['gemini-flash-latest', 'medium', true],
-    ['gemini-2.5-pro', 'medium', true],
-    ['gemini-2.5-flash', 'medium', true],
-    ['gemini-2.5-flash-lite', 'medium', true],
-    ['gemini-3.6-flash', 'medium', false],
-    ['gemini-3.7-flash', 'medium', false],
-    ['gemini-3.8-flash', 'medium', false],
-    ['gemini-3.5-flash', 'medium', false],
-    ['gemini-3.5-flash-lite', 'medium', false],
-    ['gemini-3-flash-preview', 'medium', false],
-    ['gemini-3.1-pro-preview', 'medium', false],
-    ['gemini-3-pro-preview', 'high', false],
-    ['gemini-unverified-model', null, false]
+    ['gemini-flash-latest', 'medium', null],
+    ['gemini-2.5-pro', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-2.5-flash', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-2.5-flash-lite', 'medium', { thinkingBudget: 4096 }],
+    ['gemini-3.6-flash', 'medium', null],
+    ['gemini-3.7-flash', 'medium', null],
+    ['gemini-3.8-flash', 'medium', null],
+    ['gemini-3.5-flash', 'medium', null],
+    ['gemini-3.5-flash-lite', 'low', { thinkingLevel: 'LOW' }],
+    ['gemini-3-flash-preview', 'medium', null],
+    ['gemini-3.1-pro-preview', 'medium', null],
+    ['gemini-3-pro-preview', 'high', null],
+    ['gemini-unverified-model', null, null]
   ];
-  for (const [model, level, vertexBudget] of models) {
+  for (const [model, level, vertexThinkingConfig] of models) {
     for (const backend of ['gemini_api', 'vertex_ai']) {
       const requests = [];
       const usageEvents = [];
@@ -4389,10 +5015,10 @@ function testProviderReasoningPayloadPreservesExplicitModelCapabilities() {
         assert.ok(requests[0].url.endsWith('/' + model + ':generateContent'));
         assert.equal(payload.generationConfig.maxOutputTokens, 16384);
         assert.deepEqual(payload.generationConfig.thinkingConfig,
-          vertexBudget ? { thinkingBudget: 4096 } : undefined, model);
+          vertexThinkingConfig || undefined, model);
         assert.deepEqual(Object.keys(payload.generationConfig).sort(),
           ['maxOutputTokens', 'responseMimeType', 'responseSchema']
-            .concat(vertexBudget ? ['thinkingConfig'] : []).sort());
+            .concat(vertexThinkingConfig ? ['thinkingConfig'] : []).sort());
         assert.equal(Object.hasOwn(payload, 'generation_config'), false);
         assert.equal(Object.hasOwn(payload, 'cachedContent'), false);
       }
@@ -4414,9 +5040,9 @@ function testConfigureGeminiModelUpdatesTheSharedRuntimeModel() {
   };
   const context = loadCataloger(overrides);
 
-  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.5-flash-lite');
   properties.GEMINI_MODEL = '  ';
-  assert.equal(context.getGeminiModel_(), 'gemini-flash-latest');
+  assert.equal(context.getGeminiModel_(), 'gemini-3.5-flash-lite');
   assert.equal(properties.GEMINI_MODEL, '  ');
   for (const model of ['gemini-3.6-flash', 'gemini-3.7-flash',
     'gemini-2.5-flash', 'gemini-unverified-model']) {
@@ -5181,7 +5807,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'extraction-validation-completed',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.1',
+      applicationVersion: '0.7.2',
       event: 'extraction-validation-completed',
       fileId: 'file-id',
       extractionAttempt: 1,
@@ -5192,7 +5818,7 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
     {
       message: 'catalog-file-processing-error',
       component: 'drive-utilities-cataloger',
-      applicationVersion: '0.7.1',
+      applicationVersion: '0.7.2',
       event: 'catalog-file-processing-error',
       fileId: 'file-id',
       errorType: 'Error',
@@ -6276,7 +6902,11 @@ function testGeminiModelQuotaMovesToNextKnownFlashModel() {
 }
 
 function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
-  const context = loadCataloger();
+  const initialNow = Date.now();
+  const FixedDate = class extends Date {
+    static now() { return initialNow; }
+  };
+  const context = loadCataloger({ Date: FixedDate });
   const file = {
     getId: () => 'file-id', getName: () => 'invoice.pdf',
     getUrl: () => 'https://drive.test/file-id', getLastUpdated: () => new Date(0),
@@ -6284,7 +6914,6 @@ function testGeminiHighDemandDeferredStateIsDueOnlyAndDoesNotQueueReports() {
   };
   const delays = Array.from(vm.runInContext('CONFIG.GEMINI_OVERLOAD_RETRY_DELAYS_MS', context));
   const state = {};
-  const initialNow = Date.now();
   context.logCatalogEvent_ = () => {};
   const result = context.buildGeminiOverloadDeferredResult_(file, {
     overloadFailureCount: 1
@@ -6635,10 +7264,17 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /never recalculate a different total/);
   assert.match(prompt, /verify the arithmetic directly/);
   assert.match(prompt, /must equal cost_non_consumption within rounding/);
-  assert.match(prompt, /For OENERGY Gas, verify Quota fissa/);
+  assert.match(prompt, /OENERGY Gas is an explicit exception/);
   assert.match(prompt, /verify Totale costi consumo equals cost_consumption/);
+  assert.match(prompt,
+    /unless a reviewed supplier-specific rule below explicitly requires allocating those subtotals/);
+  assert.match(prompt,
+    /OENERGY Gas is an explicit exception to the general "di cui" rule above/);
+  assert.match(prompt,
+    /Quota fissa contains only the printed fixed selling amount/);
   assert.match(prompt, /Both printed amounts belong in Trasporto e oneri/);
-  assert.match(prompt, /sum every printed amount in the ACCISE e ADDIZIONALI section/);
+  assert.match(prompt, /Do not add a recap such as Accisa complessivamente applicata to the charges it already summarizes/);
+  assert.match(prompt, /sum the mutually exclusive excise charge rows and regional additions/);
   assert.match(prompt, /selling portion in Costo unitario/);
   assert.match(prompt, /repeat that common selling rate in Costo unitario F1\/F2\/F3/);
   assert.match(prompt, /rate printed in the summary row/);
@@ -9733,7 +10369,7 @@ testDeveloperApiKeyUsesHeader();
 testProviderReasoningPayloadPreservesExplicitModelCapabilities();
 testConfigureGeminiModelUpdatesTheSharedRuntimeModel();
 testEnergygasCanonicalSpellingMigrationUpdatesConfigReferences();
-testVertexLatestAliasOmitsUnsupportedThinkingLevel();
+testVertexFlashLiteUsesSupportedThinkingLevel();
 testVertexCostEstimateDoesNotReusePricingForGeminiLatest();
 testGeminiLatestUsageTelemetryOmitsUnpricedEstimate();
 testIncompleteGeminiResponseReportsFinishReason();
@@ -10646,3 +11282,286 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
   }
 }
 testCadenceTextCannotOverrideStructuredEssentialFields();
+
+function testScheduledGeminiMaintenanceRotationAndBounds() {
+  const values = new Map();
+  const c = loadCataloger({ Date, PropertiesService: { getScriptProperties: () => ({
+    getProperty: key => values.get(key) || '',
+    setProperty: (key, value) => values.set(key, value)
+  }) } });
+  c.logCatalogEvent_ = () => {};
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => false;
+  c.withCatalogProcessingLock_ = () => { throw new Error('Pinned mode must exit before lock'); };
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'pinned-model');
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  c.withCatalogProcessingLock_ = (_source, callback) => callback();
+  c.getGeminiBackend_ = () => 'gemini_api';
+  c.isAutomaticVertexFallbackEnabled_ = () => true;
+  const liteSelections = {
+    gemini_api: { checkedAtMs: Date.now() - 25 * 60 * 60 * 1000 },
+    vertex_ai: { checkedAtMs: Date.now() - 25 * 60 * 60 * 1000 }
+  };
+  c.readGeminiModelSelections_ = () => liteSelections;
+  c.classifyCatalogErrorForLog_ = () => 'provider-unavailable';
+  const calls = [];
+  const request = (backend, tier, deadline) => {
+    const attempts = JSON.parse(values.get('GEMINI_MODEL_MAINTENANCE_ATTEMPTS'));
+    assert.ok(attempts[backend + ':' + tier] > 0, 'attempt checkpoint precedes external I/O');
+    assert.ok(deadline > Date.now());
+    calls.push(backend + ':' + tier);
+    if (backend === 'gemini_api') throw new Error('Provider failure');
+    if (tier === 'flash-lite') liteSelections[backend] = { checkedAtMs: Date.now() };
+    else values.set('GEMINI_MODEL_ESCALATION_SELECTIONS', JSON.stringify({
+      [backend]: { checkedAtMs: Date.now() }
+    }));
+    return 'gemini-3.8-' + tier;
+  };
+  c.getGeminiModelCandidatesForBackend_ = (backend, refresh, deadline) => {
+    assert.equal(refresh, true);
+    return [request(backend, 'flash-lite', deadline)];
+  };
+  c.refreshGeminiFlashEscalationModelForBackend_ = (backend, deadline) => request(backend, 'flash', deadline);
+  assert.equal(c.maintainGeminiModelSelections().deferred, true);
+  assert.equal(c.maintainGeminiModelSelections().model, 'gemini-3.8-flash-lite');
+  assert.equal(c.maintainGeminiModelSelections().deferred, true);
+  assert.equal(c.maintainGeminiModelSelections().model, 'gemini-3.8-flash');
+  assert.deepEqual(calls, ['gemini_api:flash-lite', 'vertex_ai:flash-lite', 'gemini_api:flash', 'vertex_ai:flash']);
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'fresh-model-selections');
+  assert.equal(calls.length, 4);
+  values.set('GEMINI_MODEL_MAINTENANCE_ATTEMPTS', JSON.stringify({
+    ...JSON.parse(values.get('GEMINI_MODEL_MAINTENANCE_ATTEMPTS')), 'gemini_api:flash-lite': 0
+  }));
+  c.getGeminiModelCandidatesForBackend_ = () => ['gemini-3.5-flash-lite'];
+  const retained = c.maintainGeminiModelSelections();
+  assert.equal(retained.refreshed, false);
+  assert.equal(retained.retained, true);
+  assert.equal(retained.deferred, true);
+  c.withCatalogProcessingLock_ = () => ({ skipped: 'already-running' });
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'already-running');
+  assert.equal(calls.length, 4);
+
+  const catalog = loadCataloger({ Date });
+  catalog.logCatalogEvent_ = () => {};
+  catalog.getScriptProperty_ = () => 'test-key';
+  let pages = 0;
+  catalog.fetchGeminiModelCatalog_ = () => {
+    pages += 1;
+    return { getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ models: [], nextPageToken: 'repeated' }) };
+  };
+  assert.throws(() => catalog.listGeminiDeveloperFlashLiteCandidates_('', Date.now() + 240000),
+    error => error.geminiCatalogTransient === true);
+  assert.equal(pages, 10);
+}
+testScheduledGeminiMaintenanceRotationAndBounds();
+
+function testModelMaintenanceLockDefersAndReleasesProcessing() {
+  const values = new Map();
+  let held = true;
+  const c = loadCataloger({ Date,
+    LockService: { getScriptLock: () => ({
+      tryLock: () => { if (held) return false; held = true; return true; },
+      releaseLock: () => { held = false; }
+    }) },
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: key => values.get(key) || '',
+      setProperty: (key, value) => values.set(key, value)
+    }) }
+  });
+  c.logCatalogEvent_ = () => {};
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => true;
+  c.getGeminiBackend_ = () => 'gemini_api';
+  c.isAutomaticVertexFallbackEnabled_ = () => false;
+  c.readGeminiModelSelections_ = () => ({});
+  assert.equal(c.maintainGeminiModelSelections().skipped, 'already-running');
+  assert.equal(values.has('GEMINI_MODEL_MAINTENANCE_ATTEMPTS'), false);
+  held = false;
+  c.getGeminiModelCandidatesForBackend_ = () => {
+    assert.equal(c.withCatalogProcessingLock_('daily', () => {
+      throw new Error('Processing cannot overlap cache maintenance');
+    }).skipped, 'already-running');
+    return ['gemini-3.5-flash-lite'];
+  };
+  c.maintainGeminiModelSelections();
+  assert.equal(held, false);
+  assert.equal(c.withCatalogProcessingLock_('daily', () => 'resumed'), 'resumed');
+}
+testModelMaintenanceLockDefersAndReleasesProcessing();
+
+function testReadinessProbePreservesIncompleteFinishReason() {
+  const c = loadCataloger();
+  c.getScriptProperty_ = () => '';
+  c.getVertexAiLocation_ = () => 'global';
+  const events = [];
+  c.logCatalogEvent_ = (event, details) => events.push({ event, ...details });
+  c.validateConfiguredVertexGeneration_ = () => {
+    const error = new Error('Readiness did not complete');
+    error.geminiProbeHttpStatus = 200;
+    error.geminiProbeFinishReason = 'MAX_TOKENS';
+    throw error;
+  };
+  assert.throws(() => c.probeGeminiModelForBackend_('vertex_ai', 'gemini-3.8-flash'));
+  const failure = events.find(event => event.event === 'gemini-model-generation-probe');
+  assert.equal(failure.successful, false);
+  assert.equal(failure.httpStatus, 200);
+  assert.equal(failure.finishReason, 'MAX_TOKENS');
+}
+testReadinessProbePreservesIncompleteFinishReason();
+
+function testOenergySourceComponentsAtExtractionAndAdmissionBoundaries() {
+  const c = loadCataloger();
+  c.getAutomationConfig_ = () => ({ locale: 'it', canonical_suppliers: ['OENERGY'],
+    canonical_supplies: ['Gas'], supplier_aliases: {}, supply_aliases: {}, frequency_overrides: [], address_rules: [] });
+  const headers = ['Quantità consumi', 'Costo unitario', 'Totale costi consumo',
+    'Quota fissa', 'Trasporto e oneri', 'Accise', 'Ricalcoli', 'IVA'];
+  c.getSheetHeadersBySupply_ = () => ({ Gas: headers });
+  c.classifyAddress_ = () => 'import';
+  c.inferInvoiceFrequency_ = () => {};
+  c.validateServiceIdentityForInvoice_ = () => ({ valid: true });
+  c.validateTargetSheetValues_ = () => ({ valid: true });
+  c.logCatalogEvent_ = () => {};
+  const evidence = { selling_consumption: 2.48, network_consumption: 1.4,
+    consumption_subtotal: 3.88, selling_fixed: 9, network_fixed: 4.07, fixed_subtotal: 13.07 };
+  const raw = { ...validInvoice(), supplier: 'OENERGY', supply_type: 'Gas',
+    cost_consumption: 2.48, cost_non_consumption: 15.5, vat: 3.37, total: 21.35,
+    oenergy_gas_summary: evidence,
+    sheet_values: [{ header: 'Quantità consumi', value: 5 }, { header: 'Costo unitario', value: 0.496 },
+      { header: 'Totale costi consumo', value: 2.48 }, { header: 'Quota fissa', value: 13.07 },
+      { header: 'Trasporto e oneri', value: 1.4 }, { header: 'Accise', value: 1.03 },
+      { header: 'Ricalcoli', value: 0, source_evidence: 'printed' }, { header: 'IVA', value: 3.37 }] };
+  const file = { getBlob: () => ({}), getId: () => 'fixture-file', getName: () => 'invoice.pdf', getSize: () => 100 };
+  c.callGeminiForPdf_ = () => JSON.stringify(raw);
+  const mapped = c.extractUtilityData_(file, 'policy');
+  assert.equal(c.validateExtractedUtilityDataForImport_(mapped).valid, true);
+  assert.equal(mapped.sheet_values.find(e => e.header === 'Quota fissa').value, 9);
+  assert.equal(mapped.sheet_values.find(e => e.header === 'Trasporto e oneri').value, 5.47);
+  assert.equal(mapped.sheet_values.find(e => e.header === 'Costo unitario').value, 0.496);
+  assert.deepEqual(JSON.parse(JSON.stringify(c.buildExtractionRepairSnapshot_(mapped).oenergy_gas_summary)), evidence);
+  const omitted = { ...raw, sheet_values: raw.sheet_values.filter(e => !['Quota fissa', 'Trasporto e oneri'].includes(e.header)) };
+  c.callGeminiForPdf_ = () => JSON.stringify(omitted);
+  const constructed = c.extractUtilityData_(file, 'policy');
+  assert.equal(c.validateExtractedUtilityDataForImport_(constructed).valid, true);
+  assert.equal(constructed.sheet_values.find(e => e.header === 'Quota fissa').value, 9);
+  for (const proof of [[], 4, {}, { ...evidence, selling_fixed: '9' }, { ...evidence, network_fixed: null }]) {
+    assert.throws(() => c.validateRawExtractionShape_({ ...raw, oenergy_gas_summary: proof }), /oenergy_gas_summary/);
+  }
+  for (const candidate of [
+    { ...raw, oenergy_gas_summary: { ...evidence, fixed_subtotal: 99 }, sheet_values: [] },
+    { ...raw, cost_consumption: 3.88, cost_non_consumption: 14.1, sheet_values: [] }
+  ]) {
+    Object.defineProperty(candidate, 'configured_writable_headers', { value: [] });
+    assert.equal(c.isInvoiceCoreMonetaryReconciled_(candidate), true);
+    assert.equal(c.validateOenergyGasDetailedReconciliation_(candidate).valid, false,
+      'Supplied source evidence remains binding without detailed columns');
+  }
+  const vertex = c.buildVertexExtractionResponseSchema_().properties.oenergy_gas_summary;
+  assert.equal(vertex.type, 'OBJECT');
+  assert.equal(vertex.nullable, true);
+  assert.equal(vertex.required.length, 6);
+  assert.equal(vertex.properties.selling_fixed.type, 'NUMBER');
+  const preserved = { ...mapped, oenergy_gas_summary: { ...evidence, selling_fixed: 1 } };
+  c.preserveUnimplicatedRepairFields_(preserved, { monetaryValidated: true,
+    previousExtraction: mapped, feedback: { issues: [{ stage: 'accessory-evidence', fields: ['frequency'] }] } });
+  assert.equal(preserved.oenergy_gas_summary.selling_fixed, 9);
+  const reopened = { ...mapped, oenergy_gas_summary: { ...evidence, selling_fixed: 1 } };
+  c.preserveUnimplicatedRepairFields_(reopened, { monetaryValidated: true,
+    previousExtraction: mapped, feedback: { issues: [{ stage: 'extraction', fields: ['oenergy_gas_summary'] }] } });
+  assert.equal(reopened.oenergy_gas_summary.selling_fixed, 1);
+  const taxEvidence = { excise_charge: 0.88, regional_addition: 0.15, taxes_subtotal: 4.4 };
+  const omittedRegional = { ...raw, cost_non_consumption: 13.07,
+    oenergy_gas_tax_summary: taxEvidence,
+    sheet_values: raw.sheet_values.map(e => e.header === 'Accise' ? { ...e, value: 0.88 } : e) };
+  c.callGeminiForPdf_ = () => JSON.stringify(omittedRegional);
+  const taxMapped = c.extractUtilityData_(file, 'policy');
+  assert.equal(c.validateExtractedUtilityDataForImport_(taxMapped).valid, true);
+  assert.equal(taxMapped.cost_non_consumption, 15.5);
+  assert.equal(taxMapped.sheet_values.find(e => e.header === 'Accise').value, 1.03);
+  assert.equal(taxMapped.vat, 3.37);
+  assert.equal(taxMapped.total, 21.35);
+  assert.deepEqual(JSON.parse(JSON.stringify(c.buildExtractionRepairSnapshot_(taxMapped).oenergy_gas_tax_summary)), taxEvidence);
+  for (const value of [2, null]) {
+    const conflictingTax = { ...omittedRegional, sheet_values: omittedRegional.sheet_values.map(e =>
+      e.header === 'Accise' ? { ...e, value } : e) };
+    c.callGeminiForPdf_ = () => JSON.stringify(conflictingTax);
+    const preservedConflict = c.extractUtilityData_(file, 'policy');
+    assert.equal(preservedConflict.sheet_values.find(e => e.header === 'Accise').value, value);
+    assert.equal(c.validateExtractedUtilityDataForImport_(preservedConflict).valid, false);
+  }
+  const taxVertex = c.buildVertexExtractionResponseSchema_().properties.oenergy_gas_tax_summary;
+  assert.equal(taxVertex.type, 'OBJECT');
+  assert.equal(taxVertex.required.length, 3);
+  assert.equal(taxVertex.properties.regional_addition.type, 'NUMBER');
+  for (const proof of [[], {}, { ...taxEvidence, regional_addition: '0.15' }, { ...taxEvidence, extra: 4 }]) {
+    assert.throws(() => c.validateRawExtractionShape_({ ...raw, oenergy_gas_tax_summary: proof }), /oenergy_gas_tax_summary/);
+  }
+  for (const proof of [{ ...taxEvidence, regional_addition: 0 }, { ...taxEvidence, excise_charge: 1.76 }]) {
+    const conflict = { ...raw, oenergy_gas_tax_summary: proof, sheet_values: [] };
+    Object.defineProperty(conflict, 'configured_writable_headers', { value: [] });
+    assert.equal(c.validateOenergyGasDetailedReconciliation_(conflict).valid, false);
+  }
+  const badTaxAndAggregate = { ...omittedRegional, oenergy_gas_tax_summary: { ...taxEvidence, taxes_subtotal: 5.43 } };
+  const taxFeedback = c.validateOenergyGasDetailedReconciliation_(badTaxAndAggregate);
+  assert.equal(taxFeedback.valid, false);
+  assert.ok(taxFeedback.fields.includes('oenergy_gas_tax_summary'),
+    'Invalid tax evidence must be actionable before a derived aggregate mismatch');
+  const taxPreserved = { ...taxMapped, oenergy_gas_tax_summary: { ...taxEvidence, regional_addition: 0 } };
+  c.preserveUnimplicatedRepairFields_(taxPreserved, { monetaryValidated: true,
+    previousExtraction: taxMapped, feedback: { issues: [{ stage: 'accessory-evidence', fields: ['frequency'] }] } });
+  assert.equal(taxPreserved.oenergy_gas_tax_summary.regional_addition, 0.15);
+  const taxReopened = { ...taxMapped, oenergy_gas_tax_summary: { ...taxEvidence, regional_addition: 0 } };
+  c.preserveUnimplicatedRepairFields_(taxReopened, { monetaryValidated: true,
+    previousExtraction: taxMapped, feedback: { issues: [{ stage: 'extraction', fields: ['oenergy_gas_tax_summary'] }] } });
+  assert.equal(taxReopened.oenergy_gas_tax_summary.regional_addition, 0);
+  let calls = 0, mutations = 0;
+  c.callGeminiForPdf_ = () => { calls += 1; return JSON.stringify({ ...raw, oenergy_gas_summary: null }); };
+  c.buildInvoiceRepairSupplyContext_ = () => ({ state: 'unavailable' });
+  c.isAutomaticGeminiModelSelectionEnabled_ = () => false;
+  c.sha256ForFile_ = () => 'hash';
+  c.findDuplicate_ = () => { mutations += 1; throw new Error('Unsafe admission'); };
+  c.saveMutationJournal_ = () => { mutations += 1; };
+  c.buildVerifyResult_ = () => ({ status: 'VERIFY' });
+  assert.equal(c.processIntakeFile_(file, {}, 'policy').status, 'VERIFY');
+  assert.equal(calls, 3);
+  assert.equal(mutations, 0);
+}
+testOenergySourceComponentsAtExtractionAndAdmissionBoundaries();
+
+function testDetailedRepairsIncreaseThinkingWithinFlashLiteOnly() {
+  const c = loadCataloger();
+  const repair = { feedback: { issues: [{ code: 'oenergy_gas_detail_reconciliation_mismatch' }] } };
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', repair).thinking_level, 'medium');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'vertex_ai', repair).thinkingConfig.thinkingLevel, 'MEDIUM');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', null).thinking_level, 'low');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api', {
+    feedback: { issues: [{ code: 'invoice_identity_mismatch' }] } }).thinking_level, 'low');
+  assert.equal(c.getGeminiReasoningConfig_('gemini-3.5-flash-lite', 'gemini_api').thinking_level, 'low');
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-2.5-flash-lite', 'vertex_ai', repair).thinkingConfig.thinkingBudget,
+    vm.runInContext('CONFIG.GEMINI_VERTEX_THINKING_BUDGET', c));
+  assert.equal(c.getGeminiExtractionReasoningConfig_('gemini-3.8-flash', 'gemini_api', repair).thinking_level,
+    c.getGeminiReasoningConfig_('gemini-3.8-flash', 'gemini_api').thinking_level);
+}
+testDetailedRepairsIncreaseThinkingWithinFlashLiteOnly();
+
+function testDetailedRepairThinkingReachesBothProviderRequests() {
+  for (const backend of ['gemini_api', 'vertex_ai']) {
+    const requests = [];
+    const c = loadCataloger({ UrlFetchApp: { fetch: (url, options) => {
+      requests.push(JSON.parse(options.payload));
+      return backend === 'gemini_api' ? mockedInteractionsResponse() : {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ candidates: [{ finishReason: 'STOP',
+          content: { parts: [{ text: '{}' }] } }] }) };
+    } } });
+    c.getScriptProperty_ = key => ({ GEMINI_MODEL: 'gemini-3.5-flash-lite',
+      GEMINI_API_KEY: 'developer-secret', GOOGLE_CLOUD_PROJECT_ID: 'vertex-project' })[key] || '';
+    c.buildExtractionPrompt_ = () => 'prompt';
+    c.logCatalogEvent_ = () => {};
+    c.callGeminiForPdfWithBackend_({ getBytes: () => [1] }, {}, 'policy',
+      { getId: () => 'file-id' }, backend, '', { attempt: 2,
+        feedback: { issues: [{ code: 'oenergy_gas_detail_reconciliation_mismatch' }] } });
+    assert.equal(requests.length, 1);
+    if (backend === 'gemini_api') assert.equal(requests[0].generation_config.thinking_level, 'medium');
+    else assert.equal(requests[0].generationConfig.thinkingConfig.thinkingLevel, 'MEDIUM');
+  }
+}
+testDetailedRepairThinkingReachesBothProviderRequests();

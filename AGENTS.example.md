@@ -195,10 +195,15 @@ manual review.
   costi consumo` equals the consumption total. If no applied recalculation
   amount is printed, use the reviewed `Ricalcoli` zero default only after
   explicit absence evidence. When network/oneri amounts are printed under both
-  consumption and fixed quota, include both in `Trasporto e oneri`; read
-  `Accise` by summing every printed amount in the `ACCISE e ADDIZIONALI`
-  section, including regional additions, rather than deriving it from VAT or
-  using only `Accisa complessivamente applicata` when it omits additions.
+  consumption and fixed quota, include both in `Trasporto e oneri`.
+  Before mapping columns, transcribe the selling child, network child and
+  printed parent subtotal separately for each quota; check both decompositions.
+  A matching final total cannot prove the fixed/network roles are correct. Read
+  `Accise` by summing mutually exclusive excise charges and regional additions
+  in `ACCISE e ADDIZIONALI` once each. Exclude a recap such as
+  `Accisa complessivamente applicata` when it repeats a charge already counted.
+  Use a recap only when it is the sole printed representation of that charge;
+  include separately printed regional additions once. Never derive it from VAT.
   Do not subtract an explanatory negative or credit line such as `Oneri generali di
   sistema` from those positive summary amounts unless the line is explicitly part
   of the payable summary; it is not a balancing adjustment.

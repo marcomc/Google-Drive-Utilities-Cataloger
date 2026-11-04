@@ -427,7 +427,7 @@ test_initial_resume_and_handoff_preserve_model_pins() {
     MODEL_TEST_ROOT="${model_test_root}" REQUESTED_MODEL="${requested_model}" bash -c '
       set -euo pipefail
       source "$1"
-      expected_model="${REQUESTED_MODEL:-gemini-flash-latest}"
+      expected_model="${REQUESTED_MODEL:-gemini-3.5-flash-lite}"
       actual_payload=""
       model_test_root="${MODEL_TEST_ROOT}"
       STATE_DIR="${model_test_root}/state"
@@ -450,6 +450,12 @@ test_initial_resume_and_handoff_preserve_model_pins() {
       collect_installation_inputs
       actual_model="$(state_get ".geminiModel")"
       [[ "${actual_model}" == "${expected_model}" ]]
+      expected_auto_selection=true
+      if [[ -n "${REQUESTED_MODEL}" ]]; then
+        expected_auto_selection=false
+      fi
+      actual_auto_selection="$(jq -r ".geminiModelAutoSelection" "${STATE_FILE}")"
+      [[ "${actual_auto_selection}" == "${expected_auto_selection}" ]]
       unset GDUC_GEMINI_MODEL
       apply_resume_overrides
       actual_model="$(state_get ".geminiModel")"
@@ -460,6 +466,8 @@ test_initial_resume_and_handoff_preserve_model_pins() {
       build_bootstrap_payload "test-secret" actual_payload
       actual_model="$(jq -r ".geminiModel" <<<"${actual_payload}")"
       [[ "${actual_model}" == "${expected_model}" ]]
+      actual_auto_selection="$(jq -r ".geminiModelAutoSelection" <<<"${actual_payload}")"
+      [[ "${actual_auto_selection}" == "${expected_auto_selection}" ]]
       for GDUC_GEMINI_MODEL in "gemini-3.6-flash" "gemini-3.7-flash"; do
         apply_resume_overrides
         actual_model="$(state_get ".geminiModel")"
@@ -467,6 +475,8 @@ test_initial_resume_and_handoff_preserve_model_pins() {
         build_bootstrap_payload "test-secret" actual_payload
         actual_model="$(jq -r ".geminiModel" <<<"${actual_payload}")"
         [[ "${actual_model}" == "${GDUC_GEMINI_MODEL}" ]]
+        actual_auto_selection="$(jq -r ".geminiModelAutoSelection" <<<"${actual_payload}")"
+        [[ "${actual_auto_selection}" == "false" ]]
       done
     ' _ "${PROJECT_ROOT}/scripts/install.sh"
     test_status=$?

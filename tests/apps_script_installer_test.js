@@ -16,6 +16,7 @@ const installerSource = fs.readFileSync(
 function loadInstaller(fetchImplementation) {
   let uuidSequence = 0;
   const context = vm.createContext({
+    CONFIG: { GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS: 1024 },
     ScriptApp: {
       getOAuthToken: () => 'vertex-oauth-token',
       getScriptId: () => 'test-script-id'
@@ -27,6 +28,7 @@ function loadInstaller(fetchImplementation) {
           String(uuidSequence).padStart(12, '0');
       },
       base64Decode: (value) => Buffer.from(value, 'base64'),
+      base64Encode: (value) => Buffer.from(String(value)).toString('base64'),
       newBlob: (value) => ({
         getDataAsString: () => Buffer.from(value).toString('utf8')
       })
@@ -54,10 +56,15 @@ function loadInstallerWithRuntimeConfig(fetchImplementation, stored) {
     getDataAsString: () => Buffer.from(value).toString('utf8'),
     getBytes: () => Array.from(Buffer.from(value))
   });
+  context.Utilities.base64Encode = (value) =>
+    Buffer.from(String(value)).toString('base64');
   for (const file of ['Config.gs', 'locales/en.gs', 'locales/it.gs', 'Localization.gs']) {
     vm.runInContext(fs.readFileSync(path.join(projectRoot, file), 'utf8'), context,
       { filename: file });
   }
+  vm.runInContext(fs.readFileSync(path.join(projectRoot,
+    'GeminiModelSelection.gs'), 'utf8'), context,
+  { filename: 'GeminiModelSelection.gs' });
   return context;
 }
 
@@ -2153,12 +2160,12 @@ function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
           assert.equal(payload.model, model);
           return response(200, {
             status: 'completed',
-            steps: [{ type: 'model_output', content: [{ type: 'text', text: 'OK' }] }]
+            steps: [{ type: 'model_output', content: [{ type: 'text', text: '{"ready":true}' }] }]
           });
         }
         if (url.endsWith('/' + model + ':generateContent')) {
           return response(200, {
-            candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+            candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"ready":true}' }] } }]
           });
         }
         assert.ok(url.endsWith('/' + model));
@@ -2200,6 +2207,87 @@ function testInstallerAndConfiguredProbesPreserveFormerDefaultPins() {
       assert.equal(context.configureGeminiFreeTierWithVertexFallback().geminiModel, model);
       assert.equal(stored.GEMINI_MODEL, model);
     }
+  }
+}
+
+function testNewInstallDiscoversEachEnabledBackendBeforeValidation() {
+  const requests = [];
+  const context = loadInstallerWithRuntimeConfig((url, requestOptions) => {
+    requests.push({ url, options: requestOptions });
+    if (url.includes('generativelanguage.googleapis.com/v1beta/models?')) {
+      return response(200, { models: [{
+        baseModelId: 'gemini-3.7-flash-lite',
+        supportedGenerationMethods: ['generateContent']
+      }] });
+    }
+    if (url.endsWith('/v1beta/interactions')) {
+      return response(200, {
+        model: 'gemini-3.7-flash-lite',
+        status: 'completed',
+        usage: { input_tokens: 4, output_tokens: 2 },
+        steps: [{ type: 'model_output', content: [{
+          type: 'text', text: '{"ready":true}'
+        }] }]
+      });
+    }
+    if (url.includes('/v1beta1/publishers/google/models?')) {
+      return response(200, { publisherModels: [{
+        name: 'publishers/google/models/gemini-3.6-flash-lite',
+        launchStage: 'GA'
+      }] });
+    }
+    if (url.endsWith(':generateContent')) {
+      return response(200, {
+        modelVersion: 'gemini-3.6-flash-lite',
+        usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+        candidates: [{ finishReason: 'STOP', content: { parts: [{
+          text: '{"ready":true}'
+        }] } }]
+      });
+    }
+    if (url.endsWith(':countTokens')) {
+      return response(200, { totalTokens: 4 });
+    }
+    if (url.endsWith('/gemini-3.7-flash-lite')) {
+      return response(200, { supportedGenerationMethods: ['generateContent'] });
+    }
+    throw new Error('Unexpected installation request: ' + url);
+  }, {});
+  context.logCatalogEvent_ = () => {};
+  const options = {
+    projectId: 'cataloger-project',
+    geminiBackend: 'gemini_api',
+    geminiApiKey: 'developer-secret',
+    geminiModel: 'gemini-3.5-flash-lite',
+    geminiModelAutoSelection: true,
+    autoVertexFallback: true,
+    vertexLocation: 'global'
+  };
+
+  const selections = context.validateInstallerGeminiAccess_(options);
+
+  assert.equal(selections.gemini_api.model, 'gemini-3.7-flash-lite');
+  assert.equal(selections.vertex_ai.model, 'gemini-3.6-flash-lite');
+  assert.deepEqual(requests.map(item => item.url), [
+    'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+    'https://generativelanguage.googleapis.com/v1beta/interactions',
+    'https://aiplatform.googleapis.com/v1beta1/publishers/google/models?pageSize=300&listAllVersions=true',
+    'https://aiplatform.googleapis.com/v1/projects/cataloger-project/locations/global/publishers/google/models/gemini-3.6-flash-lite:generateContent',
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash-lite',
+    'https://aiplatform.googleapis.com/v1/projects/cataloger-project/locations/global/publishers/google/models/gemini-3.6-flash-lite:countTokens'
+  ]);
+  const developerProbe = JSON.parse(requests[1].options.payload);
+  const vertexProbe = JSON.parse(requests[3].options.payload);
+  const probePdfs = [
+    Buffer.from(developerProbe.input[1].data, 'base64').toString('latin1'),
+    Buffer.from(vertexProbe.contents[0].parts[1].inlineData.data,
+      'base64').toString('latin1')
+  ];
+  for (const pdf of probePdfs) {
+    const xrefOffset = Number(pdf.match(/startxref\n(\d+)\n%%EOF/)[1]);
+    assert.equal(pdf.slice(0, 8), '%PDF-1.4');
+    assert.equal(pdf.slice(xrefOffset, xrefOffset + 4), 'xref');
+    assert.match(pdf, /\/Length 35 >>\nstream\nBT \/F1 12 Tf 10 50 Td \(READY\) Tj ET\nendstream/);
   }
 }
 
@@ -2388,6 +2476,7 @@ function testConfiguredGeminiAccessValidationIsRedacted() {
     }
   };
   context.getGeminiBackend_ = () => 'gemini_api';
+  context.isAutomaticGeminiModelSelectionEnabled_ = () => false;
   context.isAutomaticVertexFallbackEnabled_ = () => true;
   context.getGeminiModel_ = () => 'gemini-flash-latest';
   context.getVertexAiLocation_ = () => 'global';
@@ -2409,6 +2498,10 @@ function testConfiguredGeminiAccessValidationIsRedacted() {
     applicationVersion: '0.6.0',
     geminiBackend: 'gemini_api',
     geminiModel: 'gemini-flash-latest',
+    geminiModels: {
+      gemini_api: 'gemini-flash-latest',
+      vertex_ai: 'gemini-flash-latest'
+    },
     ready: true,
     geminiApiValidated: true,
     geminiApiGenerationValidated: true,
@@ -2428,9 +2521,105 @@ function testConfiguredGeminiAccessValidationIsRedacted() {
   assert.deepEqual(calls.map(call => [call.backend, call.enabled]), [
     ['gemini_api', true], ['vertex_ai', true]
   ]);
-  assert.equal(calls[0].options, calls[1].options);
+  assert.notEqual(calls[0].options, calls[1].options);
+  assert.equal(calls[0].options.geminiModel, 'gemini-flash-latest');
+  assert.equal(calls[1].options.geminiModel, 'gemini-flash-latest');
   assert.equal(calls[0].options.geminiApiKey, 'developer-secret');
   assert.equal(JSON.stringify(result).includes('developer-secret'), false);
+}
+
+function testConfiguredAccessReportsIndependentAutomaticModels() {
+  const calls = [];
+  const stored = {
+    GEMINI_MODEL: 'gemini-3.5-flash-lite',
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_BACKEND: 'gemini_api',
+    GEMINI_AUTO_VERTEX_FALLBACK: 'true',
+    GEMINI_API_KEY: 'developer-secret',
+    GOOGLE_CLOUD_PROJECT_ID: 'cataloger-project'
+  };
+  const context = loadInstallerWithRuntimeConfig(() => {
+    throw new Error('network must be delegated to the backend stub');
+  }, stored);
+  context.getGeminiModelForBackend_ = backend => backend === 'gemini_api' ?
+    'gemini-3.7-flash-lite' : 'gemini-3.6-flash-lite';
+  context.validateConfiguredGeminiBackend_ = (backend, enabled, options) => {
+    calls.push({ backend, enabled, model: options.geminiModel });
+    return { enabled, metadataValidated: enabled,
+      generationValidated: enabled, available: enabled };
+  };
+
+  const result = context.validateConfiguredGeminiAccess();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result.geminiModels)), {
+    gemini_api: 'gemini-3.7-flash-lite',
+    vertex_ai: 'gemini-3.6-flash-lite'
+  });
+  assert.deepEqual(calls, [
+    { backend: 'gemini_api', enabled: true, model: 'gemini-3.7-flash-lite' },
+    { backend: 'vertex_ai', enabled: true, model: 'gemini-3.6-flash-lite' }
+  ]);
+}
+
+function testGeminiModelSelectionPolicyToggleClearsStaleSelection() {
+  const stored = {
+    GEMINI_MODEL: 'gemini-3.5-flash-lite',
+    GEMINI_MODEL_AUTO_SELECTION: 'false',
+    GEMINI_MODEL_SELECTIONS: '{"gemini_api":{"model":"stale"}}'
+  };
+  const context = loadInstallerWithRuntimeConfig(() => {
+    throw new Error('network must not be used by policy configuration');
+  }, stored);
+
+  const automatic = context.configureGeminiModelSelection(
+    'latest_ga_flash_lite');
+  assert.equal(automatic.geminiModelSelection.policy,
+    'latest_ga_flash_lite');
+  assert.equal(stored.GEMINI_MODEL_AUTO_SELECTION, 'true');
+  assert.equal(Object.hasOwn(stored, 'GEMINI_MODEL_SELECTIONS'), false);
+  const pinned = context.configureGeminiModelSelection('pinned');
+  assert.equal(pinned.geminiModelSelection.policy, 'pinned');
+  assert.equal(stored.GEMINI_MODEL_AUTO_SELECTION, 'false');
+  assert.throws(() => context.configureGeminiModelSelection('latest'),
+    /must be latest_ga_flash_lite or pinned/);
+}
+
+function testAutomaticSelectionFailureDoesNotHideOtherBackendReadiness() {
+  const calls = [];
+  const stored = {
+    GEMINI_MODEL: 'gemini-3.5-flash-lite',
+    GEMINI_MODEL_AUTO_SELECTION: 'true',
+    GEMINI_BACKEND: 'gemini_api',
+    GEMINI_AUTO_VERTEX_FALLBACK: 'true'
+  };
+  const context = loadInstallerWithRuntimeConfig(() => {
+    throw new Error('network must be delegated to the backend stub');
+  }, stored);
+  context.getGeminiModelForBackend_ = backend => {
+    if (backend === 'gemini_api') {
+      const error = new Error('Gemini Developer API model catalog failed (HTTP 403).');
+      error.geminiModelProbeAuthFailure = true;
+      throw error;
+    }
+    return 'gemini-3.6-flash-lite';
+  };
+  context.validateConfiguredGeminiBackend_ = (backend, enabled, options) => {
+    calls.push({ backend, enabled, model: options.geminiModel });
+    return { enabled, metadataValidated: enabled,
+      generationValidated: enabled, available: enabled };
+  };
+
+  const result = context.validateConfiguredGeminiAccess();
+
+  assert.equal(result.ready, false);
+  assert.equal(result.geminiModels.gemini_api, '');
+  assert.equal(result.geminiModels.vertex_ai, 'gemini-3.6-flash-lite');
+  assert.equal(result.backends.gemini_api.failureStage, 'model-selection');
+  assert.equal(result.backends.gemini_api.reason, 'authentication-failed');
+  assert.equal(result.backends.vertex_ai.available, true);
+  assert.deepEqual(calls, [{
+    backend: 'vertex_ai', enabled: true, model: 'gemini-3.6-flash-lite'
+  }]);
 }
 
 function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
@@ -2440,11 +2629,11 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
     if (url.endsWith('/v1beta/interactions')) {
       return response(200, {
         status: 'completed',
-        steps: [{ type: 'model_output', content: [{ type: 'text', text: 'OK' }] }]
+        steps: [{ type: 'model_output', content: [{ type: 'text', text: '{"ready":true}' }] }]
       });
     }
     return response(200, {
-      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+      candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"ready":true}' }] } }]
     });
   });
   const options = {
@@ -2461,18 +2650,31 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
 
   assert.equal(requests.length, 2);
   const developerPayload = JSON.parse(requests[0].options.payload);
-  assert.deepEqual(JSON.parse(JSON.stringify(developerPayload)), {
-    model: 'gemini-flash-latest',
-    input: 'Reply with exactly OK.',
-    generation_config: { max_output_tokens: 256, thinking_level: 'medium' },
-    store: false
-  });
+  assert.equal(developerPayload.model, 'gemini-flash-latest');
+  assert.equal(developerPayload.input[0].type, 'text');
+  assert.equal(developerPayload.input[1].type, 'document');
+  assert.equal(developerPayload.input[1].mime_type, 'application/pdf');
+  assert.equal(developerPayload.generation_config.max_output_tokens, 1024);
+  assert.equal(developerPayload.store, false);
   assert.equal(requests[0].options.headers['x-goog-api-key'], 'developer-secret');
   assert.equal(requests[0].url.includes('developer-secret'), false);
   const vertexPayload = JSON.parse(requests[1].options.payload);
-  assert.equal(vertexPayload.generationConfig.maxOutputTokens, 256);
+  assert.equal(vertexPayload.generationConfig.maxOutputTokens, 1024);
   assert.equal(vertexPayload.generationConfig.thinkingConfig.thinkingBudget, 128);
-  assert.equal(vertexPayload.contents[0].parts[0].text, 'Reply with exactly OK.');
+  assert.equal(vertexPayload.contents[0].parts[1].inlineData.mimeType,
+    'application/pdf');
+
+  context.validateConfiguredGeminiDeveloperGeneration_({ ...options, geminiModel: 'gemini-3.8-flash' });
+  context.validateConfiguredVertexGeneration_({ ...options, geminiModel: 'gemini-3.8-flash' });
+  assert.equal(JSON.parse(requests[2].options.payload).generation_config.thinking_level, 'low');
+  assert.deepEqual(JSON.parse(requests[3].options.payload).generationConfig.thinkingConfig,
+    { thinkingLevel: 'LOW' });
+  const truncated = loadInstaller(() => response(200, {
+    candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"ready":true}' }] } }]
+  }));
+  truncated.getGeminiReasoningConfig_ = () => ({});
+  assert.throws(() => truncated.validateConfiguredVertexGeneration_(options), error =>
+    error.geminiProbeHttpStatus === 200 && error.geminiProbeFinishReason === 'MAX_TOKENS');
 
   const overloaded = loadInstaller(() => response(500, {
     error: { message: 'developer-secret is currently experiencing high demand' }
@@ -2510,7 +2712,7 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
     return response(200, {
       status: 'completed',
       steps: [{
-        type: 'model_output', content: [{ type: 'text', text: 'OK' }]
+        type: 'model_output', content: [{ type: 'text', text: '{"ready":true}' }]
       }]
     });
   });
@@ -2519,7 +2721,7 @@ function testConfiguredGenerationReadinessProbesAreBoundedAndRedacted() {
     {}, options, { geminiModel: 'gemini-unclassified-pin' }));
   assert.deepEqual(JSON.parse(JSON.stringify(
     unclassifiedRequests[0].generation_config)), {
-    max_output_tokens: 256
+      max_output_tokens: 1024
   });
 }
 
@@ -2540,7 +2742,7 @@ function testConfiguredAccessReportsBackendFailuresIndependently() {
     }
     if (url.endsWith(':generateContent')) {
       return response(200, {
-        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'OK' }] } }]
+        candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{"ready":true}' }] } }]
       });
     }
     throw new Error('Unexpected request: ' + url);
@@ -2861,12 +3063,16 @@ testServiceIdentityMigrationRestoresCompleteChartState();
 testInstallerChartRestorePreservesExternalAndMixedRangeBindings();
 testGeminiDeveloperApiValidation();
 testInstallerAndConfiguredProbesPreserveFormerDefaultPins();
+testNewInstallDiscoversEachEnabledBackendBeforeValidation();
 testGeminiDeveloperApiKeyRotationPreservesInstallation();
 testVertexValidation();
 testFallbackValidatesBothBackends();
 testConfiguredGeminiAccessValidationIsRedacted();
 testConfiguredGenerationReadinessProbesAreBoundedAndRedacted();
 testConfiguredAccessReportsBackendFailuresIndependently();
+testConfiguredAccessReportsIndependentAutomaticModels();
+testGeminiModelSelectionPolicyToggleClearsStaleSelection();
+testAutomaticSelectionFailureDoesNotHideOtherBackendReadiness();
 testCredentialFailureIsRedacted();
 testTimeZoneReconfigurationPreservesCredentialsAndTriggers();
 testTimeZoneReconfigurationRollsBackRemoteState();

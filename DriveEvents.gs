@@ -2,7 +2,8 @@ const AUTOMATION_TRIGGER_HANDLERS = Object.freeze([
   'runDailyUtilitiesCataloging',
   'processDriveEventQueue',
   'processDueGeminiOverloadRetries',
-  'renewDriveEventSubscription'
+  'renewDriveEventSubscription',
+  'maintainGeminiModelSelections'
 ]);
 
 /**
@@ -51,6 +52,8 @@ function getAutomationTriggerSchedule_(handler) {
       return { frequency: 'minutes', interval: CONFIG.EVENT_POLL_MINUTES };
     case 'processDueGeminiOverloadRetries':
       return { frequency: 'minutes', interval: 1 };
+    case 'maintainGeminiModelSelections':
+      return { frequency: 'hours', interval: 1 };
     case 'renewDriveEventSubscription':
       return { frequency: 'hours', interval: 6 };
     default:

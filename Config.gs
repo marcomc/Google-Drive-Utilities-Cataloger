@@ -1,8 +1,8 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.7.1',
-  // Google hot-swaps this alias to the newest Flash release for the model
-  // variation. Keep the default moving without a Script Properties update.
-  DEFAULT_MODEL: 'gemini-flash-latest',
+  APP_VERSION: '0.7.2',
+  // Bootstrap fallback for explicit pins; automatic selection is the default
+  // for new installations and resolves each provider's catalog independently.
+  DEFAULT_MODEL: 'gemini-3.5-flash-lite',
   // Keep the moving alias separate from the latest explicitly verified Flash
   // releases. Add new releases here without changing the fallback algorithm.
   GEMINI_DEVELOPER_FALLBACK_MODELS: Object.freeze([
@@ -39,7 +39,14 @@ const CONFIG = Object.freeze({
   GEMINI_MAX_OUTPUT_TOKENS: 16384,
   // Use backend-specific explicit reasoning controls for PDF cost extraction.
   GEMINI_FLASH_THINKING_LEVEL: 'medium',
+  GEMINI_FLASH_LITE_THINKING_LEVEL: 'low',
   GEMINI_VERTEX_THINKING_BUDGET: 4096,
+  GEMINI_MODEL_SELECTION_REFRESH_MS: 24 * 60 * 60 * 1000,
+  GEMINI_MODEL_SELECTION_MAX_CANDIDATES: 8,
+  GEMINI_MODEL_CATALOG_MAX_PAGES: 10,
+  GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS: 1024,
+  // Model Garden rejects list requests above 300 results per page.
+  GEMINI_VERTEX_CATALOG_PAGE_SIZE: 300,
   // One initial extraction plus at most two validator-guided repair passes.
   EXTRACTION_MAX_AI_CALLS: 3,
   // Bound remote reads independently of the three accepted historical rows.
@@ -81,6 +88,10 @@ const CONFIG = Object.freeze({
     AUTOMATION_TRIGGER_SCHEDULES: 'AUTOMATION_TRIGGER_SCHEDULES',
     GEMINI_BACKEND: 'GEMINI_BACKEND',
     GEMINI_MODEL: 'GEMINI_MODEL',
+    GEMINI_MODEL_AUTO_SELECTION: 'GEMINI_MODEL_AUTO_SELECTION',
+    GEMINI_MODEL_SELECTIONS: 'GEMINI_MODEL_SELECTIONS',
+    GEMINI_MODEL_ESCALATION_SELECTIONS: 'GEMINI_MODEL_ESCALATION_SELECTIONS',
+    GEMINI_MODEL_MAINTENANCE_ATTEMPTS: 'GEMINI_MODEL_MAINTENANCE_ATTEMPTS',
     VERTEX_AI_LOCATION: 'VERTEX_AI_LOCATION',
     GEMINI_AUTO_VERTEX_FALLBACK: 'GEMINI_AUTO_VERTEX_FALLBACK',
     GEMINI_VERTEX_FALLBACK_UNTIL: 'GEMINI_VERTEX_FALLBACK_UNTIL',
@@ -132,6 +143,7 @@ function getSetupStatus() {
     geminiBackend: getGeminiBackend_(),
     geminiEffectiveBackend: getEffectiveGeminiBackend_(),
     geminiAutoVertexFallbackEnabled: isAutomaticVertexFallbackEnabled_(),
+    geminiModelSelection: getGeminiModelSelectionStatus_(),
     serviceAddressIdentityEnforced: isServiceAddressIdentityEnforced_(),
     geminiVertexFallbackUntil: getTemporaryVertexFallbackUntilIso_(),
     geminiModel: getGeminiModel_(),
@@ -204,21 +216,47 @@ function getGeminiReasoningConfig_(model, backend) {
     'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'
   ];
   if (backend === 'vertex_ai') {
-    return model === CONFIG.DEFAULT_MODEL || gemini25Models.indexOf(model) !== -1 ? {
-      thinkingConfig: { thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET }
-    } : {};
+    if (gemini25Models.indexOf(model) !== -1) {
+      return {
+        thinkingConfig: {
+          thinkingBudget: CONFIG.GEMINI_VERTEX_THINKING_BUDGET
+        }
+      };
+    }
+    if (isGeminiFlashLiteModel_(model)) {
+      return {
+        thinkingConfig: {
+          thinkingLevel: getGeminiThinkingLevel_(model).toUpperCase()
+        }
+      };
+    }
+    return {};
   }
   if (model === 'gemini-3-pro-preview') {
     return { thinking_level: 'high' };
   }
   const mediumLevelModels = gemini25Models.concat([
-    CONFIG.DEFAULT_MODEL, 'gemini-3.8-flash', 'gemini-3.7-flash',
+    CONFIG.DEFAULT_MODEL, 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.7-flash',
     'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
     'gemini-3-flash-preview', 'gemini-3.1-pro-preview'
   ]);
+  if (isGeminiFlashLiteModel_(model) && gemini25Models.indexOf(model) < 0) {
+    return { thinking_level: getGeminiThinkingLevel_(model) };
+  }
   return mediumLevelModels.indexOf(model) !== -1 ? {
-    thinking_level: CONFIG.GEMINI_FLASH_THINKING_LEVEL
+    thinking_level: gemini25Models.indexOf(model) !== -1 ? 'medium' :
+      getGeminiThinkingLevel_(model)
   } : {};
+}
+
+function getGeminiThinkingLevel_(model) {
+  return isGeminiFlashLiteModel_(model) ?
+    CONFIG.GEMINI_FLASH_LITE_THINKING_LEVEL :
+    CONFIG.GEMINI_FLASH_THINKING_LEVEL;
+}
+
+function isGeminiFlashLiteModel_(model) {
+  return /^gemini-\d+(?:\.\d+)*-flash-lite$/.test(String(model || ''));
 }
 
 /**
@@ -234,6 +272,8 @@ function configureGeminiModel(model) {
     CONFIG.PROPERTY_KEYS.GEMINI_MODEL,
     normalizeGeminiModel_(normalizedModel)
   );
+  PropertiesService.getScriptProperties().setProperty(
+    CONFIG.PROPERTY_KEYS.GEMINI_MODEL_AUTO_SELECTION, 'false');
   return getSetupStatus();
 }
 

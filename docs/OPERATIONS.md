@@ -111,7 +111,7 @@ make install
 
 Complete the printed browser handoff and
 [resume the installer](INSTALLATION.md#quick-start). The installer configures
-Script Properties, policy, spreadsheet, Pub/Sub, Drive events, and all four
+Script Properties, policy, spreadsheet, Pub/Sub, Drive events, and all five
 triggers, then validates the resulting state.
 
 Use the [controlled validation](INSTALLATION.md#controlled-validation) before
@@ -238,8 +238,13 @@ fallback enabled at every interval.
 
 Each normally processed PDF uses one Gemini generation cycle. When
 deterministic validation finds repairable document-data problems, it can request
-at most two additional targeted cycles, for a maximum of three extraction cycles. Provider transport retries and model
-fallback requests are accounted separately at their outbound boundary. Each repair
+at most two additional targeted Flash-Lite cycles. If all three cycles fail the
+OENERGY Gas detailed-cost reconciliation, automatic mode discovers and probes
+the newest stable Flash model for the active provider, then allows one final
+targeted repair. This escalation is limited to that supplier-specific mismatch;
+other invoices retain the three-cycle limit. If reconciliation still fails, the
+PDF remains blocked. Provider transport retries, model probes, and fallback
+requests are accounted separately at their outbound boundary. Each repair
 prompt contains structured issue codes and fields, the previous schema-valid
 extraction when available, prior-attempt history, and verified supply context; it asks for another
 complete schema object rather than a partial patch. Configuration or
@@ -253,8 +258,8 @@ amounts remain eligible for correction; a conflicting inferred frequency reopens
 and reference-date fields for re-examination. Neither condition relaxes the
 final reconciliation or historical-frequency checks.
 Structured logs record each validation outcome, targeted repair request,
-successful repair, and exhausted three-call loop using only file ID, attempt
-counts, validation stage, and issue code; extracted document values are not
+successful repair, model escalation, and exhausted repair loop using only file
+ID, attempt counts, validation stage, and issue code; extracted document values are not
 logged. These events provide the evidence needed to decide later whether a
 separate AI prompt supervisor would add value.
 
@@ -342,6 +347,8 @@ reason, and recommended action rather than inventing a comparison.
 | `processSingleIntakeFile(fileId)` | Controlled single-file automatic import; accepts only a PDF file ID. | Processes that intake PDF through extraction, validation, and journaled import. |
 | `previewUtilityInvoiceExtraction(fileId)` | Automatically extract and validate an intake or archived PDF within the configured root. | Uses the normal model/repair pipeline and quota accounting, without importing or changing the PDF. |
 | `processSingleIntakeFileByName(fileName)` | Owner-controlled recovery when the exact intake filename is known. | Resolves one direct-root PDF by exact name and delegates to `processSingleIntakeFile`; missing or ambiguous matches fail closed. |
+| `maintainGeminiModelSelections()` | Managed hourly model maintenance. | Refreshes one due provider/tier pair with a daily cooldown; preserves verified caches on failure and performs no discovery in pinned mode. |
+| `refreshGeminiModelSelectionCaches()` | Owner-controlled model maintenance, outside PDF processing. | Lists and generation-probes stable Flash-Lite and GA Flash candidates for each configured provider, then caches verified IDs for 24 hours. |
 | `migrateCatalogerReferencePeriodText` | One-time or repeatable post-release maintenance. | Converts existing non-formula reference year/month cells to literal text without changing other fields. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
@@ -625,7 +632,7 @@ link opens the Apps Script project at
 `retryFailedUtilitiesCataloging`; it is deliberately an owner-controlled manual
 execution, not a public retry endpoint.
 
-After a transport repair, run `installAutomationTriggers` to restore all four
+After a transport repair, run `installAutomationTriggers` to restore all five
 triggers. It preserves matching schedules, removes duplicates, and refreshes
 only handlers whose stored cadence differs from the deployed source.
 
@@ -750,24 +757,38 @@ count, the event also includes
 `estimatedCostUsd` and its input and output components. This is an operational
 estimate, not an invoice: Cloud Billing remains authoritative and can lag
 behind the execution logs.
-The default `gemini-flash-latest` Developer API runtime uses Google's
-Interactions API with explicit `medium` thinking, a 16,384-token shared thinking and JSON response
-budget, the shared JSON Schema contract, and `store:false` for stateless invoice
-processing. Vertex AI continues to use `generateContent` with the same alias
-and output budget plus an explicit `thinkingBudget: 4096` to retain reasoning
-for aggregate and subordinate invoice cost rows. Vertex receives the shared
-extraction contract converted to its OpenAPI-style `responseSchema`. The alias
-may resolve to a newer Flash release without a source or Script Properties
-update.
+Automatic model selection resolves the newest stable Flash-Lite model
+independently for the Gemini Developer API and Vertex AI. It probes the model
+with a small synthetic PDF, caches the verified selection for 24 hours, and
+retains the last verified model across temporary catalog or generation outages.
+The Developer API runtime uses Google's Interactions API with explicit
+reasoning controls, a 16,384-token shared thinking and JSON response budget,
+the shared JSON Schema contract, and `store:false` for stateless invoice
+processing. Vertex AI uses `generateContent` with its own selected model ID and
+output budget. Vertex receives the
+shared extraction contract converted to its OpenAPI-style `responseSchema`.
+The Gemini Developer API catalog does not report GA launch stage; automatic
+selection accepts only versioned, non-preview Flash-Lite IDs and then confirms
+inference access. Vertex selection requires the catalog's GA and stable flags.
+Both automatic model tiers use provider-specific 24-hour caches. The managed
+hourly maintenance trigger refreshes due pairs automatically; owners can also
+use `refreshGeminiModelSelectionCaches()` outside document processing. Apps
+Script offers no caller-set timeout for catalog HTTP requests, so a stalled
+catalog call must not occupy a PDF-processing execution. A missing cache fails
+closed; a stale known-good cache remains available until refresh. If only the
+exceptional OENERGY Flash escalation cache is missing, ordinary extraction
+still runs and only the optional fourth attempt is skipped. Catalog
+request/response events identify slow provider lookups without logging
+credentials or document content.
 The Interactions parser follows Google's current
 [REST steps schema](https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026),
 which replaced legacy `outputs`; a completed response can omit per-step status.
 Vertex schema conversion preserves nullable enums, mixed primitive value types,
 and reference-month patterns using the supported
 [Schema fields](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/Schema).
-Until a verified Vertex price is added to `Config.gs`, usage events for the
-alias and other unpriced models retain provider token counts but intentionally
-omit cost-estimate fields; Cloud Billing remains authoritative.
+Until a verified Vertex price is added to `Config.gs`, usage events for
+unpriced selected models retain provider token counts but intentionally omit
+cost-estimate fields; Cloud Billing remains authoritative.
 
 If the Developer API returns a transient outage that is not the explicit
 high-demand response and imports must be recovered immediately, an owner may
@@ -795,3 +816,60 @@ gcloud logging read \
 - Set a Cloud billing budget and alerts before enabling events.
 - Gemini and Pub/Sub usage is typically small for utility invoices, but quotas,
   tiers, and prices vary by account and model.
+
+### Automatic model maintenance migration
+
+For installations upgraded to 0.7.2, run `installAutomationTriggers` once from
+an owner-authorized Apps Script editor execution after source deployment.
+Confirm exactly one `maintainGeminiModelSelections` trigger alongside the four
+existing handlers. The Execution API cannot install these triggers.
+
+The hourly handler refreshes one due provider/tier pair per execution, with a
+24-hour cooldown checkpointed before provider I/O. Flash-Lite pairs precede
+optional Flash pairs. Failures preserve the last verified model and let other
+pairs advance on subsequent runs. Each job caps catalog pagination at ten pages
+and candidate probes at eight, with one execution deadline; a running fetch
+cannot be cancelled by Apps Script. Fresh caches and pinned mode make no
+provider calls. The extra idle executions should be included in trigger-runtime
+quota measurements; discovery remains outside invoice processing.
+
+Maintenance holds the shared processing lock while refreshing a pair to serialize
+cache writes with processing and configuration operations. A slow catalog call
+can therefore defer concurrent PDF triggers until the lock is released (or the
+Apps Script execution limit releases it). Due-retry and event triggers try again
+on their normal schedules; a manual run reports `already-running`. No PDF or
+queue state is changed by a skipped run. A retained model is reported as a
+deferred refresh, with its original verification timestamp.
+
+### OENERGY excise recap policy
+
+On 2026-11-04, the reviewed OENERGY Gas rule was synchronized to the live Drive
+policy: sum distinct excise charges and regional additions once, excluding a
+recap that repeats a charge already counted. A recap remains usable when it is
+the sole printed representation of that charge. The downloaded cloud policy
+matched the reviewed update exactly. Source prompts and repair feedback carry
+the same rule; financial reconciliation and the prohibition on balancing
+residuals remain enforced.
+
+### OENERGY source component admission
+
+For decomposed gas summaries, extraction returns `oenergy_gas_summary`: the
+printed selling and network child amounts, plus the printed parent subtotal,
+for consumption and fixed quota separately. The application checks both
+parent/child sums and maps those children to consumption selling cost, fixed
+selling cost and combined network charges. It preserves VAT and final total.
+A matching invoice total cannot admit a wrong fixed/network split. For this
+detailed mapping, missing or inconsistent source evidence keeps the import
+blocked; supplied evidence is
+validated even when detailed columns are unavailable. Complete evidence can
+construct omitted configured derived cells, without writing formula columns.
+
+Tax source evidence separately records the printed excise charge, regional
+addition and combined excise/VAT subtotal. The importer maps the two charges to
+excise only when their sum plus independently extracted VAT agrees with that
+printed subtotal. A missing regional charge or duplicated recap remains blocking.
+
+A validator-requested OENERGY detailed monetary repair raises Flash-Lite thinking
+from low to medium for that bounded repair only, retaining the same economical
+model and request ceiling. Initial extraction, readiness probes, unrelated
+repairs and legacy budget-based Vertex models keep their existing settings.
