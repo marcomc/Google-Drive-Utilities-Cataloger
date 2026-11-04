@@ -2767,11 +2767,11 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "problems": ["observed problems"],',
     '  "problem_details": [{"code":"missing","fields":["exact affected field"],"message":"observed problems"}]',
     '}',
-    'For a matching approved profile with an invoice-contract block, return source_components for exactly its component IDs. Transcribe each amount independently from the printed monetary amounts, never rates, quantities, a computed residual or a repeated recap. Use source_evidence printed, or explicit_absence only when the contract permits that component absence AND absence_evidence records the complete matching profile-authorized absence statement. An absence flag alone never authorizes a zero; unreadable or ambiguous evidence remains blocking. Preserve printed parent amounts independently from their children. When the contract declares products, transcribe the printed quantity and selling rate into its exact configured headers; their product must agree with the named amount, never derive either input from a residual. Follow the profile for labels, document sections and allocation; the reference month always follows the global first-billed-month rule; profiles never authorize a change to VAT or the final total for balancing.',
+    'For a matching approved profile with an invoice-contract block, return source_components for exactly its component IDs. Transcribe each amount independently from the printed monetary amounts, never rates, quantities, a computed residual or a repeated recap. Use source_evidence printed, or explicit_absence only when the contract permits that component absence AND absence_evidence records the complete matching profile-authorized absence statement. An absence flag alone never authorizes a zero; unreadable or ambiguous evidence remains blocking. Preserve printed parent amounts independently from their children. When the contract declares products, transcribe the printed quantity and selling rate into its exact configured headers; their product must agree with the named amount, never derive either input from a residual. Follow the profile for labels, document sections and allocation; the reference period always follows the global actual-billed-period rule; profiles never authorize a change to VAT or the final total for balancing.',
     'When electricity bands are printed, preserve their separate quantities and selling rates, including a common monorate where documented by the approved profile. Do not use a tariff formula component, network-inclusive price or historical table as current selling evidence. Keep quantity units distinct from money.',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds. Do not add a problem merely to explain a deterministic mapping required by this prompt when the printed evidence is clear and reconciliation succeeds.',
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
-    'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
+    'reference_month is the internal start-month anchor, a two-character text value in the exact format mm: 01 through 12. The runtime renders the full period in the sheet reference-month field from period_start and period_end. Never emit 1, 1.0, or a numeric JSON value.',
     'When writing to Sheets, reference year is also literal text with four digits. Return the exact configured canonical supplier spelling and case. Do not uppercase the canonical supplier spelling or replace it with a filename abbreviation.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each mutually exclusive top-level printed cost row in sheet_values using its exact header. If one target header represents a combined category, sum only the mutually exclusive top-level rows in the same printed parent section that belong to that category; never combine similarly named rows from separate sections such as consumption versus fixed/power charges. Do not map subordinate lines introduced by "di cui" (or equivalent wording) into a top-level cost header when their amount is already included in an aggregate or parent row, unless a reviewed supplier-specific rule below explicitly requires allocating those subtotals; those supplier-specific mappings take precedence over this general rule. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
     'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring service charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. Only the matching approved profile may define numeric absence defaults. Never return a default without printed evidence or an explicit standalone absence diagnostic.',
@@ -2786,7 +2786,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     'Apply these frequency overrides when supplier and supply match: ' +
       JSON.stringify(automationConfig.frequency_overrides || []) + '.',
     'Set billing_cycle_kind to ordinary for a normal current billing cycle, adjustment for a conguaglio/recalculation/extraordinary cumulative period, or unknown when the period role is uncertain. Read Sintesi periodi fatturati and equivalent billed-period sections. A four-month period is quadrimestrale, not trimestrale. Never claim cadence is printed merely because dates imply it.',
-    'For every Invoice, reference year and month are the first month of the actual billed service period (period_start), including advance billing and periods spanning months or years. Do not select the maximum date, payment due date, next-invoice date, tariff validity or a historical/credited period. Distinguish current charges from reversals and historic adjustments before establishing period_start; report ambiguity rather than picking a date.',
+    'For every Invoice, extract both endpoints of the actual billed service period. The internal reference year and month anchor its start (period_start); the sheet displays the full month range, including both years at a year boundary. This applies to every supply, advance billing and delayed invoicing. Never infer a missing endpoint from cadence or history. Do not select the maximum date, payment due date, next-invoice date, tariff validity or a historical/credited period. Distinguish current charges from reversals and historic adjustments before establishing period_start; report ambiguity rather than picking a date.',
     'Use these canonical suppliers when recognized: ' +
       automationConfig.canonical_suppliers.join(', ') + '.',
     'Use one of these canonical supplies: ' +
@@ -3917,12 +3917,15 @@ function validateExtraction_(extracted, options) {
         });
     }
     const referenceMonth = Number(extracted.reference_month);
-    if (!extracted.period_start || !Number.isInteger(extracted.reference_year) ||
+    if (!extracted.period_start || !extracted.period_end ||
+      extracted.period_end < extracted.period_start ||
+      Number(extracted.period_end.slice(0, 4)) > 2200 ||
+      !Number.isInteger(extracted.reference_year) ||
       extracted.reference_year < 1900 || extracted.reference_year > 2200 ||
       !/^\d{2}$/.test(extracted.reference_month || '') ||
       referenceMonth < 1 || referenceMonth > 12) {
       return invalidExtraction_('Reference year or month is missing.',
-        'Verify the actual billed period and use its first month.', {
+        'Verify both endpoints of the actual billed period in chronological order.', {
           code: 'reference_period_missing',
           repairable: true,
           fields: ['reference_year', 'reference_month', 'period_start', 'period_end']
@@ -4972,7 +4975,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('year'),
     extracted.reference_year === null || extracted.reference_year === undefined ?
       extracted.reference_year : String(extracted.reference_year));
-  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), extracted.reference_month);
+  setValueForHeaders_(values, layout.lookup, getHeaderAliases_('month'), formatInvoiceReferenceMonth_(extracted));
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('frequency'), localizeInvoiceFrequency_(extracted.frequency));
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('consumptionCost'), extracted.cost_consumption);
   setValueForHeaders_(values, layout.lookup, getHeaderAliases_('nonConsumptionCosts'), extracted.cost_non_consumption);
@@ -5014,7 +5017,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
 
   // Google Sheets can preserve a copied numeric cell type when a template row
   // is filled. Reassert text formatting after all ordinary writes so a purely
-  // numeric identifier or `mm` reference month cannot be coerced to a number.
+  // numeric identifier or reference-period text cannot be coerced to a number.
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('supplier'),
     extracted.supplier);
@@ -5038,7 +5041,7 @@ function writeInvoiceRow_(sheet, row, layout, file, extracted) {
     extracted.reference_year);
   setTextValueForHeaders_(sheet, row, layout, formulaColumns,
     getHeaderAliases_('month'),
-    extracted.reference_month);
+    formatInvoiceReferenceMonth_(extracted));
 
   const sourceColumn = findHeaderIndex_(layout.lookup, getHeaderAliases_('sourceFile'));
   if (!sourceColumn) {
@@ -5134,7 +5137,7 @@ function setCanonicalInvoiceFieldValues_(values, lookup, extracted) {
     customerCode: extracted.customer_code,
     year: extracted.reference_year === null || extracted.reference_year === undefined ?
       extracted.reference_year : String(extracted.reference_year),
-    month: extracted.reference_month
+    month: formatInvoiceReferenceMonth_(extracted)
   };
   getCanonicalInvoiceFieldKeys_().forEach(function (key) {
     setValueForHeaders_(values, lookup, getHeaderAliases_(key), fieldValues[key]);

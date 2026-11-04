@@ -1495,11 +1495,11 @@ function testTechnicalFormulaRangesUseReservedCapacity() {
   );
   assert.equal(
     context.electricitySumFormula_(source, 'N', 2026, 4),
-    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(IFERROR(IF((VALUE(\'Electricity\'!$G$2:$G$10002)>=1)*(VALUE(\'Electricity\'!$G$2:$G$10002)<=12),VALUE(\'Electricity\'!$G$2:$G$10002),MONTH(\'Electricity\'!$A$2:$A$10002)),MONTH(\'Electricity\'!$A$2:$A$10002))=4)*\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*(IFERROR(IF((VALUE(\'Electricity\'!$G$2:$G$10002)>=1)*(VALUE(\'Electricity\'!$G$2:$G$10002)<=12),VALUE(\'Electricity\'!$G$2:$G$10002),MONTH(\'Electricity\'!$A$2:$A$10002)),MONTH(\'Electricity\'!$A$2:$A$10002))=4)*IFERROR(IF(REGEXMATCH(TO_TEXT(\'Electricity\'!$G$2:$G$10002),"–"),0,1),0)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(
     context.electricityAnnualFormula_(source, 'N', 2026),
-    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*\'Electricity\'!$N$2:$N$10002)'
+    '=SUMPRODUCT((IFERROR(IF((VALUE(\'Electricity\'!$F$2:$F$10002)>=1900)*(VALUE(\'Electricity\'!$F$2:$F$10002)<=9999),VALUE(\'Electricity\'!$F$2:$F$10002),YEAR(\'Electricity\'!$A$2:$A$10002)),YEAR(\'Electricity\'!$A$2:$A$10002))=2026)*IFERROR(IF(REGEXMATCH(TO_TEXT(\'Electricity\'!$G$2:$G$10002),"/"),0,1),0)*\'Electricity\'!$N$2:$N$10002)'
   );
   assert.equal(context.columnLetter_(90), 'CL');
   assert.deepEqual(
@@ -2269,3 +2269,29 @@ testJournalOnlyChartRangesUseDefaultsWhenDashboardIsRecreated();
 testManagedChartsSurviveReplacementFailure();
 testPreservedChartRangesExtendOnlyFromTheirManagedOrigin();
 console.log('electricity dashboard tests passed');
+
+function testRangeAggregationAndReportingContract() {
+  const c = loadDashboard();
+  for (const separator of [',', ';']) {
+    const source = { sheet: "'Supply'!", date: 'A', year: 'F', month: 'G',
+      firstDataRow: 3, lastRow: 9, separator };
+    assert.ok(c.electricitySumFormula_(source, 'N', 2026, 5).includes(
+      `REGEXMATCH(TO_TEXT('Supply'!$G$3:$G$9)${separator}"–")${separator}0${separator}1`));
+    assert.ok(c.electricityAnnualFormula_(source, 'N', 2026).includes(
+      `REGEXMATCH(TO_TEXT('Supply'!$G$3:$G$9)${separator}"/")${separator}0${separator}1`));
+  }
+  c.getElectricitySupplySheetName_ = () => 'Power';
+  let response = { warning: '', refresh: { state: 'refreshed' } };
+  c.refreshElectricityDashboardAfterInvoiceImportInternal_ = () => ({ ...response });
+  const run = (start, end, name = 'Power') => c.refreshElectricityDashboardAfterInvoiceImport_(
+    {}, {}, { getName: () => name }, { period_start: start, period_end: end });
+  assert.equal(run('2026-05-01', '2026-05-31').warning, '');
+  assert.match(run('2026-05-01', '2026-08-31').warning, /Monthly comparisons exclude multi-month/);
+  assert.match(run('2025-11-01', '2026-02-28').warning, /annual comparisons also exclude cross-year/);
+  assert.equal(run('2026-05-01', '2026-08-31', 'Water').warning, '');
+  response = { warning: 'Deferred.', refresh: { state: 'deferred' } };
+  assert.match(run('2026-05-01', '2026-08-31').warning, /^Deferred\. Monthly/);
+  response = { warning: '', refresh: { state: 'refreshed', reason: 'legacy-formula-dashboard' } };
+  assert.match(run('2026-05-01', '2026-08-31').warning, /user-owned dashboard formulas/);
+}
+testRangeAggregationAndReportingContract();

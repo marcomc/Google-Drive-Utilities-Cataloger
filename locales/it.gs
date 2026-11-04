@@ -88,7 +88,7 @@ function getItalianLocalization_() {
       '- Classificare da evidenze stampate e struttura insieme, mai dal solo nome file.',
       '- Dopo la classificazione, seguire nell ordine le sezioni documentate e riconciliare il totale.',
       '- Una struttura non corrispondente richiede revisione o proposta pendente, mai invenzione di dati.', '',
-      '- Il riferimento contabile e il primo mese del periodo effettivamente fatturato.',
+      '- Il mese di riferimento rappresenta il periodo effettivamente fatturato: mese singolo o intervallo, con entrambi gli anni quando diversi.',
       '- Il blocco JSON invoice-contract opzionale dichiara componenti, somme e campi scrivibili revisionati.', '',
       '## Manutenzione', '',
       '- Inserire un profilo rivisto in `In attesa di approvazione`; non sovrascrivere automaticamente il profilo approvato.', ''

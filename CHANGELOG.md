@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Display the actual billed service period as a single month or month range for
+  every supply, with explicit endpoint years across calendar boundaries. Require
+  both valid, ordered service dates and verify literal period text after writing.
+- Keep multi-month electricity quantities out of monthly comparisons and
+  cross-year quantities out of annual comparisons without inventing allocations;
+  explain exclusions in import reports and preserve user-owned formulas.
+
 ## [0.8.0] - 2026-11-04 - supplier-independent invoice contracts and model discovery
 
 ### Added

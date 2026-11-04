@@ -91,7 +91,7 @@ function getEnglishLocalization_() {
       '- Classify from printed evidence and structure together; do not use filename alone.',
       '- After classification, inspect the documented sections in order and reconcile totals.',
       '- A structural mismatch is evidence for review or a pending proposal, never to invent data.', '',
-      '- Reference month is the first month of the actual billed service period.',
+      '- Reference month represents the full actual billed service period; use a single month or a month range, including both years across year boundaries.',
       '- Optional reviewed invoice-contract JSON declares source components, sums and writable field bindings.', '',
       '## Maintenance', '',
       '- Put a revised profile in `Pending approval` for review; never overwrite this approved profile automatically.', ''

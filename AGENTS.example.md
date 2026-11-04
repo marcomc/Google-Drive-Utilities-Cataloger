@@ -83,13 +83,14 @@ manual review.
   descriptions, dates, and other non-quantitative values as literal text even
   when they contain only digits. Preserve leading zeroes and every printed
   character; use numbers only for quantities, money, rates, and measurements.
-- Store the reference month as the two-character text value `mm` (`01` through
-  `12`), never as an unpadded or numeric value.
-- For every supply, use the first month and year of the actual billed service
-  period as the accounting reference. Keep the complete period separately.
-  Advance billing, cross-month cycles and year boundaries follow the same rule.
-  Exclude payment dates, next-invoice dates, offer validity and historical or
-  credited periods; ambiguous current-period evidence remains blocking.
+- For every supply, represent the actual billed service period in the reference
+  month: `mm` for a single month, `mm–mm` within one year, or
+  `mm/YYYY–mm/YYYY` across years. Keep both complete service dates as evidence;
+  the internal extraction year/month remain the start-period anchor.
+  Require valid, ordered start and end dates. Never infer an endpoint from
+  cadence, issue date or earlier invoices. Advance and delayed billing follow
+  the same rule. Exclude payment dates, next-invoice dates, offer validity and
+  historical or credited periods; conflicting current-period evidence blocks.
 - Store the reference year as four-digit literal text, never as a numeric
   value. Preserve the exact configured canonical supplier spelling and case;
   do not replace it with a filename abbreviation or uppercase fallback.
