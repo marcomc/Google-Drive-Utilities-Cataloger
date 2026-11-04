@@ -5,6 +5,20 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
 
 ## Propositions
 
+- [ ] **Generate and revise invoice profiles from first-seen formats**
+  - Assessment: automatic profile proposals could reduce manual setup, but must
+    preserve the approval boundary and coexistence of invoice layouts. This is
+    explicitly deferred from 0.8.0; runtime contracts remain read-only.
+  - Actions:
+    - Detect an unknown or changed supplier/supply/layout without modifying an
+      approved profile or weakening import validation.
+    - Generate a versioned draft with provenance and a declarative contract in
+      the pending workspace, never an automatically approved profile.
+    - Replay the draft against independent invoices and report field accuracy,
+      rejected imports, latency and amortized model usage.
+    - Define owner review, approval, rollback and coexistence of format versions;
+      test that unapproved drafts remain inert.
+
 - [ ] **Import optional environmental-waste delivery details**
   - Assessment: HERA environmental-hygiene invoices may report fixed-quota
     deliveries, actual delivered volume, and recycling-center credits. Capturing

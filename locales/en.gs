@@ -71,58 +71,11 @@ function getEnglishLocalization_() {
       contractNumber: '(?:contract(?:\\s+(?:number|code))?|numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto)',
       customerCode: '(?:user\\s*id|id\\s*utente|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     }),
-    supplierFieldDefaults: Object.freeze([
-      Object.freeze({
-        supplier: 'ILIAD',
-        supply_type: 'Internet',
-        header: 'Collection charges',
-        value: 0,
-        fieldPattern: '\\b(?:collection\\s+charges?|collection\\s+fees?)\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'OENERGY',
-        supply_type: 'Gas',
-        header: 'Recalculations',
-        value: 0,
-        fieldPattern: '\\brecalculations?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Electricity',
-        header: 'Transport and meter management',
-        value: 0,
-        fieldPattern: '\\btransport\\s+and\\s+meter\\s+management\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Electricity',
-        header: 'System charges',
-        value: 0,
-        fieldPattern: '\\bsystem\\s+charges?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Electricity',
-        header: 'Recalculations',
-        value: 0,
-        fieldPattern: '\\brecalculations?\\b',
-        explicitAbsencePattern: '\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b',
-        explicitAbsenceDiagnosticPattern: ''
-      })
-    ]),
     supplierProfiles: Object.freeze({
       folder: 'Supplier Profiles', pendingFolder: 'Pending approval',
       templateFolder: '_template', profileFile: 'PROFILE.md',
       templateFile: 'PROFILE.example.md', statusKey: 'status', approvedStatus: 'approved',
-      supplierKey: 'supplier'
+      supplierKey: 'supplier', suppliesKey: 'supplies'
     }),
     supplierProfileTemplate: Object.freeze([
       '---', 'managed_by: Google Drive Utilities Cataloger', 'status: approved', 'supplier: SUPPLIER NAME',
@@ -138,6 +91,8 @@ function getEnglishLocalization_() {
       '- Classify from printed evidence and structure together; do not use filename alone.',
       '- After classification, inspect the documented sections in order and reconcile totals.',
       '- A structural mismatch is evidence for review or a pending proposal, never to invent data.', '',
+      '- Reference month is the first month of the actual billed service period.',
+      '- Optional reviewed invoice-contract JSON declares source components, sums and writable field bindings.', '',
       '## Maintenance', '',
       '- Put a revised profile in `Pending approval` for review; never overwrite this approved profile automatically.', ''
     ]),
@@ -205,13 +160,8 @@ function getEnglishLocalization_() {
       }),
       emailSubject: '[Utilities] {count} PDF(s) processed'
     }),
-    supplierReconciliation: Object.freeze({
+    invoiceReconciliation: Object.freeze({
       electricitySupply: 'Electricity',
-      energygasDetails: ['Other energy costs', 'Transport and meter management',
-        'System charges', 'Excise duties', 'TV licence fee', 'Recalculations',
-        'Non-separable network and charges'],
-      oenergyDetails: ['Fixed charge', 'Transport and charges', 'Excise duties',
-        'Recalculations'],
       quantity: 'Consumption quantity',
       rates: ['Unit cost', 'Unit cost F1', 'Unit cost F2', 'Unit cost F3']
     }),

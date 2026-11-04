@@ -87,7 +87,7 @@ mode performs no discovery. Gemini
 API and Vertex may resolve to different model IDs. Model discovery has no price metadata; the
 Flash-Lite family is the economical tier policy, not a guarantee of the lowest
 price. `gemini-flash-latest` is not used as a Vertex publisher-model alias.
-After three Flash-Lite attempts fail the OENERGY Gas detailed-cost validator,
+After three Flash-Lite attempts fail an approved invoice-contract cost check,
 automatic mode can use a separately catalogued and generation-probed stable
 Flash model for one targeted repair. The same maintenance operation refreshes
 its 24-hour cache together with Flash-Lite selections. Catalog calls
@@ -131,17 +131,26 @@ Reasoning controls follow the selected API and documented
 [Interactions](https://ai.google.dev/gemini-api/docs/thinking#controlling-thinking)
 and [Vertex](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking)
 model capabilities:
-Gemini 2.5 pins use `medium` through Interactions and a 4,096-token thinking
-budget through Vertex; `gemini-3-pro-preview` uses `high` through Interactions.
+Versioned Gemini 2 pins use `medium` through Interactions and a 4,096-token
+thinking budget through Vertex. Versioned Gemini 3 and later Flash-Lite, Flash
+and Pro families use low, medium and high thinking respectively. Family/version
+recognition uses patterns rather than a release list.
 Unclassified pins omit unsupported reasoning settings and retain the explicit
 response limit.
 
 Supplier values written to Sheets use the exact configured canonical spelling.
-The built-in `ENERGYGAS` abbreviation is accepted as `Energygas Italia` when
-that canonical supplier is configured. The owner-only
-`migrateCatalogerEnergygasCanonicalSpelling` function updates a single legacy
-canonical value and its references. It rejects a configuration containing both
-legacy and target identities, in either order, before changing any property.
+Supplier abbreviations require explicit configured aliases; the engine contains
+no supplier-specific aliases, extraction defaults or cost allocations. The
+owner-only `renameCatalogerSupplierIdentity(previous, target)` updates a single
+configured identity and its references, preserving the previous spelling as an
+alias. Ambiguous configurations are rejected before writing properties.
+Approved profile contracts carry document-specific reading rules and numeric
+absence defaults; see [Invoice contracts](INVOICE_CONTRACTS.md).
+The reference year/month always use the first month of the actual billed service
+period, for every supply, including advance billing and multi-month invoices.
+Pinned mode tries only the configured model ID on each enabled backend; it
+contains no embedded alternative model list. Automatic mode selects candidates
+from each backend's live catalog independently.
 Existing reference year/month cells can
 be normalized with the owner-only
 `migrateCatalogerReferencePeriodText` maintenance function.

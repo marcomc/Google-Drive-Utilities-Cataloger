@@ -239,10 +239,10 @@ fallback enabled at every interval.
 Each normally processed PDF uses one Gemini generation cycle. When
 deterministic validation finds repairable document-data problems, it can request
 at most two additional targeted Flash-Lite cycles. If all three cycles fail the
-OENERGY Gas detailed-cost reconciliation, automatic mode discovers and probes
-the newest stable Flash model for the active provider, then allows one final
-targeted repair. This escalation is limited to that supplier-specific mismatch;
-other invoices retain the three-cycle limit. If reconciliation still fails, the
+approved invoice-contract cost reconciliation, automatic mode can use the
+newest stable Flash model already discovered and generation-probed for that
+provider, then allows one final targeted repair. Other validation failures
+retain the three-cycle limit. PDF processing never discovers models. If reconciliation still fails, the
 PDF remains blocked. Provider transport retries, model probes, and fallback
 requests are accounted separately at their outbound boundary. Each repair
 prompt contains structured issue codes and fields, the previous schema-valid
@@ -301,7 +301,7 @@ absent detail contributes no amount to a fully configured cost partition, whose
 remaining values must still reconcile. A malformed repair cannot replace the
 last sanitized extraction.
 
-For Energygas electricity, each complete printed representation must reconcile
+For electricity with printed consumption evidence, each complete representation must reconcile
 to the selling consumption cost: aggregate quantity multiplied by its selling
 rate, or the sum of each band's quantity multiplied by its own rate. Different
 band rates are supported. When both representations are present, their total
@@ -776,7 +776,7 @@ use `refreshGeminiModelSelectionCaches()` outside document processing. Apps
 Script offers no caller-set timeout for catalog HTTP requests, so a stalled
 catalog call must not occupy a PDF-processing execution. A missing cache fails
 closed; a stale known-good cache remains available until refresh. If only the
-exceptional OENERGY Flash escalation cache is missing, ordinary extraction
+optional Flash escalation cache is missing, ordinary extraction
 still runs and only the optional fourth attempt is skipped. Catalog
 request/response events identify slow provider lookups without logging
 credentials or document content.
@@ -819,7 +819,7 @@ gcloud logging read \
 
 ### Automatic model maintenance migration
 
-For installations upgraded to 0.7.2, run `installAutomationTriggers` once from
+For installations upgraded to 0.8.0, run `installAutomationTriggers` once from
 an owner-authorized Apps Script editor execution after source deployment.
 Confirm exactly one `maintainGeminiModelSelections` trigger alongside the four
 existing handlers. The Execution API cannot install these triggers.
@@ -841,35 +841,23 @@ on their normal schedules; a manual run reports `already-running`. No PDF or
 queue state is changed by a skipped run. A retained model is reported as a
 deferred refresh, with its original verification timestamp.
 
-### OENERGY excise recap policy
+### Approved invoice contracts and reference periods
 
-On 2026-11-04, the reviewed OENERGY Gas rule was synchronized to the live Drive
-policy: sum distinct excise charges and regional additions once, excluding a
-recap that repeats a charge already counted. A recap remains usable when it is
-the sole printed representation of that charge. The downloaded cloud policy
-matched the reviewed update exactly. Source prompts and repair feedback carry
-the same rule; financial reconciliation and the prohibition on balancing
-residuals remain enforced.
+Version 0.8.0 moves supplier reading knowledge and defaults out of the engine.
+Existing approved profiles must be reviewed and migrated explicitly; deployment
+does not overwrite them or the root Drive policy. The manual format, validation
+entrypoints and migration procedure are documented in
+[Invoice contracts](INVOICE_CONTRACTS.md).
 
-### OENERGY source component admission
+Every supply uses the first month/year of the actual billed service period.
+Current charges must be distinguished from historic recaps, reversals, offer
+validity and payment dates before establishing that period. Missing or
+contradictory period evidence blocks import rather than choosing a date.
+Historical corrections require a source-backed row identity, prior-value
+snapshot, narrow reference-cell update and verified readback.
 
-For decomposed gas summaries, extraction returns `oenergy_gas_summary`: the
-printed selling and network child amounts, plus the printed parent subtotal,
-for consumption and fixed quota separately. The application checks both
-parent/child sums and maps those children to consumption selling cost, fixed
-selling cost and combined network charges. It preserves VAT and final total.
-A matching invoice total cannot admit a wrong fixed/network split. For this
-detailed mapping, missing or inconsistent source evidence keeps the import
-blocked; supplied evidence is
-validated even when detailed columns are unavailable. Complete evidence can
-construct omitted configured derived cells, without writing formula columns.
-
-Tax source evidence separately records the printed excise charge, regional
-addition and combined excise/VAT subtotal. The importer maps the two charges to
-excise only when their sum plus independently extracted VAT agrees with that
-printed subtotal. A missing regional charge or duplicated recap remains blocking.
-
-A validator-requested OENERGY detailed monetary repair raises Flash-Lite thinking
-from low to medium for that bounded repair only, retaining the same economical
-model and request ceiling. Initial extraction, readiness probes, unrelated
-repairs and legacy budget-based Vertex models keep their existing settings.
+Validator-requested detailed monetary repairs use medium thinking within
+Flash-Lite. Approved contracts check independently printed parents and children,
+exclude repeated recaps from allocations and preserve VAT and final total.
+Missing evidence or an incorrect cost role remains blocking even if the total
+balances. A contract cannot introduce formulas or change formula-backed cells.

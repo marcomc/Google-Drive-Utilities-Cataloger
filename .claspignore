@@ -21,3 +21,4 @@ config.local.json.tmp*
 docs/**
 scripts/**
 tests/**
+supplier-profiles/**

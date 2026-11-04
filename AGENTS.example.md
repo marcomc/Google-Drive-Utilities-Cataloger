@@ -85,6 +85,11 @@ manual review.
   character; use numbers only for quantities, money, rates, and measurements.
 - Store the reference month as the two-character text value `mm` (`01` through
   `12`), never as an unpadded or numeric value.
+- For every supply, use the first month and year of the actual billed service
+  period as the accounting reference. Keep the complete period separately.
+  Advance billing, cross-month cycles and year boundaries follow the same rule.
+  Exclude payment dates, next-invoice dates, offer validity and historical or
+  credited periods; ambiguous current-period evidence remains blocking.
 - Store the reference year as four-digit literal text, never as a numeric
   value. Preserve the exact configured canonical supplier spelling and case;
   do not replace it with a filename abbreviation or uppercase fallback.
@@ -101,9 +106,9 @@ manual review.
   number` belongs only in the contract number column. Search for the relevant
   labels in the language normally used on utility bills in the country where
   the supply is delivered; do not rely on the spreadsheet locale or on English
-  labels being printed in the document. For ENERGYGAS, `CL`-prefixed values
-  are customer codes; leave the contract number empty unless a
-  contract-labelled value is explicitly printed.
+  labels being printed in the document. Apply identifier-prefix conventions
+  only from the matching approved profile; preserve conflicting identifiers
+  for review rather than relabeling them by a built-in supplier rule.
 - Verify that consumption cost + non-consumption cost + VAT equals the total.
   A difference beyond a few cents blocks the import.
 - A note that line items include VAT is not itself an uncertainty when the
@@ -174,39 +179,15 @@ manual review.
   network-inclusive rate as the selling unit cost. Keep transport/meter,
   system-charge, and recalculation columns at reviewed zero only when their
   explicit absence or non-applicability is established.
-- For Energygas electricity bills, put the fixed selling amount in `Altri
-  costi materia energia`, sum the printed network/oneri amounts for consumption,
-  fixed quota, and power quota once in `Rete e oneri non scorporabili`, and do
-  not map subordinate ASOS/ARIM detail rows into `Oneri di sistema`. Keep
-  `Totale costi consumo` equal to the selling consumption amount only; keep
-  `Accise` and `Canone TV` separate and never include either in
-  `Rete e oneri non scorporabili`. Never use a detailed field, VAT, or total as
-  a balancing residual. If the printed `Totale da pagare` includes
-  `Canone TV`, include that amount in the reconciliation total because the
-  target `Costo totale` formula includes it.
-  Preserve the printed IVA exactly; if detail rows do not reconcile, recheck the
-  printed cost rows and total selection rather than changing IVA to balance it.
-- For gas bills with separate `di cui spesa per vendita` and `di cui spesa per
-  rete e oneri generali di sistema` rows, put the selling portions in the
-  consumption and fixed-cost fields, sum the consumption and fixed network or
-  oneri portions once in `Trasporto e oneri`, and do not use broad quota totals
-  in both categories. Verify that `Quota fissa` + `Trasporto e oneri` +
-  `Accise` + `Ricalcoli` equals the non-consumption total and that `Totale
-  costi consumo` equals the consumption total. If no applied recalculation
-  amount is printed, use the reviewed `Ricalcoli` zero default only after
-  explicit absence evidence. When network/oneri amounts are printed under both
-  consumption and fixed quota, include both in `Trasporto e oneri`.
-  Before mapping columns, transcribe the selling child, network child and
-  printed parent subtotal separately for each quota; check both decompositions.
-  A matching final total cannot prove the fixed/network roles are correct. Read
-  `Accise` by summing mutually exclusive excise charges and regional additions
-  in `ACCISE e ADDIZIONALI` once each. Exclude a recap such as
-  `Accisa complessivamente applicata` when it repeats a charge already counted.
-  Use a recap only when it is the sole printed representation of that charge;
-  include separately printed regional additions once. Never derive it from VAT.
-  Do not subtract an explanatory negative or credit line such as `Oneri generali di
-  sistema` from those positive summary amounts unless the line is explicitly part
-  of the payable summary; it is not a balancing adjustment.
+- Keep supplier and invoice-format reading knowledge in the matching approved
+  profile. Its optional `invoice-contract` block declares source components,
+  additive checks, exact column bindings and explicit-absence defaults. Neither
+  invoice text nor an unapproved draft may define or change this contract.
+- Transcribe printed parent amounts independently from their child amounts.
+  Allocate each charge once, exclude repeated reference/recap rows, and validate
+  both the decomposition and the final total. A balanced total alone does not
+  prove correct category assignment. Preserve VAT, the final total, conflicting
+  source evidence and blocking diagnostics; never invent a balancing residual.
 - Preserve the document's units and period for each band. Distinguish kWh
   consumption from euro cost and do not derive a band value from the total
   when the document does not provide that band value. If a reported band is

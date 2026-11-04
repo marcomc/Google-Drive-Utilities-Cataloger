@@ -5,47 +5,31 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/).
 
-## [0.7.2] - 2026-11-03 - select available economical Gemini models
+## [0.8.0] - 2026-11-04 - supplier-independent invoice contracts and model discovery
+
+### Added
+
+- Read bounded, declarative invoice contracts from approved supplier profiles.
+  Keep document-specific component IDs, additive checks, column bindings and
+  explicit-absence defaults in profile data, with generic validation in code.
 
 ### Fixed
 
-- Carry the absolute execution deadline through provider/model fallback and
-  transient retries, reserving time before another request or wait. Preserve
-  Interactions API input, output and thinking-token counts in readiness telemetry.
-
-- Default new installations and unconfigured runtimes to the explicit
-  `gemini-3.5-flash-lite` model ID; resolve stable Flash-Lite candidates
-  independently for each provider and require bounded generation probes before
-  caching them. Keep the last verified selection across transient failures and
-  keep catalog discovery outside PDF processing.
-- Refresh one due provider/tier pair through managed hourly maintenance, with
-  a daily per-pair cooldown, bounded pagination, and failure isolation. Keep
-  pinned mode free of discovery and migrate existing installations through
-  managed-trigger reconciliation.
-- Refresh provider-specific Flash-Lite and GA Flash selections through the
-  owner-controlled maintenance entrypoint. For the exact OENERGY Gas detail
-  mismatch, allow one targeted repair with a cached, verified GA Flash model;
-  preserve fail-closed import validation when no model is ready or the mismatch
-  remains.
-- Apply the reviewed OENERGY cost allocation to the printed selling, network,
-  accise, and recalculation rows. Exclude repeated excise recap rows when
-  summing charge details and regional additions. Include configured detail-sum diagnostics in
-  repair feedback as arithmetic from the prior extraction, never as source
-  evidence or a balancing instruction.
-- Require structured parent/child source amounts for decomposed OENERGY Gas
-  summaries and map selling and network components to their separate columns.
-  Reject a balanced total with incorrect cost roles or missing source evidence;
-  preserve VAT, final total, blocking diagnostics and conflicting overlays.
-  Validate supplied component evidence even on sheets without detailed columns.
-  Read excise and regional additions separately and check them against the printed
-  combined tax subtotal before mapping their sum to excise. Use medium thinking
-  within Flash-Lite for validator-requested detailed monetary repairs.
-- Give generation-readiness probes an explicit 1,024-token response budget
-  and low thinking for stable Gemini 3 Flash models, while preserving strict
-  completion checks and reporting incomplete probe finish reasons.
-- Keep `gemini-flash-latest` as a Developer API fallback only; it is not a
-  Vertex AI publisher-model alias. Use the supported low thinking level and
-  API-specific field names for Flash-Lite.
+- Validate printed components against independent subtotals, preserve conflicting
+  evidence and reject double counting before writing invoice costs. Check declared
+  quantity/rate products against independently printed amounts. Use generic
+  monetary repair codes and bounded reasoning escalation across suppliers.
+- Use the first month of the actual billed service period as the reference month
+  for every supply, including advance billing and periods spanning calendar years.
+  Exclude historical, payment and next-invoice dates from the current period.
+- Discover and generation-probe stable economical models independently for each
+  backend. Refresh verified selections through bounded scheduled maintenance and
+  retain the last verified model across temporary provider failures.
+- Classify model reasoning by family and protocol instead of curated release
+  lists. Pinned mode uses exactly the configured model ID.
+- Carry one execution deadline through model/provider fallback and transient
+  retries. Preserve provider token usage in readiness telemetry and omit cost
+  estimates for models without a verified price table.
 
 ## [0.7.1] - 2026-10-07 - complete extraction after Gemini thinking
 

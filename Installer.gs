@@ -789,6 +789,11 @@ function addConfiguredGeminiFailure_(result, stage, error) {
   return result;
 }
 
+function usesLevelControlledFlashProbe_(model) {
+  const family = /^gemini-(\d+)(?:\.\d+)*-flash(?:-lite)?$/.exec(String(model || ''));
+  return Boolean(family && Number(family[1]) >= 3);
+}
+
 function validateConfiguredGeminiDeveloperGeneration_(options) {
   const probePdf = buildGeminiModelProbePdfData_();
   const responseSchema = {
@@ -800,7 +805,7 @@ function validateConfiguredGeminiDeveloperGeneration_(options) {
     max_output_tokens: CONFIG.GEMINI_MODEL_PROBE_MAX_OUTPUT_TOKENS
   },
     getGeminiReasoningConfig_(options.geminiModel, 'gemini_api'));
-  if (/^gemini-3(?:\.\d+)*-flash(?:-lite)?$/.test(options.geminiModel)) {
+  if (usesLevelControlledFlashProbe_(options.geminiModel)) {
     generationConfig.thinking_level = 'low';
   }
   const response = UrlFetchApp.fetch(
@@ -855,7 +860,7 @@ function validateConfiguredVertexGeneration_(options) {
         generationConfig.thinkingConfig.thinkingBudget, 128);
     }
   }
-  if (/^gemini-3(?:\.\d+)*-flash(?:-lite)?$/.test(options.geminiModel)) {
+  if (usesLevelControlledFlashProbe_(options.geminiModel)) {
     generationConfig.thinkingConfig = { thinkingLevel: 'LOW' };
   }
   const response = UrlFetchApp.fetch(endpoint, {

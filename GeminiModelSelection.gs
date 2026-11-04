@@ -51,16 +51,7 @@ function getGeminiModelForBackend_(backend) {
 }
 
 function getGeminiDeveloperModelCandidatesPinned_() {
-  const candidates = [];
-  function add(model) {
-    const normalized = String(model || '').trim();
-    if (normalized && candidates.indexOf(normalized) < 0) {
-      candidates.push(normalized);
-    }
-  }
-  add(getGeminiModel_());
-  CONFIG.GEMINI_DEVELOPER_FALLBACK_MODELS.forEach(add);
-  return candidates;
+  return [getGeminiModel_()];
 }
 
 function getGeminiModelCandidatesForBackend_(backend, forceRefresh, deadlineAt) {
@@ -357,7 +348,7 @@ function isStableFlashLiteModelId_(modelId) {
 
 function isStableGeminiModelIdForTier_(modelId, tier) {
   return tier === 'flash-lite' ? isStableFlashLiteModelId_(modelId) :
-    tier === 'flash' && /^gemini-[0-9]+(?:\.[0-9]+)?-flash$/.test(
+    tier === 'flash' && /^gemini-[0-9]+(?:\.[0-9]+)*-flash$/.test(
       String(modelId || ''));
 }
 

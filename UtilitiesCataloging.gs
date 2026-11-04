@@ -789,6 +789,10 @@ function loadDriveAgentsPolicy_(rootFolder) {
  */
 function loadTrustedExtractionPolicy_(rootFolder) {
   const rootPolicy = loadDriveAgentsPolicy_(rootFolder);
+  if (typeof rootFolder.getFoldersByName === 'function' &&
+    !loadSupplierProfileWorkspaceStateForExtraction_()) {
+    throw new Error('Approved profile workspace is not configured; select its existing folder identities before processing.');
+  }
   const profiles = loadApprovedSupplierProfiles_(rootFolder);
   return profiles ? rootPolicy + '\n\n' + profiles : rootPolicy;
 }
@@ -805,6 +809,10 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     return '';
   }
 
+  return readApprovedProfilesFromRoot_(profileRoot, names);
+}
+
+function readApprovedProfilesFromRoot_(profileRoot, names) {
   const profiles = [];
   const profileSupplierIdentities = Object.create(null);
   let totalBytes = 0;
@@ -838,9 +846,13 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     if (!metadata) {
       throw new Error('Approved supplier profile is malformed or not explicitly approved.');
     }
-    const supplierIdentity = normalizeCellText_(metadata[names.supplierKey]);
-    if (profileSupplierIdentities[supplierIdentity]) {
-      throw new Error('More than one approved supplier profile exists for the same supplier.');
+    const contract = parseInvoiceContract_(text);
+    const scopes = getApprovedProfileScopes_(metadata, names, contract);
+    const supplierIdentity = normalizeCellText_(normalizeSupplier_(metadata[names.supplierKey]));
+    const priorScopes = profileSupplierIdentities[supplierIdentity] || [];
+    if (priorScopes.length && (priorScopes.indexOf('*') >= 0 || scopes.indexOf('*') >= 0 ||
+      scopes.some(function (scope) { return priorScopes.indexOf(scope) >= 0; }))) {
+      throw new Error('More than one approved supplier profile exists for the same supplier and supply.');
     }
     const renderedProfile = '--- BEGIN APPROVED SUPPLIER PROFILE: ' +
       supplierFolder.getName() + ' ---\n' + text +
@@ -852,7 +864,7 @@ function loadApprovedSupplierProfiles_(rootFolder) {
     if (totalBytes > CONFIG.MAX_SUPPLIER_PROFILE_CONTEXT_BYTES) {
       throw new Error('Combined approved supplier profiles exceed the context limit.');
     }
-    profileSupplierIdentities[supplierIdentity] = true;
+    profileSupplierIdentities[supplierIdentity] = priorScopes.concat(scopes);
     profiles.push(renderedProfile);
   }
   return profiles.join('\n\n');
@@ -1329,7 +1341,7 @@ function extractUtilityDataWithRepair_(file, driveAgentsPolicy, deadlineAt,
     ));
     if (!validation.valid && validation.repairable !== false && !escalationModel &&
       attempt === CONFIG.EXTRACTION_MAX_AI_CALLS &&
-      validation.code === 'oenergy_gas_detail_reconciliation_mismatch' &&
+      validation.code === 'invoice_cost_reconciliation_mismatch' &&
       isAutomaticGeminiModelSelectionEnabled_() &&
       Date.now() + CONFIG.EXTRACTION_REPAIR_MIN_REMAINING_MS < repairDeadlineAt) {
       try {
@@ -1448,19 +1460,11 @@ function validateExtractedUtilityDataForImport_(extracted, options) {
   Object.defineProperty(extracted, 'monetary_validated_', {
     value: false, enumerable: false, configurable: true
   });
-  const detailedCostValidation = withExtractionValidationStage_(
-    validateEnergygasLuceDetailedReconciliation_(extracted),
-    'energygas-detail-reconciliation'
-  );
-  if (!detailedCostValidation.valid) {
-    return detailedCostValidation;
-  }
-  const gasCostValidation = withExtractionValidationStage_(
-    validateOenergyGasDetailedReconciliation_(extracted),
-    'oenergy-gas-detail-reconciliation'
-  );
-  if (!gasCostValidation.valid) {
-    return gasCostValidation;
+  const monetaryEvidence = validateInvoiceCostEvidence_(extracted);
+  if (!monetaryEvidence.valid) {
+    return withExtractionValidationStage_(monetaryEvidence,
+      monetaryEvidence.code === 'invoice_consumption_reconciliation_mismatch' ?
+        'consumption-reconciliation' : 'invoice-cost-reconciliation');
   }
   let validation = withExtractionValidationStage_(
     validateExtraction_(extracted, { allowAccessory: true }), 'extraction'
@@ -1578,7 +1582,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext,
   extracted.original_file_name = file.getName();
   let normalized;
   try {
-    normalized = normalizeExtraction_(extracted, headersBySupply);
+    normalized = normalizeExtraction_(extracted, headersBySupply, driveAgentsPolicy);
   } catch (error) {
     if (!isModelExtractionNormalizationError_(error)) {
       throw error;
@@ -1601,7 +1605,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext,
     enumerable: false
   });
   inferInvoiceFrequency_(normalized, deadlineAt);
-  applySupplierFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
+  applyApprovedProfileFieldDefaults_(normalized, headersBySupply[normalized.supply_type] || []);
   try {
     normalized.sheet_values = normalizeSheetValues_(normalized.sheet_values);
   } catch (error) {
@@ -1614,7 +1618,7 @@ function extractUtilityData_(file, driveAgentsPolicy, repairContext,
     marked.extractionSnapshot = buildExtractionRepairSnapshot_(normalized);
     throw marked;
   }
-  mapOenergyGasSourceComponents_(normalized);
+  evaluateInvoiceContract_(normalized, true);
   normalized.problem_details = (normalized.problem_details || []).filter(function (issue) {
     return normalized.problems.indexOf(issue.message) >= 0;
   });
@@ -1637,7 +1641,7 @@ function preserveUnimplicatedRepairFields_(extracted, repairContext) {
         !(issue.fields || []).length ||
         issue.fields.some(function (field) {
           return monetaryFields.indexOf(field) >= 0 ||
-            ['electricity_consumption_quantity', 'electricity_selling_unit_rate', 'oenergy_gas_summary', 'oenergy_gas_tax_summary'].indexOf(field) >= 0 ||
+            ['electricity_consumption_quantity', 'electricity_selling_unit_rate', 'source_components'].indexOf(field) >= 0 ||
             isNumericInvoiceHeader_(field);
         });
     })) {
@@ -1646,7 +1650,7 @@ function preserveUnimplicatedRepairFields_(extracted, repairContext) {
   monetaryFields.forEach(function (field) {
     extracted[field] = repairContext.previousExtraction[field];
   });
-  ['oenergy_gas_summary', 'oenergy_gas_tax_summary'].forEach(function (field) {
+  ['source_components'].forEach(function (field) {
     if (repairContext.previousExtraction[field]) {
       extracted[field] = repairContext.previousExtraction[field];
     }
@@ -1864,7 +1868,7 @@ function getGeminiExtractionReasoningConfig_(model, backend, repairContext) {
   const config = getGeminiReasoningConfig_(model, backend);
   const issues = repairContext && repairContext.feedback && repairContext.feedback.issues || [];
   if (!isGeminiFlashLiteModel_(model) || !issues.some(function (issue) {
-    return issue.code === 'oenergy_gas_detail_reconciliation_mismatch';
+    return issue.code === 'invoice_cost_reconciliation_mismatch';
   })) {
     return config;
   }
@@ -2285,27 +2289,13 @@ function buildExtractionResponseSchema_() {
       period_start: nullableString,
       period_end: nullableString,
       consumption_description: nullableString,
-      oenergy_gas_summary: {
-        type: ['object', 'null'], additionalProperties: false,
-        properties: {
-          selling_consumption: { type: 'number' },
-          network_consumption: { type: 'number' },
-          consumption_subtotal: { type: 'number' },
-          selling_fixed: { type: 'number' },
-          network_fixed: { type: 'number' },
-          fixed_subtotal: { type: 'number' }
-        },
-        required: ['selling_consumption', 'network_consumption', 'consumption_subtotal',
-          'selling_fixed', 'network_fixed', 'fixed_subtotal']
-      },
-      oenergy_gas_tax_summary: {
-        type: ['object', 'null'], additionalProperties: false,
-        properties: {
-          excise_charge: { type: 'number' },
-          regional_addition: { type: 'number' },
-          taxes_subtotal: { type: 'number' }
-        },
-        required: ['excise_charge', 'regional_addition', 'taxes_subtotal']
+      source_components: {
+        type: ['array', 'null'],
+        items: { type: 'object', additionalProperties: false,
+          properties: { id: { type: 'string' }, amount: { type: 'number' },
+            source_evidence: { type: 'string', enum: ['printed', 'explicit_absence'] },
+            absence_evidence: { type: ['string', 'null'] } },
+          required: ['id', 'amount', 'source_evidence'] }
       },
       electricity_consumption_quantity: nullableNumber,
       electricity_selling_unit_rate: nullableNumber,
@@ -2766,8 +2756,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "period_start": "YYYY-MM-DD or null",',
     '  "period_end": "YYYY-MM-DD or null",',
     '  "consumption_description": "concise text or null",',
-    '  "oenergy_gas_summary": null,',
-    '  "oenergy_gas_tax_summary": null,',
+    '  "source_components": [],',
     '  "electricity_consumption_quantity": null,',
     '  "electricity_selling_unit_rate": null,',
     '  "cost_consumption": 0.00,',
@@ -2778,26 +2767,18 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     '  "problems": ["observed problems"],',
     '  "problem_details": [{"code":"missing","fields":["exact affected field"],"message":"observed problems"}]',
     '}',
+    'For a matching approved profile with an invoice-contract block, return source_components for exactly its component IDs. Transcribe each amount independently from the printed monetary amounts, never rates, quantities, a computed residual or a repeated recap. Use source_evidence printed, or explicit_absence only when the contract permits that component absence AND absence_evidence records the complete matching profile-authorized absence statement. An absence flag alone never authorizes a zero; unreadable or ambiguous evidence remains blocking. Preserve printed parent amounts independently from their children. When the contract declares products, transcribe the printed quantity and selling rate into its exact configured headers; their product must agree with the named amount, never derive either input from a residual. Follow the profile for labels, document sections and allocation; the reference month always follows the global first-billed-month rule; profiles never authorize a change to VAT or the final total for balancing.',
+    'When electricity bands are printed, preserve their separate quantities and selling rates, including a common monorate where documented by the approved profile. Do not use a tariff formula component, network-inclusive price or historical table as current selling evidence. Keep quantity units distinct from money.',
     'For an Invoice, consumption cost + non-consumption cost + VAT must equal the total. Do not hide discrepancies. Do not add a problem merely to note that line items include VAT when the invoice-level VAT and total are explicit and the reconciliation succeeds. Do not add a problem merely to explain a deterministic mapping required by this prompt when the printed evidence is clear and reconciliation succeeds.',
     'Every value that identifies, describes, classifies, dates, or names something is text, even when printed with digits only. This includes invoice/contract/report identifiers, customer/account/user codes, POD/PDR and similar supply codes, addresses, periods, tariff names, and any non-quantitative sheet_values. Preserve every character and leading zero; emit a JSON string, never a JSON number. Use JSON numbers only for quantities, money, rates, measurements, and reference year.',
     'reference_month is a two-character text value in the exact format mm: 01 through 12. Never emit 1, 1.0, or a numeric JSON value.',
     'When writing to Sheets, reference year is also literal text with four digits. Return the exact configured canonical supplier spelling and case. Do not uppercase the canonical supplier spelling or replace it with a filename abbreviation.',
     'Treat cost_consumption, cost_non_consumption, vat, and total as reconciliation fields. When the target sheet exposes non-formula detailed cost headers, return each mutually exclusive top-level printed cost row in sheet_values using its exact header. If one target header represents a combined category, sum only the mutually exclusive top-level rows in the same printed parent section that belong to that category; never combine similarly named rows from separate sections such as consumption versus fixed/power charges. Do not map subordinate lines introduced by "di cui" (or equivalent wording) into a top-level cost header when their amount is already included in an aggregate or parent row, unless a reviewed supplier-specific rule below explicitly requires allocating those subtotals; those supplier-specific mappings take precedence over this general rule. A detailed sheet_values cost overrides the broad reconciliation field for that spreadsheet cell; never return a value for a formula column.',
-    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring Iliad Internet charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. The localized supplier field defaults below are the only reviewed exceptions: for an ILIAD Internet invoice, if Spese d\'incasso/Collection charges is not printed, omit that header and add a concise standalone absence problem. The runtime will apply its reviewed zero default only from that absence evidence. If a numeric zero is visibly printed, return the exact header with numeric value 0 and source_evidence "printed"; if a nonzero amount is printed, return the printed amount instead. Never return the zero default without either printed evidence or an explicit absence problem.',
-    'Apply these reviewed supplier-specific zero defaults after inspecting the document: ' +
-      JSON.stringify(localization.supplierFieldDefaults || []) + '.',
+    'For every non-formula header exposed by the matching target sheet, inspect the corresponding printed invoice section and return the value in sheet_values using the exact header, not only cost fields. This includes unit of measure, consumption quantity, unit cost, frequency, discounts, charges, and recurring-service quantities. For recurring service charges, if the invoice visibly shows the recurring unit (for example month), quantity (for example 1), and unit price, return all three exact sheet headers even when the invoice total is also explicit. If a configured secondary field is explicitly absent or not applicable, add one concise standalone diagnostic naming that exact header; the runtime may accept it only after core monetary reconciliation succeeds. Unreadable, ambiguous, inconsistent, or mismatched evidence remains blocking. Never guess a required identity, reconciliation value, reference date, or a reported electricity F1/F2/F3 consumption value. Prior imported invoices may be used only as corroborating evidence for stable classifications or derived cadence; never copy a transaction-specific value from another invoice into this one. Transaction-specific values include the current identifier, issue date, billed period, quantities, unit prices, costs, VAT, total, and line items. Only the matching approved profile may define numeric absence defaults. Never return a default without printed evidence or an explicit standalone absence diagnostic.',
     'When the invoice prints a final payable total, that printed total is authoritative. Return it exactly together with the printed VAT; never recalculate a different total because of an assumed tax treatment for Canone TV or any other line. If detailed rows do not reconcile to the printed final total, report the conflict and re-examine the printed rows rather than changing VAT, a detail, or the total.',
-    'For Energygas Luce, after assigning those details, verify the arithmetic directly: Altri costi materia energia + Trasporto e gestione contatore + Oneri di sistema + Accise + Canone TV + Ricalcoli + Rete e oneri non scorporabili must equal cost_non_consumption within rounding. If it does not, correct the printed row assignments; never make the values agree by changing VAT, total, or another detail.',
-    'For OENERGY Gas, transcribe oenergy_gas_tax_summary from the entire ACCISE e ADDIZIONALI table: excise_charge is the actual excise charge, regional_addition is the separate regional addizionale charge, and taxes_subtotal is the independently printed amount on the Accise e IVA row in SCONTRINO DELL\'ENERGIA. Copy that single amount directly; never calculate this source subtotal by summing table rows or adding excise again. Exclude repeated recap rows such as Accisa complessivamente applicata. These are monetary amounts, not rates or taxable quantities. Return all three native numbers, or null plus a diagnostic when evidence is missing or ambiguous; never omit an addizionale or infer a residual. The application combines the two tax charges only when their sum plus independently extracted VAT matches the printed taxes_subtotal.',
-    'For OENERGY Gas, transcribe oenergy_gas_summary independently of sheet column names. Read monetary amounts from the Importi column of SCONTRINO DELL\'ENERGIA, never the rates in Prezzo Medio: selling_consumption and network_consumption are the two printed di cui child amounts under Quota per consumi; consumption_subtotal is their printed parent amount; selling_fixed and network_fixed are the printed di cui child amounts under Quota fissa; fixed_subtotal is their printed parent amount. Return all six as native numbers. Never put the gross parent into a selling child or put an omitted network child to zero. If a required amount is unprinted or unreadable, return null for the entire summary and report the missing or ambiguous evidence. The application maps these source components to consumption cost, fixed selling cost and combined network charges; sheet column labels are not source row roles.',
-    'OENERGY Gas is an explicit exception to the general "di cui" rule above: allocate its printed "di cui spesa per vendita" and "di cui spesa per rete e oneri" amounts as specified here, even though these are subordinate rows. For OENERGY Gas, Totale costi consumo and cost_consumption contain only the printed selling-consumption amount; Quota fissa contains only the printed fixed selling amount; Trasporto e oneri sums the network/oneri amounts printed under both consumption and fixed quota exactly once; Accise sums each mutually exclusive excise charge and regional addition once; exclude recap rows such as Accisa complessivamente applicata when they repeat an already counted charge. Do not copy the network-inclusive consumption or fixed-quota subtotal into a selling-only field. Verify Quota fissa + Trasporto e oneri + Accise + Ricalcoli equals cost_non_consumption, and verify Totale costi consumo equals cost_consumption before checking the invoice total. Never balance by changing VAT or total.',
-    'On OENERGY Gas invoices, the network/oneri evidence can contain one amount under consumption and another under the fixed quota. Both printed amounts belong in Trasporto e oneri; a result containing only the fixed-quota network amount is incomplete. When the target has one Accise column, sum the mutually exclusive excise charge rows and regional additions in the ACCISE e ADDIZIONALI section once each. Do not add a recap such as Accisa complessivamente applicata to the charges it already summarizes. Use a recap only when it is the sole printed representation of that charge; include separately printed regional additions once. Never derive Accise from VAT or another total.',
-    'On OENERGY Gas invoices, do not subtract an explanatory negative or credit line such as Oneri generali di sistema from the positive network/oneri summary amounts. Use the positive payable amounts printed in the consumption and fixed-quota summaries once each; an explanatory tax/detail line is not a replacement or balancing adjustment unless it is explicitly part of the payable summary.',
-    'For Gas invoices with separate "di cui spesa per vendita" and "di cui spesa per rete e oneri generali di sistema" rows, put the selling portion in Costo unitario/Totale costi consumo and Quota fissa, and sum the printed network/oneri summary amounts for consumption and fixed portions once in Trasporto e oneri. Do not use the broad quota totals in both categories. If no applied ricalcolo amount is printed, omit Ricalcoli and report one concise standalone absence problem such as "Ricalcoli non presente nel documento." so the reviewed zero default can be applied; do not describe the default as printed evidence.',
-    'For electricity invoices, inspect every consumption and cost table for separate F1, F2, and F3 values. If the document reports those bands, return each band consumption and each band cost in the matching existing sheet_values headers, even for a monoraria contract where the unit price is identical. For a monoraria bill with one printed selling rate, use the rate printed in the summary row "di cui spesa per vendita energia elettrica" (or its localized equivalent) for Costo unitario and repeat that common selling rate in Costo unitario F1/F2/F3 when F1/F2/F3 quantities are reported. Do not use PREZZO FISSO, DISPACCIAMENTO, a formula component, or the network-inclusive summary rate as the selling unit cost. For the Energygas Luce sheet, follow this exact mutually exclusive mapping: Totale costi consumo and cost_consumption are the printed selling consumption amount only; Altri costi materia energia is the printed fixed selling amount only; Rete e oneri non scorporabili is the single sum of the printed network/oneri consumption amount, fixed network amount, and power-quota network amount; Oneri di sistema receives zero when ASOS/ARIM are subordinate detail rows rather than a separate top-level charge; do not map subordinate ASOS/ARIM detail rows into Oneri di sistema; Trasporto e gestione contatore and Ricalcoli receive their reviewed zero defaults when absent; Accise and Canone TV remain separate and are never included in Rete e oneri non scorporabili. Do not move the fixed selling amount into Totale costi consumo, do not put accise or Canone TV into Rete e oneri non scorporabili, and do not use a balancing or residual value for any detailed field, broad cost, VAT, or total. Every detailed value must be a printed amount or a reviewed zero default; never solve a mismatch by changing another field. Recheck every printed component, including the power quota, before calculating the network/oneri sum. Preserve the printed IVA exactly; never alter IVA to force the reconciliation. If a detail sum conflicts with the printed IVA and total, re-examine the printed cost rows and total selection rather than inventing a balancing VAT value. Use the printed total payable consistently with its Canone TV detail: when Totale da pagare includes the printed Canone TV, include that amount in the reconciliation total and non-consumption total because the target Costo totale formula includes Canone TV. Never collapse reported F1/F2/F3 into F0 or a total-only field, and never invent or distribute a band value that the document does not report. Preserve kWh versus EUR and add a problem for an unreadable or ambiguous band.',
     'For electricity invoices with a printed aggregate consumption quantity and selling unit rate, return both electricity_consumption_quantity and electricity_selling_unit_rate as native JSON numbers, independently of the available sheet headers. These are validation evidence only: do not add unconfigured sheet_values headers. Never calculate either field from a cost or invent an average rate. If the aggregate pair is not printed, omit both fields or return null. If no F1/F2/F3 quantities or rates are reported, leave their cells absent or null and add a separate standalone absence diagnostic naming each configured band header exactly. Do not omit a partially reported or ambiguous band representation; report its uncertainty. Every complete aggregate and band representation must independently reconcile with the printed selling consumption cost; for different band rates use the sum of each band quantity times its own rate.',
     'Electricity invoices commonly distribute evidence across several tables with supplier-specific titles. Infer each table role from its headings and units, not its title: a bill summary or energy receipt supports costs and totals; readings/consumption tables support F1/F2/F3 kWh; historical tables corroborate but never replace current-invoice values; tax/VAT tables support taxes. Energy-mix, offer, marketing, and explanatory tables are not required for import.',
-    'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. For ENERGYGAS, a CL-prefixed customer code belongs only in customer_code; if no contract-labelled value is printed, contract_number must be null.',
+    'For an Invoice, extract contract_number and customer_code independently from their printed labels. ID UTENTE (and localized user-ID equivalents) is a customer code and belongs in customer_code. Never substitute one for the other. Identify the localized equivalents of customer code, customer/account code, user ID, contract code, and contract number in the language normally used on utility bills in the country where the supply is delivered; do not assume the spreadsheet locale or English is the document language. A value next to the localized customer-code or user-ID label belongs only in customer_code, never contract_number. A value next to a localized contract-code or contract-number label belongs in contract_number. For invoice ownership, one of contract_number or customer_code is sufficient; do not add a problem merely because the other is absent. Add an identifier problem only when neither can be established. Follow identifier-prefix guidance only from the matching approved profile; never substitute an unlabelled identifier for a contract number.',
     'For an Invoice, extract the printed account holder and service address independently of supplier, contract, and customer identifiers. The account holder and service address identify the configured supply across supplier changes. Extract service_street without the civic number, service_civic_number, service_city, and service_postal_code when printed. Use the service/supply address, not a separate billing or mailing address. Preserve address_evidence as the complete printed service-address text. If any required holder, street, civic number, or city component is absent or ambiguous, return null for that component and add a concise problem.',
     'For an Invoice, set frequency_source_evidence to "printed" only when the cadence is explicitly printed. Otherwise return both frequency and frequency_source_evidence as null; do not add a problem merely because cadence is not printed and do not infer it yourself. The runtime independently infers monthly, bimonthly, quarterly, or four-monthly from a complete ordinary billed period or verified independent earlier invoices for the same supplier and supply, and requests a guided re-read if evidence is insufficient or conflicting; unresolved cadence alone permits import with a review warning after essential validation. Extract period_start and period_end from the current billed consumption period, corroborated by the invoice reference period, not an offer-validity, cumulative spending, or historical period. Report unreadable or conflicting printed period evidence. Never copy a transaction-specific value from earlier invoices.',
     'For non-invoice documents, classify a printed address only with these configured rules: ' +
@@ -2805,7 +2786,7 @@ function buildExtractionPrompt_(sheetHeadersBySupply, driveAgentsPolicy,
     'Apply these frequency overrides when supplier and supply match: ' +
       JSON.stringify(automationConfig.frequency_overrides || []) + '.',
     'Set billing_cycle_kind to ordinary for a normal current billing cycle, adjustment for a conguaglio/recalculation/extraordinary cumulative period, or unknown when the period role is uncertain. Read Sintesi periodi fatturati and equivalent billed-period sections. A four-month period is quadrimestrale, not trimestrale. Never claim cadence is printed merely because dates imply it.',
-    'The reference year and month are the end of the last billed period.',
+    'For every Invoice, reference year and month are the first month of the actual billed service period (period_start), including advance billing and periods spanning months or years. Do not select the maximum date, payment due date, next-invoice date, tariff validity or a historical/credited period. Distinguish current charges from reversals and historic adjustments before establishing period_start; report ambiguity rather than picking a date.',
     'Use these canonical suppliers when recognized: ' +
       automationConfig.canonical_suppliers.join(', ') + '.',
     'Use one of these canonical supplies: ' +
@@ -2929,17 +2910,7 @@ function validateRawExtractionShape_(extracted) {
       }
     }
   );
-  ['oenergy_gas_summary', 'oenergy_gas_tax_summary'].forEach(function (field) {
-    if (extracted[field] === undefined || extracted[field] === null) { return; }
-    const fields = buildExtractionResponseSchema_().properties[field].required;
-    const evidence = extracted[field];
-    if (typeof evidence !== 'object' || Array.isArray(evidence) ||
-      Object.keys(evidence).length !== fields.length || fields.some(function (key) {
-        return typeof evidence[key] !== 'number' || !Number.isFinite(evidence[key]);
-      })) {
-      throw new Error('Gemini extraction field has an invalid type: ' + field);
-    }
-  });
+  validateSourceComponentsShape_(extracted);
   ['electricity_consumption_quantity', 'electricity_selling_unit_rate'].forEach(function (field) {
     const value = extracted[field];
     if (value !== null && value !== undefined &&
@@ -2987,7 +2958,7 @@ function validateRawExtractionShape_(extracted) {
   }
 }
 
-function normalizeExtraction_(extracted, headersBySupply) {
+function normalizeExtraction_(extracted, headersBySupply, driveAgentsPolicy) {
   const normalized = extracted || {};
   // These flags are runtime conclusions, never model-provided evidence.
   ['frequency_override_authoritative_', 'frequency_inferred_',
@@ -3008,16 +2979,6 @@ function normalizeExtraction_(extracted, headersBySupply) {
   normalized.identifier = String(normalized.identifier || '').trim();
   normalized.contract_number = String(normalized.contract_number || '').trim();
   normalized.customer_code = String(normalized.customer_code || '').trim();
-  if (/^ENERGYGAS(?: ITALIA)?$/i.test(normalized.supplier || '') &&
-    /^CL/i.test(normalized.contract_number)) {
-    // Energygas uses CL... values for the customer code. Do not let a model
-    // label guess populate the contract column. Retain an independently
-    // extracted customer code, or use the CL value only when it is absent.
-    if (!normalized.customer_code) {
-      normalized.customer_code = normalized.contract_number;
-    }
-    normalized.contract_number = '';
-  }
   normalized.reference_year = Number(normalized.reference_year || 0) || null;
   normalized.reference_month = normalized.reference_month ? String(normalized.reference_month).padStart(2, '0') : null;
   normalized.period_start = normalizeIsoDate_(normalized.period_start);
@@ -3033,6 +2994,8 @@ function normalizeExtraction_(extracted, headersBySupply) {
     normalized.problems.slice() : [];
   normalized.frequency_source_evidence =
     normalized.frequency_source_evidence === 'printed' ? 'printed' : null;
+  bindInvoiceContract_(normalized, driveAgentsPolicy);
+  applyInvoiceReferencePeriod_(normalized);
   normalizeInvoiceProblemFields_(normalized,
     (headersBySupply || {})[normalized.supply_type] || []);
   normalizeExtractedInvoiceFrequency_(normalized);
@@ -3584,31 +3547,36 @@ function validateServiceIdentityForInvoice_(extracted) {
   return validateServiceIdentity_(extracted, configured);
 }
 
-function getApplicableSupplierFieldDefaults_(extracted) {
+function getApprovedProfileFieldDefaults_(extracted) {
   if (!extracted || extracted.document_type !== 'Invoice') {
     return [];
   }
-  return (getLocalization_().supplierFieldDefaults || []).filter(function (rule) {
-    return rule && rule.header &&
-      normalizeSupplier_(rule.supplier) === normalizeSupplier_(extracted.supplier) &&
-      normalizeSupplyType_(rule.supply_type) === normalizeSupplyType_(extracted.supply_type);
-  });
+  const contract = getInvoiceContract_(extracted);
+  return contract ? contract.defaults.map(function (rule) {
+    return Object.assign({}, rule, {
+      fieldPattern: [rule.header].concat(rule.aliases || []).map(function (header) {
+        return escapeRegExp_(header).replace(/['’]/g, "['’]");
+      }).join('|'),
+      explicitAbsencePattern: getLocalization_().subscriberIdentifierProblemPatterns.missing,
+      explicitAbsenceDiagnosticPattern: ''
+    });
+  }) : [];
 }
 
-function applySupplierFieldDefaults_(extracted, availableHeaders) {
+function applyApprovedProfileFieldDefaults_(extracted, availableHeaders) {
   if (!extracted || extracted.document_type !== 'Invoice' ||
     !Array.isArray(availableHeaders)) {
     return;
   }
   const normalizedAvailableHeaders = availableHeaders.map(normalizeHeader_);
-  const defaults = getApplicableSupplierFieldDefaults_(extracted);
+  const defaults = getApprovedProfileFieldDefaults_(extracted);
   defaults.forEach(function (defaultValue) {
     const defaultHeader = normalizeHeader_(defaultValue.header);
     const headerIsAvailable = normalizedAvailableHeaders.indexOf(defaultHeader) >= 0;
-    const explicitAbsence = hasExplicitSupplierFieldAbsence_(extracted.problems,
+    const explicitAbsence = hasExplicitProfileFieldAbsence_(extracted.problems,
       defaultValue);
     if (!headerIsAvailable) {
-      extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+      extracted.problems = removeExplicitProfileFieldAbsenceProblems_(
         extracted.problems, defaultValue
       );
       return;
@@ -3628,12 +3596,12 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
           /^[+-]?\d+(?:[.,]\d+)?$/.test(suppliedValue.trim()) &&
           Number(suppliedValue.trim().replace(',', '.')) === defaultValue.value);
       if (!matchesDefault ||
-        isPrintedSupplierDefaultValue_(matching[0])) {
+        isPrintedProfileDefaultValue_(matching[0])) {
         return;
       }
       if (explicitAbsence) {
         matching[0].value = defaultValue.value;
-        extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+        extracted.problems = removeExplicitProfileFieldAbsenceProblems_(
           extracted.problems, defaultValue
         );
       } else {
@@ -3655,33 +3623,37 @@ function applySupplierFieldDefaults_(extracted, availableHeaders) {
     } else {
       matching[0].value = defaultValue.value;
     }
-    extracted.problems = removeExplicitSupplierFieldAbsenceProblems_(
+    extracted.problems = removeExplicitProfileFieldAbsenceProblems_(
       extracted.problems, defaultValue
     );
   });
 }
 
-function isPrintedSupplierDefaultValue_(entry) {
+function isPrintedProfileDefaultValue_(entry) {
   return entry && entry.source_evidence === 'printed';
 }
 
-function hasExplicitSupplierFieldAbsence_(problems, defaultValue) {
+function hasExplicitProfileFieldAbsence_(problems, defaultValue) {
   return problems.some(function (problem) {
-    return isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue);
+    return isExplicitProfileFieldAbsenceProblem_(problem, defaultValue);
   });
 }
 
-function removeExplicitSupplierFieldAbsenceProblems_(problems, defaultValue) {
+function removeExplicitProfileFieldAbsenceProblems_(problems, defaultValue) {
   return problems.filter(function (problem) {
-    return !isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue);
+    return !isExplicitProfileFieldAbsenceProblem_(problem, defaultValue);
   });
 }
 
-function isExplicitSupplierFieldAbsenceProblem_(problem, defaultValue) {
+function isExplicitProfileFieldAbsenceProblem_(problem, defaultValue) {
   if (!defaultValue.fieldPattern || !defaultValue.explicitAbsencePattern) {
     return false;
   }
   const rawProblem = String(problem || '');
+  if ((defaultValue.absence_statements || []).some(function (statement) {
+    return normalizeCellText_(statement.replace(/\{header\}/g, defaultValue.header)) ===
+      normalizeCellText_(rawProblem);
+  })) { return true; }
   const fieldPattern = new RegExp(defaultValue.fieldPattern, 'i');
   if (fieldPattern.test(rawProblem) && defaultValue.explicitAbsenceDiagnosticPattern &&
     new RegExp(defaultValue.explicitAbsenceDiagnosticPattern, 'i').test(rawProblem)) {
@@ -3941,28 +3913,24 @@ function validateExtraction_(extracted, options) {
         });
     }
     const referenceMonth = Number(extracted.reference_month);
-    if (!Number.isInteger(extracted.reference_year) ||
+    if (!extracted.period_start || !Number.isInteger(extracted.reference_year) ||
       extracted.reference_year < 1900 || extracted.reference_year > 2200 ||
       !/^\d{2}$/.test(extracted.reference_month || '') ||
       referenceMonth < 1 || referenceMonth > 12) {
       return invalidExtraction_('Reference year or month is missing.',
-        'Verify the end of the last billed period.', {
+        'Verify the actual billed period and use its first month.', {
           code: 'reference_period_missing',
           repairable: true,
-          fields: ['reference_year', 'reference_month', 'period_end']
+          fields: ['reference_year', 'reference_month', 'period_start', 'period_end']
         });
     }
-    if (extracted.period_end &&
-      (Number(extracted.period_end.slice(0, 4)) !== extracted.reference_year ||
-        extracted.period_end.slice(5, 7) !== extracted.reference_month)) {
-      return invalidExtraction_(
-        'Reference year and month do not match the end of the billed period.',
-        'Verify the final billing-period date.', {
-          code: 'reference_period_mismatch',
-          repairable: true,
-          fields: ['reference_year', 'reference_month', 'period_end']
-        }
-      );
+    const referenceDate = getInvoiceReferenceDate_(extracted);
+    if (referenceDate && (Number(referenceDate.slice(0, 4)) !== extracted.reference_year ||
+      referenceDate.slice(5, 7) !== extracted.reference_month)) {
+      return invalidExtraction_('Reference year and month do not match the approved billed-period convention.',
+        'Re-read the actual billed period, excluding historical, payment, validity and next-invoice dates.',
+        { code: 'reference_period_mismatch', repairable: true,
+          fields: ['reference_year', 'reference_month', 'period_start', 'period_end'] });
     }
     if ([extracted.cost_consumption, extracted.cost_non_consumption, extracted.vat, extracted.total]
       .some(function (value) { return value === null; })) {
@@ -4046,17 +4014,9 @@ function isMissingOptionalSubscriberIdentifierProblem_(problem, extracted) {
   if (/(?:ambigu|incert|unclear|unreadable|illeggibil|conflict|contradditt|mismatch|does\s+not\s+match|non\s+corrispond|incoerent)/i.test(text)) {
     return false;
   }
-  const energygasContractAbsence =
-    isInformationalEnergygasContractAbsenceProblem_(text, extracted);
-  if (!isStandaloneInformationalProblem_(text) && !energygasContractAbsence) {
-    return false;
-  }
-  // The reviewed ENERGYGAS diagnostic mentions the present customer code in
-  // the same sentence as the absent contract number. Do not let that evidence
-  // be mistaken for a second missing identifier.
-  if (energygasContractAbsence) {
-    return true;
-  }
+  const reviewedAbsence = isReviewedIdentifierAbsenceProblem_(text, extracted);
+  if (!isStandaloneInformationalProblem_(text) && !reviewedAbsence) { return false; }
+  if (reviewedAbsence) { return true; }
   const patterns = getLocalization_().subscriberIdentifierProblemPatterns;
   const contractNumberMissing = isExplicitFieldAbsenceStatement_(text,
     patterns.contractNumber, patterns.missing);
@@ -4082,16 +4042,14 @@ function isExplicitFieldAbsenceStatement_(problem, fieldPattern, absencePattern)
   ).test(String(problem || '').trim());
 }
 
-function isInformationalEnergygasContractAbsenceProblem_(problem, extracted) {
-  if (!extracted || extracted.contract_number || !extracted.customer_code ||
-    normalizeCellText_(extracted.supplier) !== 'energygas italia') {
-    return false;
-  }
-  const text = normalizeCellText_(problem);
-  const statement = /^(?:il )?numero (?:di )?contratto non (?:e )?presente o non (?:e )?identificabile per energygas italia (cl[0-9]+) e codice cliente$/.exec(text) ||
-    /^(?:the )?contract number (?:is )?not (?:present|identifiable)(?: for energygas italia)? customer code (cl[0-9]+)$/.exec(text);
-  return Boolean(statement) &&
-    statement[1] === normalizeCellText_(extracted.customer_code);
+function isReviewedIdentifierAbsenceProblem_(problem, extracted) {
+  const contract = getInvoiceContract_(extracted);
+  return Boolean(contract && !extracted.contract_number && extracted.customer_code &&
+    contract.identifier_absence_statements.some(function (statement) {
+      const expected = statement.replace(/\{customer_code\}/g, extracted.customer_code)
+        .replace(/\{supplier\}/g, extracted.supplier);
+      return normalizeCellText_(expected) === normalizeCellText_(problem);
+    }));
 }
 
 function isInformationalElectricityBandMappingProblem_(problem, extracted) {
@@ -4110,7 +4068,7 @@ function isInformationalElectricityBandMappingProblem_(problem, extracted) {
   if (!supportedStatement) {
     return false;
   }
-  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+  const rateFields = getInvoiceReconciliationGroups_('rates').map(function (aliases) {
     return readConfiguredReconciliationField_(extracted, aliases);
   });
   if (!rateFields.slice(1).every(function (field) { return field.configured; })) {
@@ -5402,16 +5360,6 @@ function normalizeSupplier_(supplier, configuredAutomation) {
   if (canonical) {
     return canonical;
   }
-  if (normalized === 'energygas') {
-    const energygasCanonical = automationConfig.canonical_suppliers.filter(
-      function (item) {
-        return normalizeCellText_(item) === 'energygas italia';
-      }
-    )[0];
-    if (energygasCanonical) {
-      return energygasCanonical;
-    }
-  }
   const aliasKey = Object.keys(automationConfig.supplier_aliases).filter(function (key) {
     return normalizeCellText_(key) === normalized;
   })[0];
@@ -5577,10 +5525,10 @@ function isInvoiceCoreMonetaryReconciled_(extracted) {
   ) <= CONFIG.MONEY_TOLERANCE;
 }
 
-function getSupplierReconciliationGroups_(key) {
+function getInvoiceReconciliationGroups_(key) {
   const registry = getLocalizationRegistry_();
   const contracts = Object.keys(registry).map(function (locale) {
-    return registry[locale].supplierReconciliation;
+    return registry[locale].invoiceReconciliation;
   });
   const first = contracts[0][key];
   return (Array.isArray(first) ? first : [first]).map(function (_, index) {
@@ -5618,86 +5566,21 @@ function readConfiguredReconciliationField_(extracted, aliases) {
   };
 }
 
-function validateSupplierNonConsumptionDetails_(extracted, key, code, label) {
-  const details = getSupplierReconciliationGroups_(key).map(function (aliases) {
-    return readConfiguredReconciliationField_(extracted, aliases);
-  });
-  const invalid = details.filter(function (detail) {
-    return detail.configured && (detail.duplicate ||
-      detail.value === null && !detail.absent);
-  });
-  const fields = details.filter(function (detail) { return detail.configured; })
-    .map(function (detail) { return detail.header; }).concat([
-      'cost_consumption', 'cost_non_consumption', 'vat', 'total'
-    ]);
-  if (invalid.length) {
-    return invalidExtraction_(label + ' configured detailed costs are missing or nonnumeric.',
-      'Re-read each configured detail. Resolve absence only through the reviewed default or explicit non-applicability rule; never invent a zero.',
-      { code: code + '_incomplete', repairable: true, fields: fields });
-  }
-  // Simple sheets and formula-backed columns do not expose a complete writable
-  // partition. Verified absence does not disable checks on the remaining costs.
-  if (!details.every(function (detail) {
-    return detail.configured;
-  })) {
-    return { valid: true };
-  }
-  // Sum observed/defaulted numerical members without inserting a value for an
-  // absent member into the extraction or its eventual spreadsheet cell.
-  const total = details.reduce(function (sum, detail) {
-    return detail.value === null ? sum : sum + detail.value;
-  }, 0);
-  const nonConsumption = extracted.cost_non_consumption;
-  if (typeof extracted.cost_non_consumption === 'number' &&
-    Number.isFinite(extracted.cost_non_consumption) &&
-    Math.abs(total - nonConsumption) <= CONFIG.MONEY_TOLERANCE) {
-    return { valid: true };
-  }
-  const action = key === 'oenergyDetails' ?
-    'Re-read the OENERGY Gas summary rows and the ACCISE e ADDIZIONALI section. Apply the reviewed supplier mapping: Totale costi consumo and cost_consumption contain only the printed selling-consumption amount; Quota fissa contains only the printed fixed selling amount; Trasporto e oneri sums the printed network/oneri amounts under both consumption and fixed quota exactly once; Accise sums mutually exclusive excise charges and regional addizionali once each, excluding a repeated Accisa complessivamente applicata recap. Keep Ricalcoli only when printed, otherwise use its reviewed absence rule. Reconcile Quota fissa + Trasporto e oneri + Accise + Ricalcoli to cost_non_consumption. Do not copy the network-inclusive consumption or fixed-quota subtotal into a selling-only field and do not invent a residual, VAT, total, or balancing detail.' :
-    'Re-examine the printed, mutually exclusive detail rows and totals. Do not invent a residual, VAT, total, or balancing detail.';
-  return invalidExtraction_(label + ' detailed costs do not reconcile with the non-consumption total.',
-    action,
-    {
-      code: code,
-      repairable: true,
-      fields: fields,
-      reconciliation: {
-        type: 'configured-detail-sum',
-        aggregate_field: 'cost_non_consumption',
-        aggregate_value: Number.isFinite(nonConsumption) ?
-          Math.round(nonConsumption * 100) / 100 : null,
-        detail_sum: Math.round(total * 100) / 100,
-        difference_detail_sum_minus_aggregate:
-          Number.isFinite(nonConsumption) ?
-            Math.round((total - nonConsumption) * 100) / 100 : null,
-        components: details.filter(function (detail) {
-          return detail.configured;
-        }).map(function (detail) {
-          return {
-            header: detail.header,
-            value: detail.value === null ? null :
-              Math.round(detail.value * 100) / 100,
-            explicitly_absent: detail.absent === true
-          };
-        })
-      }
-    });
-}
 
-function getEnergygasElectricityConsumptionEvidence_(extracted) {
-  const supplyAliases = getSupplierReconciliationGroups_('electricitySupply')[0]
+function getElectricityConsumptionEvidence_(extracted) {
+  const supplyAliases = getInvoiceReconciliationGroups_('electricitySupply')[0]
     .map(normalizeCellText_);
+  const contract = getInvoiceContract_(extracted);
   if (!extracted || extracted.document_type !== 'Invoice' ||
-    ['energygas italia', 'energygas'].indexOf(normalizeCellText_(extracted.supplier)) < 0 ||
-    supplyAliases.indexOf(normalizeCellText_(extracted.supply_type)) < 0) {
+    (!contract || !contract.electricity_consumption) &&
+      extracted.electricity_consumption_quantity == null && extracted.electricity_selling_unit_rate == null) {
     return { valid: true, applicable: false, absentBandHeaders: [] };
   }
-  const rateFields = getSupplierReconciliationGroups_('rates').map(function (aliases) {
+  const rateFields = getInvoiceReconciliationGroups_('rates').map(function (aliases) {
     return readConfiguredReconciliationField_(extracted, aliases);
   });
   const quantityField = readConfiguredReconciliationField_(extracted,
-    getSupplierReconciliationGroups_('quantity')[0]);
+    getInvoiceReconciliationGroups_('quantity')[0]);
   const registry = getLocalizationRegistry_();
   const bandQuantityFields = [0, 1, 2].map(function (band) {
     const aliases = Object.keys(registry).reduce(function (all, locale) {
@@ -5816,14 +5699,14 @@ function isInformationalElectricityBandAbsenceProblem_(problem, extracted) {
   if (!isInvoiceCoreMonetaryReconciled_(extracted)) {
     return false;
   }
-  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+  const evidence = getElectricityConsumptionEvidence_(extracted);
   return evidence.valid && evidence.absentBandHeaders.some(function (header) {
     return isExplicitElectricityFieldAbsence_(problem, header);
   });
 }
 
-function validateEnergygasLuceDetailedReconciliation_(extracted) {
-  const evidence = getEnergygasElectricityConsumptionEvidence_(extracted);
+function validateElectricityConsumption_(extracted) {
+  const evidence = getElectricityConsumptionEvidence_(extracted);
   if (!evidence.applicable) {
     return { valid: true };
   }
@@ -5832,15 +5715,12 @@ function validateEnergygasLuceDetailedReconciliation_(extracted) {
       'The electricity selling rate and quantity are incomplete or do not reconcile with selling consumption cost.',
       'Re-read the selling consumption summary rate and quantity, not a tariff formula component. Preserve printed amounts; do not invent a balancing rate.',
       {
-        code: 'energygas_selling_rate_reconciliation_mismatch', repairable: true,
+        code: 'invoice_consumption_reconciliation_mismatch', repairable: true,
         fields: evidence.fields
       }
     );
   }
-  const validation = validateSupplierNonConsumptionDetails_(extracted, 'energygasDetails',
-    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity');
-  return validation.valid ? validateSupplierMonetaryOverlays_(extracted,
-    'energygas_luce_detail_reconciliation_mismatch', 'Energygas electricity') : validation;
+  return { valid: true };
 }
 
 function parseSheetMoneyValue_(value) {
@@ -5848,173 +5728,16 @@ function parseSheetMoneyValue_(value) {
   return numeric === null ? null : Math.round(numeric * 100) / 100;
 }
 
-function readOenergyGasSummary_(extracted) {
-  const evidence = extracted && extracted.oenergy_gas_summary;
-  const keys = buildExtractionResponseSchema_().properties.oenergy_gas_summary.required;
-  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence) ||
-    keys.some(function (key) { return typeof evidence[key] !== 'number' || !Number.isFinite(evidence[key]); })) {
-    return null;
-  }
-  if (Math.abs(evidence.selling_consumption + evidence.network_consumption -
-    evidence.consumption_subtotal) > CONFIG.MONEY_TOLERANCE ||
-    Math.abs(evidence.selling_fixed + evidence.network_fixed -
-      evidence.fixed_subtotal) > CONFIG.MONEY_TOLERANCE) {
-    return null;
-  }
-  return evidence;
+function validateInvoiceCostEvidence_(extracted) {
+  if (!extracted || extracted.document_type !== 'Invoice') { return { valid: true }; }
+  const consumption = validateElectricityConsumption_(extracted);
+  if (!consumption.valid) { return consumption; }
+  const contract = evaluateInvoiceContract_(extracted, false);
+  return contract.valid ? validateInvoiceMonetaryOverlays_(extracted,
+    'invoice_cost_reconciliation_mismatch', 'Invoice') : contract;
 }
 
-function readOenergyGasTaxSummary_(extracted) {
-  const evidence = extracted && extracted.oenergy_gas_tax_summary;
-  const keys = buildExtractionResponseSchema_().properties.oenergy_gas_tax_summary.required;
-  if (!evidence || keys.some(function (key) {
-    return typeof evidence[key] !== 'number' || !Number.isFinite(evidence[key]);
-  }) || typeof extracted.vat !== 'number' || !Number.isFinite(extracted.vat) ||
-    Math.abs(evidence.excise_charge + evidence.regional_addition + extracted.vat -
-      evidence.taxes_subtotal) > CONFIG.MONEY_TOLERANCE) {
-    return null;
-  }
-  return evidence;
-}
-
-function requiresOenergyGasSummary_(extracted) {
-  if (!extracted || extracted.document_type !== 'Invoice' ||
-    normalizeCellText_(extracted.supplier) !== 'oenergy' ||
-    normalizeCellText_(extracted.supply_type) !== 'gas') {
-    return false;
-  }
-  const fields = getSupplierReconciliationGroups_('oenergyDetails').slice(0, 2).map(function (aliases) {
-    return readConfiguredReconciliationField_(extracted, aliases);
-  });
-  return fields.every(function (field) { return field.configured; }) &&
-    (extracted.oenergy_gas_summary !== null && extracted.oenergy_gas_summary !== undefined ||
-      fields.every(function (field) { return field.present && field.value !== null; }));
-}
-
-/** Map independently transcribed source children, never a balancing residual. */
-function mapOenergyGasSourceComponents_(extracted) {
-  if (!requiresOenergyGasSummary_(extracted) || (extracted.problems || []).length) {
-    return;
-  }
-  const evidence = readOenergyGasSummary_(extracted);
-  if (!evidence) {
-    return;
-  }
-  const groups = getSupplierReconciliationGroups_('oenergyDetails');
-  const details = groups.map(function (aliases) { return readConfiguredReconciliationField_(extracted, aliases); });
-  if (!details.every(function (field, index) {
-    return field.configured && !field.duplicate &&
-      (index < 2 || field.present && field.value !== null);
-  })) {
-    return;
-  }
-  const registry = getLocalizationRegistry_();
-  const aliasesFor = function (key) {
-    return Object.keys(registry).reduce(function (all, locale) {
-      return all.concat(registry[locale].headerAliases[key]);
-    }, []);
-  };
-  const taxes = readOenergyGasTaxSummary_(extracted);
-  if (extracted.oenergy_gas_tax_summary != null && !taxes) { return; }
-  const excise = taxes ? Math.round((taxes.excise_charge + taxes.regional_addition) * 100) / 100 : details[2].value;
-  const network = Math.round((evidence.network_consumption + evidence.network_fixed) * 100) / 100;
-  const nonConsumption = Math.round((evidence.selling_fixed + network +
-    excise + details[3].value) * 100) / 100;
-  const mappings = [
-    { aliases: groups[0], value: evidence.selling_fixed },
-    { aliases: groups[1], value: network },
-    { aliases: aliasesFor('consumptionCost'), value: evidence.selling_consumption },
-    { aliases: aliasesFor('nonConsumptionCosts'), value: nonConsumption }
-  ];
-  if (taxes) { mappings.push({ aliases: groups[2], value: excise }); }
-  if (mappings.some(function (mapping, index) {
-    const field = readConfiguredReconciliationField_(extracted, mapping.aliases);
-    if (field.duplicate) {
-      return true;
-    }
-    if (index === 4) {
-      return field.present && (field.value === null ||
-        Math.abs(field.value - taxes.excise_charge) > CONFIG.MONEY_TOLERANCE &&
-        Math.abs(field.value - mapping.value) > CONFIG.MONEY_TOLERANCE);
-    }
-    const previous = index === 2 ? extracted.cost_consumption : extracted.cost_non_consumption;
-    return (index === 2 || index === 3) && field.present && (field.value === null ||
-      Math.abs(field.value - mapping.value) > CONFIG.MONEY_TOLERANCE &&
-      (typeof previous !== 'number' || !Number.isFinite(previous) ||
-        Math.abs(field.value - previous) > CONFIG.MONEY_TOLERANCE));
-  })) {
-    return;
-  }
-  const candidate = Object.assign({}, extracted, {
-    cost_consumption: evidence.selling_consumption, cost_non_consumption: nonConsumption,
-    sheet_values: (extracted.sheet_values || []).map(function (entry) {
-      const mapping = mappings.find(function (item) {
-        return item.aliases.map(normalizeHeader_).indexOf(normalizeHeader_(entry.header)) >= 0;
-      });
-      return mapping ? Object.assign({}, entry, { value: mapping.value }) : entry;
-    })
-  });
-  mappings.forEach(function (mapping) {
-    const field = readConfiguredReconciliationField_(extracted, mapping.aliases);
-    if (field.configured && !field.present) {
-      candidate.sheet_values.push({ header: field.header, value: mapping.value });
-    }
-  });
-  if (extracted.configured_writable_headers) {
-    Object.defineProperty(candidate, 'configured_writable_headers', { value: extracted.configured_writable_headers });
-  }
-  if (!isInvoiceCoreMonetaryReconciled_(candidate) ||
-    !validateSupplierMonetaryOverlays_(candidate,
-      'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas').valid) {
-    return;
-  }
-  extracted.cost_consumption = candidate.cost_consumption;
-  extracted.cost_non_consumption = candidate.cost_non_consumption;
-  extracted.sheet_values = candidate.sheet_values;
-}
-
-function validateOenergyGasDetailedReconciliation_(extracted) {
-  if (!extracted || extracted.document_type !== 'Invoice' ||
-    normalizeCellText_(extracted.supplier) !== 'oenergy' ||
-    normalizeCellText_(extracted.supply_type) !== 'gas') {
-    return { valid: true };
-  }
-  if (extracted.oenergy_gas_tax_summary != null) {
-    const taxes = readOenergyGasTaxSummary_(extracted);
-    const excise = readConfiguredReconciliationField_(extracted,
-      getSupplierReconciliationGroups_('oenergyDetails')[2]);
-    if (!taxes || excise.configured && (!excise.present || excise.value === null ||
-      Math.abs(excise.value - taxes.excise_charge - taxes.regional_addition) > CONFIG.MONEY_TOLERANCE)) {
-      return invalidExtraction_('OENERGY tax source components conflict with printed tax totals or mapped excise.',
-        'Read the separate excise and regional addizionale charges. Independently copy taxes_subtotal directly from the printed Accise e IVA row in SCONTRINO DELL\'ENERGIA, without calculating or adding excise again. Exclude recap rows and preserve VAT.',
-        { code: 'oenergy_gas_detail_reconciliation_mismatch', repairable: true,
-          fields: ['oenergy_gas_tax_summary', 'sheet_values', 'cost_non_consumption', 'vat', 'total'] });
-    }
-  }
-  const validation = validateSupplierNonConsumptionDetails_(extracted, 'oenergyDetails',
-    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
-  if (!validation.valid) {
-    return validation;
-  }
-  if (requiresOenergyGasSummary_(extracted) || extracted.oenergy_gas_summary != null) {
-    const evidence = readOenergyGasSummary_(extracted);
-    const groups = getSupplierReconciliationGroups_('oenergyDetails');
-    const fixed = readConfiguredReconciliationField_(extracted, groups[0]);
-    const network = readConfiguredReconciliationField_(extracted, groups[1]);
-    if (!evidence || fixed.configured && Math.abs(fixed.value - evidence.selling_fixed) > CONFIG.MONEY_TOLERANCE ||
-      network.configured && Math.abs(network.value - evidence.network_consumption - evidence.network_fixed) > CONFIG.MONEY_TOLERANCE ||
-      Math.abs(extracted.cost_consumption - evidence.selling_consumption) > CONFIG.MONEY_TOLERANCE) {
-      return invalidExtraction_('OENERGY source component roles are missing or conflict with mapped costs.',
-        'Transcribe the printed selling and network child amounts under each quota and both parent subtotals into oenergy_gas_summary. Exclude a gross parent from selling-only fields; preserve VAT, final total and unresolved problems.',
-        { code: 'oenergy_gas_detail_reconciliation_mismatch', repairable: true,
-          fields: ['oenergy_gas_summary', 'sheet_values', 'cost_consumption', 'cost_non_consumption', 'vat', 'total'] });
-    }
-  }
-  return validateSupplierMonetaryOverlays_(extracted,
-    'oenergy_gas_detail_reconciliation_mismatch', 'OENERGY gas');
-}
-
-function validateSupplierMonetaryOverlays_(extracted, code, label) {
+function validateInvoiceMonetaryOverlays_(extracted, code, label) {
   const registry = getLocalizationRegistry_();
   const canonicalFields = {
     consumptionCost: 'cost_consumption', nonConsumptionCosts: 'cost_non_consumption', vat: 'vat'
@@ -6049,7 +5772,7 @@ function getConfiguredSecondaryInvoiceHeaders_(headers, extracted) {
   const excluded = canonicalKeys.reduce(function (all, key) {
     return all.concat(getHeaderAliases_(key));
   }, []).concat(localization.electricityBandHeaders || []).concat(
-    getApplicableSupplierFieldDefaults_(extracted).map(function (item) {
+    getApprovedProfileFieldDefaults_(extracted).map(function (item) {
       return item.header;
     })
   ).map(normalizeHeader_);

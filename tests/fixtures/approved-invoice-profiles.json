@@ -1,0 +1,309 @@
+[
+  {
+    "locale": "en",
+    "supplier": "ILIAD",
+    "supply": "Internet",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Internet"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Collection charges",
+          "value": 0,
+          "aliases": []
+        }
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "ILIAD",
+        "supply_type": "Internet",
+        "header": "Collection charges",
+        "value": 0,
+        "fieldPattern": "\\b(?:collection\\s+charges?|collection\\s+fees?)\\b",
+        "explicitAbsencePattern": "\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ]
+  },
+  {
+    "locale": "en",
+    "supplier": "OENERGY",
+    "supply": "Gas",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Gas"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Recalculations",
+          "value": 0,
+          "aliases": []
+        }
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "OENERGY",
+        "supply_type": "Gas",
+        "header": "Recalculations",
+        "value": 0,
+        "fieldPattern": "\\brecalculations?\\b",
+        "explicitAbsencePattern": "\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ],
+    "detail_headers": [
+      "Fixed charge",
+      "Transport and charges",
+      "Excise duties",
+      "Recalculations"
+    ]
+  },
+  {
+    "locale": "en",
+    "supplier": "Energygas Italia",
+    "supply": "Electricity",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Electricity"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Transport and meter management",
+          "value": 0,
+          "aliases": []
+        },
+        {
+          "header": "System charges",
+          "value": 0,
+          "aliases": []
+        },
+        {
+          "header": "Recalculations",
+          "value": 0,
+          "aliases": []
+        }
+      ],
+      "electricity_consumption": true,
+      "customer_code_prefixes": [
+        "CL"
+      ],
+      "identifier_absence_statements": [
+        "Numero contratto non presente o non identificabile per {supplier} {customer_code} \u00e8 codice cliente.",
+        "Contract number not present for {supplier} customer code {customer_code}.",
+        "Contract number not present; customer code {customer_code}",
+        "Il numero di contratto non \u00e8 presente o non \u00e8 identificabile per {supplier} ({customer_code} \u00e8 codice cliente)."
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Electricity",
+        "header": "Transport and meter management",
+        "value": 0,
+        "fieldPattern": "\\btransport\\s+and\\s+meter\\s+management\\b",
+        "explicitAbsencePattern": "\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      },
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Electricity",
+        "header": "System charges",
+        "value": 0,
+        "fieldPattern": "\\bsystem\\s+charges?\\b",
+        "explicitAbsencePattern": "\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      },
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Electricity",
+        "header": "Recalculations",
+        "value": 0,
+        "fieldPattern": "\\brecalculations?\\b",
+        "explicitAbsencePattern": "\\b(?:not\\s+(?:printed|present|reported|indicated|found)|absent)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ],
+    "detail_headers": [
+      "Other energy costs",
+      "Transport and meter management",
+      "System charges",
+      "Excise duties",
+      "TV licence fee",
+      "Recalculations",
+      "Non-separable network and charges"
+    ]
+  },
+  {
+    "locale": "it",
+    "supplier": "ILIAD",
+    "supply": "Internet",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Internet"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Spese d'incasso",
+          "value": 0,
+          "aliases": [
+            "Spese di incasso"
+          ]
+        }
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "ILIAD",
+        "supply_type": "Internet",
+        "header": "Spese d'incasso",
+        "value": 0,
+        "fieldPattern": "\\b(?:spese?\\s+d['\u2019]?incasso|spese?\\s+di\\s+incasso)\\b",
+        "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ]
+  },
+  {
+    "locale": "it",
+    "supplier": "OENERGY",
+    "supply": "Gas",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Gas"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Ricalcoli",
+          "value": 0,
+          "aliases": [
+            "Ricalcolo"
+          ]
+        }
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "OENERGY",
+        "supply_type": "Gas",
+        "header": "Ricalcoli",
+        "value": 0,
+        "fieldPattern": "\\bricalcol[io]\\b",
+        "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ],
+    "detail_headers": [
+      "Quota fissa",
+      "Trasporto e oneri",
+      "Accise",
+      "Ricalcoli"
+    ]
+  },
+  {
+    "locale": "it",
+    "supplier": "Energygas Italia",
+    "supply": "Luce",
+    "contract": {
+      "version": 1,
+      "supplies": [
+        "Luce"
+      ],
+      "components": [],
+      "checks": [],
+      "allocations": [],
+      "defaults": [
+        {
+          "header": "Trasporto e gestione contatore",
+          "value": 0,
+          "aliases": []
+        },
+        {
+          "header": "Oneri di sistema",
+          "value": 0,
+          "aliases": [],
+          "absence_statements": [
+            "Oneri di sistema non presente nel documento, le voci ASOS/ARIM sono subordinate o aggregate."
+          ]
+        },
+        {
+          "header": "Ricalcoli",
+          "value": 0,
+          "aliases": [
+            "Ricalcolo"
+          ]
+        }
+      ],
+      "electricity_consumption": true,
+      "customer_code_prefixes": [
+        "CL"
+      ],
+      "identifier_absence_statements": [
+        "Numero contratto non presente o non identificabile per {supplier} {customer_code} \u00e8 codice cliente.",
+        "Contract number not present for {supplier} customer code {customer_code}.",
+        "Contract number not present; customer code {customer_code}",
+        "Il numero di contratto non \u00e8 presente o non \u00e8 identificabile per {supplier} ({customer_code} \u00e8 codice cliente)."
+      ]
+    },
+    "legacy_defaults": [
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Luce",
+        "header": "Trasporto e gestione contatore",
+        "value": 0,
+        "fieldPattern": "\\btrasporto\\s+e\\s+gestione\\s+contatore\\b",
+        "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      },
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Luce",
+        "header": "Oneri di sistema",
+        "value": 0,
+        "fieldPattern": "\\boneri\\s+di\\s+sistema\\b",
+        "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        "explicitAbsenceDiagnosticPattern": "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|\u00e8)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?[.]?\\s*$"
+      },
+      {
+        "supplier": "Energygas Italia",
+        "supply_type": "Luce",
+        "header": "Ricalcoli",
+        "value": 0,
+        "fieldPattern": "\\bricalcol[io]\\b",
+        "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+        "explicitAbsenceDiagnosticPattern": ""
+      }
+    ],
+    "detail_headers": [
+      "Altri costi materia energia",
+      "Trasporto e gestione contatore",
+      "Oneri di sistema",
+      "Accise",
+      "Canone TV",
+      "Ricalcoli",
+      "Rete e oneri non scorporabili"
+    ]
+  }
+]

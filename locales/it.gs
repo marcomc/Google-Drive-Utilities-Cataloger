@@ -68,58 +68,11 @@ function getItalianLocalization_() {
       contractNumber: '(?:numero\\s+(?:di\\s+)?contratto|codice\\s+(?:di\\s+)?contratto|contract(?:\\s+(?:number|code))?)',
       customerCode: '(?:id\\s*utente|user\\s*id|(?:customer|client|account)\\s*(?:code|id)|(?:codice|numero)\\s+(?:cliente|utente))'
     }),
-    supplierFieldDefaults: Object.freeze([
-      Object.freeze({
-        supplier: 'ILIAD',
-        supply_type: 'Internet',
-        header: "Spese d'incasso",
-        value: 0,
-        fieldPattern: "\\b(?:spese?\\s+d['’]?incasso|spese?\\s+di\\s+incasso)\\b",
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'OENERGY',
-        supply_type: 'Gas',
-        header: 'Ricalcoli',
-        value: 0,
-        fieldPattern: '\\bricalcol[io]\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Luce',
-        header: 'Trasporto e gestione contatore',
-        value: 0,
-        fieldPattern: '\\btrasporto\\s+e\\s+gestione\\s+contatore\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: ''
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Luce',
-        header: 'Oneri di sistema',
-        value: 0,
-        fieldPattern: '\\boneri\\s+di\\s+sistema\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|è)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?[.]?\\s*$"
-      }),
-      Object.freeze({
-        supplier: 'Energygas Italia',
-        supply_type: 'Luce',
-        header: 'Ricalcoli',
-        value: 0,
-        fieldPattern: '\\bricalcol[io]\\b',
-        explicitAbsencePattern: "\\b(?:non\\s+(?:(?:e|è)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
-        explicitAbsenceDiagnosticPattern: ''
-      })
-    ]),
     supplierProfiles: Object.freeze({
       folder: 'Profili fornitori', pendingFolder: 'In attesa di approvazione',
       templateFolder: '_modello', profileFile: 'PROFILO.md',
       templateFile: 'PROFILO.example.md', statusKey: 'stato', approvedStatus: 'approvato',
-      supplierKey: 'fornitore'
+      supplierKey: 'fornitore', suppliesKey: 'forniture'
     }),
     supplierProfileTemplate: Object.freeze([
       '---', 'managed_by: Google Drive Utilities Cataloger', 'stato: approvato', 'fornitore: NOME FORNITORE',
@@ -135,6 +88,8 @@ function getItalianLocalization_() {
       '- Classificare da evidenze stampate e struttura insieme, mai dal solo nome file.',
       '- Dopo la classificazione, seguire nell ordine le sezioni documentate e riconciliare il totale.',
       '- Una struttura non corrispondente richiede revisione o proposta pendente, mai invenzione di dati.', '',
+      '- Il riferimento contabile e il primo mese del periodo effettivamente fatturato.',
+      '- Il blocco JSON invoice-contract opzionale dichiara componenti, somme e campi scrivibili revisionati.', '',
       '## Manutenzione', '',
       '- Inserire un profilo rivisto in `In attesa di approvazione`; non sovrascrivere automaticamente il profilo approvato.', ''
     ]),
@@ -202,12 +157,8 @@ function getItalianLocalization_() {
       }),
       emailSubject: '[Utenze] {count} PDF elaborato/i'
     }),
-    supplierReconciliation: Object.freeze({
+    invoiceReconciliation: Object.freeze({
       electricitySupply: 'Luce',
-      energygasDetails: ['Altri costi materia energia', 'Trasporto e gestione contatore',
-        'Oneri di sistema', 'Accise', 'Canone TV', 'Ricalcoli',
-        'Rete e oneri non scorporabili'],
-      oenergyDetails: ['Quota fissa', 'Trasporto e oneri', 'Accise', 'Ricalcoli'],
       quantity: 'Quantità consumi',
       rates: ['Costo unitario', 'Costo unitario F1', 'Costo unitario F2', 'Costo unitario F3']
     }),

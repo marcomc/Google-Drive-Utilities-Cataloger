@@ -145,7 +145,7 @@ function testCommittedJsonAndRuntimeConfig() {
 function testRequiredEntrypointValidationIsTopLevelAndNegativeSafe() {
   const { requiredEntrypoints, missingEntrypoints, sourceSyntaxError } = require(
     '../scripts/lib/apps-script-entrypoints.js');
-  assert.equal(requiredEntrypoints.length, 26);
+  assert.equal(requiredEntrypoints.length, 28);
   const sources = requiredEntrypoints.map((name) => `function ${name}() {}`);
   assert.deepEqual(missingEntrypoints(sources), [], 'cross-file declarations');
   const temporaryDirectory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gduc-entrypoints-'));

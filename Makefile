@@ -67,6 +67,7 @@ test: ## Run installer helper and Apps Script tests
 	@node tests/electricity_dashboard_test.js
 	@node tests/project_contract_test.js
 	@node tests/utilities_cataloging_test.js
+	@node tests/invoice_contracts_test.js
 
 lint-shell: ## Lint all shell scripts
 	@$(SHELLCHECK) --enable=all $(SHELL_FILES)

@@ -988,6 +988,7 @@ function createMutableInstallerChartFixture() {
 function createReferencePeriodMigrationFixture(locale = 'en', headerRow = 1, sheetCount = 1) {
   const stored = {};
   const context = loadInstallerWithRuntimeConfig(() => { throw new Error('Unexpected network'); }, stored);
+  vm.runInContext(fs.readFileSync(path.join(projectRoot, 'InvoiceContracts.gs'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(projectRoot, 'UtilitiesCataloging.gs'), 'utf8'), context);
   const localization = context.getLocalizationRegistry_()[locale];
   context.getLocalization_ = () => localization;
