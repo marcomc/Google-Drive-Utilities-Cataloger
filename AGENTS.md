@@ -1,5 +1,11 @@
 # Google Drive Utilities Cataloger Instructions
 
+## Version branch workflow
+
+- Start each application version on a new dedicated branch from `main`.
+- Carry relevant uncommitted `TODO` and `AGENTS` updates from the main checkout
+  into that branch, preserving other pending work and concurrent activity.
+
 ## Runtime policy synchronization
 
 - Treat the repository `AGENTS.md` as development guidance for the coding

@@ -25,6 +25,10 @@ function profileFixtureDefaults(locale) {
 function loadCataloger(overrides = {}) {
   const context = vm.createContext({
     console,
+    recoverPendingPeriodChartPointsBestEffort_: () => ({ state: 'idle' }),
+    recoverPendingPeriodChartRefresh_: () => ({ state: 'idle' }),
+    queuePeriodChartRefreshForSource_: () => {},
+    refreshPeriodChartsAfterInvoiceImport_: (_sheet, result) => result,
     isFinite,
     MimeType: { PDF: 'application/pdf' },
     Session: { getScriptTimeZone: () => 'Etc/UTC' },
@@ -3069,6 +3073,11 @@ function testScheduledCatalogRunRetriesDashboardBeforeScanning() {
   context.recoverPendingMutations_ = () => [];
   context.flushPendingReports_ = () => {};
   let retries = 0;
+  let periodRetries = 0;
+  context.recoverPendingPeriodChartRefresh_ = (force) => {
+    assert.equal(force, true);
+    periodRetries += 1;
+  };
   context.recoverPendingElectricityDashboardRefresh_ = () => { retries += 1; };
   context.listDirectIntakePdfs_ = () => [];
   context.logCatalogEvent_ = () => {};
@@ -3077,6 +3086,7 @@ function testScheduledCatalogRunRetriesDashboardBeforeScanning() {
 
   context.runUtilitiesCataloging_('daily');
   assert.equal(retries, 1);
+  assert.equal(periodRetries, 1);
 }
 
 function testSupplierDefaultsNormalizeConfiguredIdentities() {
@@ -6877,6 +6887,8 @@ function testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles() {
   const context = loadCataloger();
   const now = Date.now();
   const processed = [], driveReads = [], logs = [];
+  let periodRetries = 0;
+  context.recoverPendingPeriodChartRefresh_ = () => { periodRetries += 1; };
   const dueFile = {
     getId: () => 'due-file', getName: () => 'due.pdf',
     getUrl: () => 'https://drive.test/due-file',
@@ -6926,6 +6938,7 @@ function testScheduledGeminiOverloadRetryUsesDueIdsAndResetsChangedFiles() {
 
   const result = context.processDueGeminiOverloadRetries();
 
+  assert.equal(periodRetries, 1);
   assert.deepEqual(driveReads, ['due-file', 'changed-file']);
   assert.equal(processed.length, 1);
   assert.equal(processed[0].policy, 'policy');
@@ -7108,9 +7121,17 @@ function testDashboardRefreshWarningIsReported() {
   );
   assert.equal(dashboardResult.status, 'IMPORTED WITH WARNINGS');
   assert.deepEqual(JSON.parse(JSON.stringify(dashboardResult.warnings)), [{
-    field: 'electricity dashboard',
+    field: 'statistics dashboard',
     reason: 'Electricity dashboard refresh failed; imported invoice data was retained.'
   }]);
+  const periodResult = context.buildSuccessResult_(
+    { getUrl: () => 'https://drive.example/file' }, 'invoice.pdf',
+    'archived.pdf', { path: 'Water/SUPPLIER/2026', createdFolders: [] },
+    { ...validInvoice() }, 'https://sheets.example/spreadsheet',
+    'Period chart refresh was deferred; imported invoice data was retained.'
+  );
+  assert.equal(periodResult.status, 'IMPORTED WITH WARNINGS');
+  assert.equal(periodResult.warnings[0].field, 'statistics dashboard');
 }
 
 function testPromptKeepsHeadersScopedBySupply() {
@@ -10211,6 +10232,8 @@ testSupplierProfileContextLimitIncludesRenderedMetadata();
 testSupplierProfilesRejectDuplicateMetadataSuppliersAcrossFolders();
 testExtractionSchemaAndCalendarValidation();
 testServiceIdentityMatchesNormalizedHolderAndAddress();
+testServiceIdentityAcceptsConfiguredProvinceQualifier();
+testServiceIdentityIgnoresHonorificPrefix();
 testServiceAddressIdentityEnforcementDefaultsAndCanBeSet();
 testServiceAddressIdentityCanBeTemporarilyDisabled();
 testFirstInvoiceCanEstablishMissingServiceIdentity();

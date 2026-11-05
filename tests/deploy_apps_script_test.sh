@@ -388,6 +388,13 @@ FAKE_CURL
 chmod +x "${FAKE_BIN}/git" "${FAKE_BIN}/clasp" "${FAKE_BIN}/sleep" \
   "${FAKE_BIN}/curl"
 
+# Only source text is shared; every scenario keeps its own auth, state and logs.
+ADDITIONAL_ENTRYPOINTS="$(node -e '
+  const { requiredEntrypoints } = require(process.argv[1]);
+  console.log("\n" + requiredEntrypoints.slice(4)
+    .map((name) => "function " + name + "() {}").join("\n"));
+' "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js")"
+
 run_fixture() {
   local fixture_dir="$1"
   local deploy_sha="$2"
@@ -396,13 +403,6 @@ run_fixture() {
   local listed_deployment_id="$5"
   local scenario="$6"
   local response_deployment_id="${7:-${listed_deployment_id}}"
-
-  local additional_entrypoints
-  additional_entrypoints="$(node -e '
-    const { requiredEntrypoints } = require(process.argv[1]);
-    console.log("\n" + requiredEntrypoints.slice(4)
-      .map((name) => "function " + name + "() {}").join("\n"));
-  ' "${PROJECT_ROOT}/scripts/lib/apps-script-entrypoints.js")"
 
   mkdir -p "${fixture_dir}/runner/clasp-auth"
   if [[ "${scenario}" != "missing-auth" ]]; then
@@ -427,7 +427,7 @@ run_fixture() {
       RUNNER_TEMP="${fixture_dir}/runner" \
       APPS_SCRIPT_DEPLOYMENT_ID="${configured_deployment_id}" \
       DEPLOY_COMMIT_SHA="${deploy_sha}" \
-      TEST_ADDITIONAL_ENTRYPOINTS="${additional_entrypoints}" \
+      TEST_ADDITIONAL_ENTRYPOINTS="${ADDITIONAL_ENTRYPOINTS}" \
       TEST_CURRENT_MAIN_SHA="${current_sha}" \
       TEST_LISTED_DEPLOYMENT_ID="${listed_deployment_id}" \
       TEST_CONFIGURED_DEPLOYMENT_ID="${configured_deployment_id}" \

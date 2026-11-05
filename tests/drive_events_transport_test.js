@@ -38,6 +38,8 @@ function loadDriveEvents(cloudFetchImplementation) {
   });
   context.cloudFetch_ = cloudFetchImplementation;
   context.recoverPendingElectricityDashboardRefresh_ = () => false;
+  context.recoverPendingPeriodChartPointsBestEffort_ = () => ({ state: 'idle' });
+  context.recoverPendingPeriodChartRefresh_ = () => ({ state: 'idle' });
   return context;
 }
 
@@ -147,6 +149,8 @@ function testEventPollerPullsFromMatchingTransport() {
   context.flushPendingReports_ = () => {};
   context.logCatalogEvent_ = () => {};
   let dashboardRetries = 0;
+  let periodRetries = 0;
+  context.recoverPendingPeriodChartRefresh_ = () => { periodRetries += 1; };
   context.recoverPendingElectricityDashboardRefresh_ = () => {
     dashboardRetries += 1;
   };
@@ -155,6 +159,7 @@ function testEventPollerPullsFromMatchingTransport() {
 
   assert.equal(result.reason, 'empty');
   assert.equal(dashboardRetries, 1);
+  assert.equal(periodRetries, 1);
   assert.equal(requests.length, 1);
   assert.match(requests[0].url, /drive-utilities-events-pull-test-script-id:pull$/);
 }

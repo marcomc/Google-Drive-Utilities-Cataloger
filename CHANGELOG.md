@@ -9,6 +9,29 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+## [0.10.0] - 2026-11-05
+
+### Added
+
+- Adopt selected monthly line charts for billed-period display. Keep the
+  chart-only values in a separately owned technical sheet and extend periods to
+  the next month, including across calendar years, without allocating costs.
+  Preserve chart number formats, refresh after imports, and add verified years.
+- Adopt selected existing line charts with visible reference points, retaining
+  existing point sizes and chart presentation. Recover acknowledged updates
+  without repeating them after an interrupted owner-controlled adoption.
+  Provide owner-only reconciliation and explicit abandonment of verified
+  pre-write transactions after the original request has terminated.
+
+### Fixed
+
+- Restore execution of service-identity regressions for configured province
+  qualifiers and account-holder honorific prefixes.
+- Reuse immutable installer and deployment source fixtures while preserving
+  separate scenario state and every recovery and entrypoint-admission case.
+- Remove eight duplicate JavaScript syntax checks from the test gate; retain
+  execution of each file and the standalone configuration-validator syntax check.
+
 ## [0.9.0] - 2026-11-05
 
 ### Changed

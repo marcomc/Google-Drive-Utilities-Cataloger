@@ -200,6 +200,8 @@ function processDriveEventQueueUnlocked_(deadlineAt) {
   const recoveredResults = recoverPendingMutations_(rootFolder);
   flushPendingReports_();
   recoverPendingElectricityDashboardRefresh_();
+  recoverPendingPeriodChartPointsBestEffort_();
+  recoverPendingPeriodChartRefresh_();
 
   const response = cloudFetch_('https://pubsub.googleapis.com/v1/' + subscription + ':pull', {
     method: 'post',

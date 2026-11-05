@@ -16,6 +16,22 @@ TEMP_PATHS+=("${TEST_STATE_DIR}")
 TEST_SCRIPT_DIR="${PROJECT_ROOT}/scripts"
 TEST_INSTALLER_VERSION="$(sed -n 's/^INSTALLER_VERSION=//p' "${TEST_SCRIPT_DIR}/install.sh")"
 
+# Precompute immutable source artifacts, keeping recovery state per scenario.
+TEST_VERSION_CONTENT_DIR="${TEST_STATE_DIR}/version-content"
+node - "${TEST_SCRIPT_DIR}/lib/apps-script-entrypoints.js" "${TEST_VERSION_CONTENT_DIR}" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { requiredEntrypoints } = require(process.argv[2]);
+fs.mkdirSync(process.argv[3]);
+for (const missing of ['', ...requiredEntrypoints]) {
+  const content = { files: requiredEntrypoints
+    .filter(name => name !== missing)
+    .map(name => ({ type: 'SERVER_JS', source: 'function ' + name + '() {}' })) };
+  fs.writeFileSync(path.join(process.argv[3], (missing || 'complete') + '.json'),
+    JSON.stringify(content) + '\n');
+}
+NODE
+
 failures=0
 
 assert_equal() {
@@ -990,12 +1006,7 @@ test_owner_only_deployment_discovery_aborts_on_inspection_failure() {
 }
 
 version_content_fixture() {
-  node -e '
-    const { requiredEntrypoints } = require(process.argv[1]);
-    console.log(JSON.stringify({files: requiredEntrypoints
-      .filter((name) => name !== process.argv[2])
-      .map((name) => ({type: "SERVER_JS", source: "function " + name + "() {}"}))}));
-  ' "${TEST_SCRIPT_DIR}/lib/apps-script-entrypoints.js" "${1:-}"
+  printf '%s\n' "$(<"${TEST_VERSION_CONTENT_DIR}/${1:-complete}.json")"
 }
 
 initialize_version_recovery_fixture() {

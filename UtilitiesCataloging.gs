@@ -25,6 +25,8 @@ function processDueGeminiOverloadRetries() {
   return withCatalogProcessingLock_('gemini-overload-retry', function () {
     const rootFolder = DriveApp.getFolderById(getRootFolderId_());
     flushPendingReports_();
+    recoverPendingPeriodChartPointsBestEffort_();
+    recoverPendingPeriodChartRefresh_();
     const state = loadIntakeFileState_();
     const dueFileIds = getDueGeminiOverloadRetryFileIds_(state, Date.now());
     const results = [];
@@ -272,6 +274,8 @@ function runUtilitiesCataloging_(triggerSource) {
     const recoveredResults = recoverPendingMutations_(rootFolder);
     flushPendingReports_();
     recoverPendingElectricityDashboardRefresh_();
+    recoverPendingPeriodChartPointsBestEffort_();
+    recoverPendingPeriodChartRefresh_(true);
     const files = listDirectIntakePdfs_(rootFolder);
     logCatalogEvent_('catalog-scan-completed', {
       triggerSource: triggerSource,
@@ -4506,6 +4510,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     )
   });
   const layout = getSheetLayout_(sheet);
+  queuePeriodChartRefreshForSource_(sheet);
   const identityBootstrap = prepareInitialServiceIdentityBootstrap_(sheet,
     layout, extracted);
   if (identityBootstrap || state && state.initialServiceIdentityBootstrapExpected) {
@@ -4548,6 +4553,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
       });
       dashboardResult = refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
         sheet, extracted);
+      dashboardResult = refreshPeriodChartsAfterInvoiceImport_(sheet, dashboardResult);
     } catch (error) {
       try {
         restoreImportedRowPayload_(sheet, correctedRow, existingRow,
@@ -4601,6 +4607,7 @@ function importUtilityInvoiceToSheet_(file, extracted, state) {
     checkpointMutationJournal_(file.getId(), state, { stage: 'sheet-written' });
     dashboardResult = refreshElectricityDashboardAfterInvoiceImport_(spreadsheet, automationConfig,
       sheet, extracted);
+    dashboardResult = refreshPeriodChartsAfterInvoiceImport_(sheet, dashboardResult);
     applyInitialServiceIdentityBootstrap_(file, state, identityBootstrap);
   } catch (error) {
     let deletionCompleted = false;
@@ -6806,7 +6813,7 @@ function buildSuccessResult_(file, originalName, assignedName, destination, extr
     return { field: issue.fields.join(', '), reason: issue.message };
   });
   if (imported && dashboardWarning) {
-    warnings.push({ field: 'electricity dashboard', reason: dashboardWarning });
+    warnings.push({ field: 'statistics dashboard', reason: dashboardWarning });
   }
   return {
     status: imported ? (reviewIssues.length > 0 ? 'IMPORTED NEEDS REVIEW' :
