@@ -5,6 +5,17 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
 
 ## Propositions
 
+- [ ] **Review and approve historical billed-period corrections**
+  - Assessment: new imports support month ranges; existing rows must remain
+    unchanged until the owner has reviewed a source-backed correction proposal.
+  - Actions:
+    - Show prior/proposed reference cells and dependent labels, bound to verified
+      invoice identities, source hashes, dates, formulas and formats.
+    - After explicit approval, apply only unchanged reviewed targets with a
+      journal, rollback checkpoints and complete readback verification.
+    - Review custom formulas and labels that assume a numeric reference month;
+      preserve user-owned formulas until their changes are approved.
+
 - [ ] **Generate and revise invoice profiles from first-seen formats**
   - Assessment: automatic profile proposals could reduce manual setup, but must
     preserve the approval boundary and coexistence of invoice layouts. This is

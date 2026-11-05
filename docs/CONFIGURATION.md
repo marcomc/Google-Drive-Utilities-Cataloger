@@ -146,8 +146,16 @@ configured identity and its references, preserving the previous spelling as an
 alias. Ambiguous configurations are rejected before writing properties.
 Approved profile contracts carry document-specific reading rules and numeric
 absence defaults; see [Invoice contracts](INVOICE_CONTRACTS.md).
-The reference year/month always use the first month of the actual billed service
-period, for every supply, including advance billing and multi-month invoices.
+The extraction reference year/month anchor the start of the actual billed
+service period. For every supply, the sheet reference-month field displays `mm`
+for one month, `mm–mm` for several months in one year, or `mm/YYYY–mm/YYYY`
+across years. The reference-year field remains the start year as literal text.
+For example, May-August 2026 is year `2026`, month `05–08`; November 2025-February
+2026 is year `2025`, month `11/2025–02/2026`. Partial-month cycles also show both
+endpoint months. Both valid, ordered service dates are required, independently
+of invoice date, payment date or inferred cadence. Custom formulas that assume
+a numeric month need an explicit range-aware design; the importer preserves
+formula-backed columns and does not silently rewrite user formulas.
 Pinned mode tries only the configured model ID on each enabled backend; it
 contains no embedded alternative model list. Automatic mode selects candidates
 from each backend's live catalog independently.

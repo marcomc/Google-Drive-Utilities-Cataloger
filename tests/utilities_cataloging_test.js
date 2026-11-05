@@ -7170,7 +7170,7 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.match(prompt, /Only the matching approved profile may define numeric absence defaults/);
   assert.match(prompt, /final payable total, that printed total is authoritative/);
   assert.match(prompt, /never recalculate a different total/);
-  assert.match(prompt, /first month of the actual billed service period/);
+  assert.match(prompt, /extract both endpoints of the actual billed service period/);
   assert.doesNotMatch(prompt, /OENERGY|Energygas|Iliad/);
   assert.match(prompt, /Infer each table role from its headings and units, not its title/);
   assert.match(prompt, /Energy-mix, offer, marketing, and explanatory tables are not required/);
@@ -8340,6 +8340,7 @@ function testSupplementarySheetValuesCannotOverrideLiteralCanonicalFields() {
     customer_code: '00053009296',
     reference_year: 2026,
     reference_month: '09',
+    period_start: '2026-09-01', period_end: '2026-09-30',
     sheet_values: [
       { header: 'Customer code', value: 53009296 },
       { header: 'Reference year', value: 2025 },
@@ -11108,7 +11109,7 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
     c.getLocalization_=()=>header==='Frequenza'?c.getItalianLocalization_():c.getEnglishLocalization_();
     c.getSheetHeadersBySupply_=()=>({Water:[header]});
     const raw={...validInvoice(),frequency:null,frequency_source_evidence:null,
-      period_start:'2026-06-01',period_end:null,problems:[message],
+      period_start:'2026-06-01',period_end:'2026-10-31',problems:[message],
       problem_details:[{code:'missing',fields:[header],message}],
       sheet_values:[{header,value:'monthly'}]};
     const contexts=[];
@@ -11147,7 +11148,7 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
   c.getLocalization_=()=>c.getEnglishLocalization_();
   for(const modelDetail of [false,true]) {
     const raw={...validInvoice(),frequency:'',frequency_source_evidence:null,
-      period_start:'2026-06-01',period_end:null,problems:modelDetail?[message]:[],
+      period_start:'2026-06-01',period_end:'2026-10-31',problems:modelDetail?[message]:[],
       problem_details:modelDetail?[{code:'missing',fields:['frequency'],message}]:[]};
     c.callGeminiForPdf_=()=>JSON.stringify(raw);
     const result=c.extractUtilityDataWithRepair_(file,'policy',Date.now()+120000);
@@ -11161,6 +11162,12 @@ function testCadenceTextCannotOverrideStructuredEssentialFields() {
     assert.equal(resolved.extracted.frequency,'monthly');
     assert.equal(resolved.extracted.review_issues.length,0);
   }
+  const missingEnd={...validInvoice(),period_end:null,problems:[],problem_details:[]};
+  let missingEndCalls=0;
+  c.callGeminiForPdf_=()=>{missingEndCalls+=1;return JSON.stringify(missingEnd);};
+  assert.equal(c.processIntakeFile_(file,{},'policy',Date.now()+120000).status,'BLOCKED NEEDS REVIEW');
+  assert.equal(missingEndCalls,3,'Bounded repair cannot invent a missing endpoint');
+  assert.deepEqual(mutations,[],'Incomplete periods never reach duplicate/archive/sheet writes');
   for(const fields of [[],null,['period_end']]) {
     const diagnostic={...candidate,frequency:'monthly',frequency_inferred_:true,
       frequency_provenance_missing_:true,problem_details:[{code:'missing',fields,message}]};
@@ -11404,3 +11411,45 @@ function testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest() {
   }
 }
 testVertexTransientRetryReservesDeadlineBeforeWaitOrRequest();
+
+function testBilledMonthRangeWriteAndVerificationForAllSupplies() {
+  const cases = [
+    ['2026-05-01', '2026-08-31', '05–08'],
+    ['2025-09-01', '2025-12-31', '09–12'],
+    ['2025-11-01', '2026-02-28', '11/2025–02/2026'],
+    ['2024-01-01', '2026-01-31', '01/2024–01/2026'],
+    ['2024-02-01', '2024-02-29', '02'],
+    ['2026-09-01', '2026-09-30', '09'],
+    ['2025-12-15', '2026-01-14', '12/2025–01/2026'],
+    ['2026-10-15', '2026-11-14', '10–11']
+  ];
+  for (const locale of ['en', 'it']) {
+    for (const supply of ['Internet', 'Waste', 'Water', 'Electricity', 'Gas', 'Other service']) {
+      for (const [start, end, expected] of cases) {
+        const f = createInvoiceVerificationFixture(locale);
+        Object.assign(f.invoice, { supply_type: supply, period_start: start, period_end: end,
+          issue_date: '2026-10-01' });
+        f.context.applyInvoiceReferencePeriod_(f.invoice);
+        f.invoice.sheet_values.push({ header: f.layout.headers[f.indexFor('month')], value: '01' });
+        f.context.writeInvoiceRow_(f.sheet, 2, f.layout, f.file, f.invoice);
+        assert.equal(f.values[f.indexFor('month')], expected, `${locale} ${supply} ${start}`);
+        assert.equal(f.formats[f.indexFor('month')], '@');
+        assert.equal(f.values[f.indexFor('year')], start.slice(0, 4));
+        assert.equal(f.invoice.reference_month, start.slice(5, 7), 'Internal anchor stays schema-compatible');
+        assert.doesNotThrow(f.verify);
+        f.values[f.indexFor('month')] = start.slice(5, 7) === expected ? 9 : start.slice(5, 7);
+        assert.throws(f.verify, /verification failed/, 'Reject truncated or numeric reference months');
+      }
+    }
+  }
+  const c = loadCataloger();
+  for (const [start, end] of [
+    ['2026-05-01', ''], ['', '2026-08-31'], ['2026-08-31', '2026-05-01'],
+    ['2026-02-30', '2026-03-31'], ['2026-01-01', '2201-01-01']
+  ]) {
+    const e = { ...validInvoice(), period_start: start, period_end: end };
+    assert.throws(() => c.formatInvoiceReferenceMonth_(e), /valid, ordered/);
+    assert.equal(c.validateExtraction_(e).valid, false, 'Invalid period blocks before any import');
+  }
+}
+testBilledMonthRangeWriteAndVerificationForAllSupplies();

@@ -267,6 +267,23 @@ function applyInvoiceReferencePeriod_(extracted) {
   }
 }
 
+// Extraction keeps a numeric month anchor for the provider schema and cadence.
+// Only the sheet presentation expands it; no cost is apportioned to a month.
+function formatInvoiceReferenceMonth_(extracted) {
+  const start = extracted && extracted.period_start;
+  const end = extracted && extracted.period_end;
+  if (!isValidIsoDate_(start) || !isValidIsoDate_(end) || end < start ||
+    Number(start.slice(0, 4)) < 1900 || Number(end.slice(0, 4)) > 2200) {
+    throw new Error('A valid, ordered billed service period is required.');
+  }
+  if (start.slice(0, 7) === end.slice(0, 7)) { return start.slice(5, 7); }
+  if (start.slice(0, 4) === end.slice(0, 4)) {
+    return start.slice(5, 7) + '–' + end.slice(5, 7);
+  }
+  return start.slice(5, 7) + '/' + start.slice(0, 4) + '–' +
+    end.slice(5, 7) + '/' + end.slice(0, 4);
+}
+
 function bindInvoiceContract_(extracted, policy) {
   // The model may not supply executable policy or retain an earlier binding.
   delete extracted.invoice_contract_;

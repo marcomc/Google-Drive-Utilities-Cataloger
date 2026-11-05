@@ -336,7 +336,7 @@ function testExtractionCallerUsesTrustedContractAndUniversalPeriod() {
     assert.equal(immediate.aiCallCount, 1, 'Non-blocking absence must not consume extra model calls');
     assert.equal(immediate.extracted.cost_non_consumption, 15.5);
     assert.ok(immediate.extracted.problems.includes('Numero contratto non presente.'));
-    const cadence = JSON.parse(JSON.stringify(raw)); cadence.period_end = null;
+    const cadence = JSON.parse(JSON.stringify(raw)); cadence.period_end = '2026-09-30';
     c.callGeminiForPdf_ = () => JSON.stringify(cadence);
     const review = c.extractUtilityDataWithRepair_(file, trustedPolicy, Date.now() + 120000);
     assert.equal(review.validation.valid, true);
@@ -354,6 +354,8 @@ function testExtractionCallerUsesTrustedContractAndUniversalPeriod() {
     }
     assert.equal(c.validateExtractedUtilityDataForImport_({ ...result.extracted,
       period_start: null }).valid, false, 'Missing actual billed period cannot be a cadence-only warning');
+    assert.equal(c.validateExtractedUtilityDataForImport_({ ...result.extracted,
+      period_end: null }).valid, false, 'Missing period end cannot safely render a billed range');
     }
   }
 }

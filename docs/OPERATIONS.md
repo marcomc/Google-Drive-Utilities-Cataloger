@@ -849,12 +849,28 @@ does not overwrite them or the root Drive policy. The manual format, validation
 entrypoints and migration procedure are documented in
 [Invoice contracts](INVOICE_CONTRACTS.md).
 
-Every supply uses the first month/year of the actual billed service period.
+Every supply displays the actual billed service period: `mm` for one month,
+`mm–mm` within one year and `mm/YYYY–mm/YYYY` across years. The reference-year
+column and internal extraction month anchor the period start. Both valid,
+ordered endpoints are required; cadence cannot supply missing dates.
 Current charges must be distinguished from historic recaps, reversals, offer
 validity and payment dates before establishing that period. Missing or
 contradictory period evidence blocks import rather than choosing a date.
-Historical corrections require a source-backed row identity, prior-value
-snapshot, narrow reference-cell update and verified readback.
+Existing historical rows are not rewritten by deployment or ordinary refresh.
+Prepare a read-only proposal first: identify the source invoice and its hash,
+verify the row identity and printed current-service dates, snapshot prior values,
+formulas and formats, then list each proposed reference-cell change. Show that
+proposal to the owner before any write. A later authorized migration must journal
+narrow updates, reject changed rows and verify readback, including dependent
+labels. The existing text-normalization maintenance function does not discover
+or convert billed ranges.
+
+Managed electricity monthly comparisons exclude multi-month rows; same-year
+ranges contribute to annual totals, while cross-year ranges do not. Whole-invoice
+quantities remain in the source and issue-date chart. No consumption or cost is
+prorated. The per-file import report explains these exclusions for multi-month
+electricity invoices. Legacy user-owned dashboard formulas are preserved and
+reported for review; custom derived labels/formulas may need range-aware changes.
 
 Validator-requested detailed monetary repairs use medium thinking within
 Flash-Lite. Approved contracts check independently printed parents and children,

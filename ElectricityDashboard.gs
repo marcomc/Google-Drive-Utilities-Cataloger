@@ -1618,8 +1618,9 @@ function electricitySumFormula_(source, bandColumn, year, month) {
     dateRange, 'YEAR', 1900, 9999, source.separator);
   const effectiveMonth = electricityBoundedValueOrDatePartFormula_(monthRange,
     dateRange, 'MONTH', 1, 12, source.separator);
+  const monthEligible = electricityPeriodEligibilityFormula_(monthRange, false, source.separator);
   return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*(' + effectiveMonth +
-    '=' + month + ')*' + bandRange + ')';
+    '=' + month + ')*' + monthEligible + '*' + bandRange + ')';
 }
 
 function electricityAnnualFormula_(source, bandColumn, year) {
@@ -1631,7 +1632,18 @@ function electricityAnnualFormula_(source, bandColumn, year) {
     ':$' + source.date + '$' + source.lastRow;
   const effectiveYear = electricityBoundedValueOrDatePartFormula_(yearRange,
     dateRange, 'YEAR', 1900, 9999, source.separator);
-  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*' + bandRange + ')';
+  const monthRange = source.sheet + '$' + source.month + '$' + source.firstDataRow +
+    ':$' + source.month + '$' + source.lastRow;
+  const yearEligible = electricityPeriodEligibilityFormula_(monthRange, true, source.separator);
+  return '=SUMPRODUCT((' + effectiveYear + '=' + year + ')*' + yearEligible + '*' + bandRange + ')';
+}
+
+// Keep whole-period quantities out of comparisons requiring a finer allocation.
+// Same-year ranges can contribute to that year's total, never to one month.
+function electricityPeriodEligibilityFormula_(monthRange, annual, separator) {
+  const pattern = annual ? '/' : '–';
+  return 'IFERROR(IF(REGEXMATCH(TO_TEXT(' + monthRange + ')' + separator +
+    '"' + pattern + '")' + separator + '0' + separator + '1)' + separator + '0)';
 }
 
 function electricityBoundedValueOrDatePartFormula_(valueRange, dateRange,
@@ -1653,6 +1665,22 @@ function getElectricitySupplySheetName_(automationConfig) {
 }
 
 function refreshElectricityDashboardAfterInvoiceImport_(spreadsheet,
+  automationConfig, importedSheet, extracted) {
+  const result = refreshElectricityDashboardAfterInvoiceImportInternal_(spreadsheet,
+    automationConfig, importedSheet, extracted);
+  if (importedSheet && importedSheet.getName() === getElectricitySupplySheetName_(automationConfig) &&
+    extracted && extracted.period_start && extracted.period_end &&
+    extracted.period_start.slice(0, 7) !== extracted.period_end.slice(0, 7)) {
+    const notice = result.refresh && result.refresh.reason === 'legacy-formula-dashboard' ?
+      'Billed month ranges require review of user-owned dashboard formulas; those formulas were preserved.' :
+      'Monthly comparisons exclude multi-month invoices; annual comparisons also exclude cross-year periods. ' +
+        'Whole-invoice quantities remain in the source and issue-date chart; no monthly allocation was inferred.';
+    result.warning = [result.warning, notice].filter(Boolean).join(' ');
+  }
+  return result;
+}
+
+function refreshElectricityDashboardAfterInvoiceImportInternal_(spreadsheet,
   automationConfig, importedSheet, extracted) {
   if (!importedSheet || importedSheet.getName() !==
     getElectricitySupplySheetName_(automationConfig)) {
