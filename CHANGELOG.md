@@ -9,6 +9,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+## [0.9.0] - 2026-11-05
+
+### Changed
+
+- Review custom spreadsheet formulas that assume a single month value; they need adaptation to handle reference-period ranges. (#29)
+
+### Added
+
 - Display the actual billed service period as a single month or month range for
   every supply, with explicit endpoint years across calendar boundaries. Require
   both valid, ordered service dates and verify literal period text after writing.
