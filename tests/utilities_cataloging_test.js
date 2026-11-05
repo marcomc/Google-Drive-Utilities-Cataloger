@@ -10377,8 +10377,6 @@ testSingleFilePersistsWhenOperatorLinksFail();
 testSingleFileRecoversOnlyTargetJournal();
 testSingleFileStopsWhenTargetJournalRemains();
 
-console.log('Utilities cataloging tests passed.');
-
 function testQuadrimestralCadenceAndConfiguredEvidence() {
   const context = loadCataloger();
   context.getHistoricalInvoiceFrequencyEvidence_ = () => ({ state: 'consensus', frequency: 'four_monthly' });
@@ -11476,3 +11474,5 @@ function testBilledMonthRangeWriteAndVerificationForAllSupplies() {
   }
 }
 testBilledMonthRangeWriteAndVerificationForAllSupplies();
+
+console.log('Utilities cataloging tests passed.');

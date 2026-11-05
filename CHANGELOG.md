@@ -9,6 +9,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+## [0.10.1] - 2026-11-05
+
+### Fixed
+
+- Prevent silent omission of named regression tests and report cataloging success only after the final test. (TEST-RUNNER-REGISTRATION)
+
 ## [0.10.0] - 2026-11-05
 
 ### Added
