@@ -406,6 +406,75 @@ function testLocaleParity() {
   assert.equal(italian.headerAliases.customerCode.includes('codice cliente'), true);
 }
 
+function unregisteredTestFunctions(source) {
+  const acorn = require('../scripts/lib/vendor/acorn/acorn.js');
+  const statements = acorn.parse(source, { ecmaVersion: 'latest' }).body;
+  const functions = new Map(statements
+    .filter(statement => statement.type === 'FunctionDeclaration')
+    .map(statement => [statement.id.name, statement]));
+
+  function calls(node, result = new Set()) {
+    if (!node || typeof node !== 'object' ||
+      ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(node.type)) {
+      return result;
+    }
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier') {
+      result.add(node.callee.name);
+    }
+    Object.values(node).forEach(value => {
+      if (Array.isArray(value)) value.forEach(child => calls(child, result));
+      else if (value && typeof value === 'object') calls(value, result);
+    });
+    return result;
+  }
+
+  // These runners register tests through direct calls, including named wrappers.
+  // This checks registration, not whether every conditional/parameter executes.
+  const pending = statements
+    .filter(statement => statement.type === 'ExpressionStatement' &&
+      statement.expression.type === 'CallExpression' &&
+      statement.expression.callee.type === 'Identifier')
+    .map(statement => statement.expression.callee.name);
+  const registered = new Set();
+  while (pending.length) {
+    const name = pending.pop();
+    if (registered.has(name) || !functions.has(name)) continue;
+    registered.add(name);
+    pending.push(...calls(functions.get(name).body));
+  }
+  return [...functions.keys()].filter(name => /^test/.test(name) && !registered.has(name));
+}
+
+function testNamedRegressionsRemainRegisteredInTheTestGate() {
+  assert.deepEqual(unregisteredTestFunctions('function testMissing() {}'), ['testMissing']);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testCalled() {} testCalled();'), []);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testParameterized() {} function testWrapper() { for (const x of [1, 2]) testParameterized(x); } testWrapper();'), []);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testMissing() {} function unused() { testMissing(); }'), ['testMissing']);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testCycle() { helper(); } function helper() { testCycle(); }'), ['testCycle']);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testMissing() {} const unused = () => testMissing();'), ['testMissing']);
+  assert.deepEqual(unregisteredTestFunctions(
+    'function testMissing() {} if (false) testMissing();'), ['testMissing']);
+
+  const makefile = fs.readFileSync(path.join(projectRoot, 'Makefile'), 'utf8');
+  const testRecipe = makefile.match(/^test:[^\n]*\n((?:\t[^\n]*\n|\n)*)/m);
+  assert.ok(testRecipe, 'The make test recipe must be available.');
+  const runners = Array.from(testRecipe[1].matchAll(/^\t@node (tests\/[^\s]+\.js)$/gm),
+    match => match[1]);
+  for (const file of fs.readdirSync(path.join(projectRoot, 'tests'))
+    .filter(file => file.endsWith('_test.js')).sort()) {
+    const runner = `tests/${file}`;
+    assert.ok(runners.includes(runner), `${runner} must run through make test.`);
+    assert.deepEqual(unregisteredTestFunctions(fs.readFileSync(
+      path.join(projectRoot, runner), 'utf8')), [],
+    `${runner} contains named regressions without an invocation.`);
+  }
+}
+
 function testDeploymentContract() {
   const workflow = fs.readFileSync(
     path.join(projectRoot, '.github/workflows/deploy-apps-script.yml'),
@@ -481,6 +550,7 @@ testRequiredEntrypointValidationIsTopLevelAndNegativeSafe();
 testEntrypointValidationIsSelfContainedAfterRelocation();
 testNormalizedConfigurationCollisions();
 testLocaleParity();
+testNamedRegressionsRemainRegisteredInTheTestGate();
 testDeploymentContract();
 
 console.log('Project contract tests passed.');
