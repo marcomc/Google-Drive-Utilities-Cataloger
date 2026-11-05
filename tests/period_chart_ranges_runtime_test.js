@@ -306,4 +306,50 @@ function fixture() {
   assert.throws(() => f.context.refreshRegisteredPeriodChart_(previous));
   assert.equal(f.state.writes, 1);
 }
+// A corrected short period must not detach the automatic range boundary from
+// the table, including when registration recovery follows the shrinking write.
+for (const interruptedShrink of [false, true]) {
+  const f = fixture();
+  f.state.sourceRows = [['2026', '05/2026–02/2027']];
+  f.context.adoptCatalogerPeriodChart({ sheetId: 20, chartId: 10, sourceSheetId: 30 });
+  const registration = JSON.parse(f.props.PERIOD_CHART_RANGE_V1_10);
+  const ranges = () => [f.state.chart.spec.basicChart.domains[0].domain,
+    f.state.chart.spec.basicChart.series[0].series].map(item => item.sourceRange.sources[0]);
+  assert.deepEqual(ranges().map(range => range.endRowIndex), [16, 16]);
+  f.state.sourceRows = [['2026', '05–08']];
+  f.state.lost = interruptedShrink;
+  if (interruptedShrink) {
+    assert.throws(() => f.context.refreshRegisteredPeriodChart_(registration));
+    f.state.lost = false;
+    assert.equal(f.context.recoverPendingPeriodChartPoints_().state, 'committed');
+  } else {
+    assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
+  }
+  assert.deepEqual(ranges().map(range => range.endRowIndex), [13, 13]);
+  assert.equal(f.state.technicalValues[15][1], '');
+  f.state.sourceRows = [['2026', '05/2026–12/2027']];
+  assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
+  assert.deepEqual(ranges().map(range => range.endRowIndex), [26, 26]);
+  assert.equal(f.state.technicalValues[25][1], 49);
+  assert.deepEqual(f.state.chart.position, f.initial.position);
+  assert.equal(f.state.chart.spec.basicChart.series[0].color.red, 0.4);
+}
+// Custom ends stay intact. Custom starts and columns also stay intact when the
+// end matches the automatic boundary or the start lies beyond the shorter table.
+for (const customization of [ { endRowIndex: 15 }, { startRowIndex: 14 },
+  { startColumnIndex: 1, endColumnIndex: 2 } ]) {
+  const f = fixture();
+  f.state.sourceRows = [['2026', '05/2026–02/2027']];
+  f.context.adoptCatalogerPeriodChart({ sheetId: 20, chartId: 10, sourceSheetId: 30 });
+  const registration = JSON.parse(f.props.PERIOD_CHART_RANGE_V1_10);
+  const range = f.state.chart.spec.basicChart.domains[0].domain.sourceRange.sources[0];
+  Object.assign(range, customization);
+  const originalRange = JSON.parse(JSON.stringify(range));
+  for (const period of ['05–08', '05/2026–12/2027']) {
+    f.state.sourceRows = [['2026', period]];
+    assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
+    assert.deepEqual(f.state.chart.spec.basicChart.domains[0].domain.sourceRange.sources[0],
+      originalRange);
+  }
+}
 console.log('Period chart range runtime integration tests passed.');

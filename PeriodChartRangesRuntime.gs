@@ -431,13 +431,17 @@ function refreshRegisteredPeriodChart_(registration) {
   }
   const updatedSources = [updated.spec.basicChart.domains[0].domain].concat(
     updated.spec.basicChart.series.map(function (item) { return item.series; }));
-  let expanded = addedYears > 0;
+  let chartChanged = addedYears > 0;
   updatedSources.forEach(function (dataSource, index) {
-    // An owner-adjusted range stays untouched. A range still ending at the
-    // previous data boundary grows with a newly extended period.
-    if (sources[index] && sources[index].endRowIndex === previousRows && data.table.length > previousRows) {
+    // Resize the complete automatic source on both growth and shrink. Keeping
+    // an old end after a shrink would lose its managed-boundary identity.
+    // Preserve the whole source when the owner changed its start or columns.
+    const previous = sources[index];
+    if (previous && previous.startRowIndex === 0 &&
+      previous.startColumnIndex === index && previous.endColumnIndex === index + 1 &&
+      previous.endRowIndex === previousRows && data.table.length !== previousRows) {
       dataSource.sourceRange.sources[0].endRowIndex = data.table.length;
-      expanded = true;
+      chartChanged = true;
     }
   });
   const before = periodChartFingerprint_(beforeSnapshot);
@@ -447,7 +451,7 @@ function refreshRegisteredPeriodChart_(registration) {
   const requests = beforeSnapshot.technical.formatsMatch ? [] :
     periodChartFormatRequests_(nextRegistration);
   requests.push(operations[0]);
-  if (expanded) { requests.push({ updateChartSpec: { chartId: registration.chartId,
+  if (chartChanged) { requests.push({ updateChartSpec: { chartId: registration.chartId,
     spec: updated.spec } }); }
   return commitPeriodChartTransaction_(periodChartPointStore_(
     PropertiesService.getScriptProperties()), periodChartPointSheets_(), {

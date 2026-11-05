@@ -16,7 +16,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Adopt selected monthly line charts for billed-period display. Keep the
   chart-only values in a separately owned technical sheet and extend periods to
   the next month, including across calendar years, without allocating costs.
-  Preserve chart number formats, refresh after imports, and add verified years.
+  Preserve chart number formats, refresh after imports, keep automatic ranges
+  aligned with corrected periods, and add verified years.
 - Adopt selected existing line charts with visible reference points, retaining
   existing point sizes and chart presentation. Recover acknowledged updates
   without repeating them after an interrupted owner-controlled adoption.

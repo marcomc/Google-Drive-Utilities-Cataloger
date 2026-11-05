@@ -395,6 +395,9 @@ settings intact, copies source number formats for labels such as currency, and
 never writes chart-only values to invoice rows or totals.
 Existing source ranges outside the managed data block are rejected during
 refresh. Owner-adjusted ranges inside that block remain unchanged.
+Complete automatic sources follow both shorter and longer corrected periods,
+so a later extension remains visible after an earlier contraction.
+A source identical to the complete automatic block remains app-managed.
 
 Source changes queue a refresh; completed imports refresh their affected charts
 and pending work is retried on daily, event, and overload-retry paths. The daily
