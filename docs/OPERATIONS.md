@@ -350,11 +350,72 @@ reason, and recommended action rather than inventing a comparison.
 | `maintainGeminiModelSelections()` | Managed hourly model maintenance. | Refreshes one due provider/tier pair with a daily cooldown; preserves verified caches on failure and performs no discovery in pinned mode. |
 | `refreshGeminiModelSelectionCaches()` | Owner-controlled model maintenance, outside PDF processing. | Lists and generation-probes stable Flash-Lite and GA Flash candidates for each configured provider, then caches verified IDs for 24 hours. |
 | `migrateCatalogerReferencePeriodText` | One-time or repeatable post-release maintenance. | Converts existing non-formula reference year/month cells to literal text without changing other fields. |
+| `adoptCatalogerChartPoints` | Owner-controlled chart maintenance through the Execution API. | Registers explicitly selected line charts and adds missing point sizes while preserving existing chart presentation. |
+| `adoptCatalogerPeriodChart` | Owner-controlled chart maintenance through the Execution API. | Adopts one identified monthly line chart and binds it to a journaled technical data sheet. |
+| `recoverCatalogerCharts` | Owner-controlled chart recovery through the Execution API. | Reconciles a pending chart transaction without processing PDFs or repeating Sheets writes. |
 | `processDriveEventQueue` | 15-minute trigger only. | Validates the script-scoped transport before pulling events, then processes only direct-root PDFs named by those events; an absent pair is a no-op and a mismatch fails closed. |
 | `renewDriveEventSubscription` | Six-hour trigger only. | Extends the active subscription or replaces an explicitly inaccessible stored subscription; an absent transport is a no-op and mismatched Pub/Sub names fail closed. |
 | `provisionDriveEventTransport` | Initial setup. | Ensures Pub/Sub and Drive event resources exist without replacing an active Drive event subscription. |
 | `recreateDriveEventSubscription` | Event repair after a controlled test receives no event. | Reconciles script-scoped Pub/Sub resources and replaces this automation's Drive event subscription. |
 | `removeAutomationTriggers` | Pause or retirement. | Deletes only this project's automation triggers. |
+
+To adopt selected charts, invoke `adoptCatalogerChartPoints` through the
+owner-only Apps Script Execution API with one object parameter containing the
+numeric `sheetId` of the chart's sheet and a `chartIds` array of numeric IDs.
+Obtain and verify these identities from the configured spreadsheet's Sheets API
+metadata before invocation. All selected charts must already exist on that
+sheet and be line charts. Existing positive per-series point sizes are retained;
+missing or zero sizes become five. Each chart update retains its full chart
+specification, source ranges, ID, and position. Adoption is repeatable.
+Charts using row transposition or a non-default merge strategy are rejected
+before mutation because those native settings cannot be safely reconstructed
+from the Sheets API specification alone.
+
+An interrupted chart update is reconciled by the next daily scan or configured
+event poll. If its result is uncertain or chart state has changed, its journal
+is retained and no automatic write is repeated. Inspect the chart and journal
+before any manual recovery. Call `recoverCatalogerCharts()` to reconcile an
+applied batch or inspect an uncertain transaction. If the original request has
+definitively terminated, the owner may abandon its unchanged pre-write state
+with `{action: 'abandon', transactionId, before, confirmation: 'NO_WRITE_IN_FLIGHT'}`,
+using the exact transaction ID and fingerprint returned by inspection. This
+records an explicit resolution before clearing the journal; it never replays
+the batch. Do not confirm while a timed-out request could still complete.
+Changed or conflicting state remains blocked for investigation.
+Point adoption controls point markers only; it does
+not change billed-period graph data.
+
+To display billed periods, invoke `adoptCatalogerPeriodChart` with a single
+object parameter containing numeric `sheetId`, `chartId`, and `sourceSheetId`.
+The source must be a configured supply sheet, and the chart must use a monthly
+grid whose formulas reference that sheet. The function validates its inputs and
+creates a hidden, ownership-marked data sheet in the same atomic Sheets batch
+that changes the chart's sources. It leaves the chart's position and other
+settings intact, copies source number formats for labels such as currency, and
+never writes chart-only values to invoice rows or totals.
+Existing source ranges outside the managed data block are rejected during
+refresh. Owner-adjusted ranges inside that block remain unchanged.
+Complete automatic sources follow both shorter and longer corrected periods,
+so a later extension remains visible after an earlier contraction.
+A source identical to the complete automatic block remains app-managed.
+
+Source changes queue a refresh; completed imports refresh their affected charts
+and pending work is retried on daily, event, and overload-retry paths. The daily
+scan also reconciles registered charts after edits made outside the importer. A new
+source year is added when the adjacent statistics grid exposes its year header
+and twelve monthly formulas equivalent to the prior year's formulas and
+referencing the configured supply. Otherwise,
+refresh retains its pending marker for review rather than inventing a formula
+or silently omitting the year. A chart must use interpolated line series and
+the installation's monthly labels, one header row, and the default native merge
+and transposition settings to be adopted.
+Each chart reserves space for up to 25 year series and periods of at most
+120 months; larger inputs stop for review without changing the chart.
+
+When multiple bills with the same start month cover different periods, their
+existing aggregate point is retained without projecting an invented allocation.
+If that ambiguity affects the latest period, refresh stops for review instead
+of extending an unsupported value.
 
 ### Invoice review outcomes
 
