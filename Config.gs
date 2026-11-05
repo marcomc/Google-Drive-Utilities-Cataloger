@@ -1,5 +1,5 @@
 const CONFIG = Object.freeze({
-  APP_VERSION: '0.8.0',
+  APP_VERSION: '0.9.0',
   // Bootstrap fallback for explicit pins; automatic selection is the default
   // for new installations and resolves each provider's catalog independently.
   DEFAULT_MODEL: 'gemini-3.5-flash-lite',
