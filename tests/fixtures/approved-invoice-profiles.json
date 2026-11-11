@@ -232,7 +232,20 @@
         "Luce"
       ],
       "components": [],
-      "checks": [],
+      "checks": [
+        {
+          "total": "field:cost_non_consumption",
+          "parts": [
+            "header:Altri costi materia energia",
+            "header:Trasporto e gestione contatore",
+            "header:Oneri di sistema",
+            "header:Accise",
+            "header:Canone TV",
+            "header:Ricalcoli",
+            "header:Rete e oneri non scorporabili"
+          ]
+        }
+      ],
       "allocations": [],
       "defaults": [
         {

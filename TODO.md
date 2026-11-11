@@ -1,7 +1,7 @@
 # TODO
 
-This backlog records concrete work that is intentionally not implemented in
-release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
+This backlog records concrete work that remains unimplemented. Completed work
+belongs in `CHANGELOG.md`, not here.
 
 ## Propositions
 
@@ -195,12 +195,3 @@ release `0.1.0`. Completed work belongs in `CHANGELOG.md`, not here.
     - Verify spreadsheet creation and movement into a shared drive.
     - Validate Workspace Events delivery and direct-root filtering.
     - Document unsupported organization-policy combinations.
-
-- [ ] **Publish release 0.1.0 after human review**
-  - Assessment: release content is documented, but repository publication,
-    tagging, and release creation remain intentionally user-controlled.
-  - Actions:
-    - Review the complete diff and publication privacy scan.
-    - Confirm repository metadata, default branch, and CI requirements.
-    - Commit and tag `v0.1.0` only after explicit approval.
-    - Publish release notes derived from `CHANGELOG.md`.

@@ -1,0 +1,246 @@
+{
+  "locale": "it",
+  "supplier": "Energygas Italia",
+  "supply": "Luce",
+  "contract": {
+    "version": 1,
+    "supplies": [
+      "Luce"
+    ],
+    "components": [
+      {
+        "id": "consumption_parent"
+      },
+      {
+        "id": "selling_consumption"
+      },
+      {
+        "id": "network_consumption"
+      },
+      {
+        "id": "fixed_parent"
+      },
+      {
+        "id": "fixed_selling"
+      },
+      {
+        "id": "fixed_network"
+      },
+      {
+        "id": "power_network"
+      },
+      {
+        "id": "excise"
+      },
+      {
+        "id": "television",
+        "absence_value": 0,
+        "absence_statements": [
+          "Canone TV non presente nel documento."
+        ]
+      },
+      {
+        "id": "transport_separate",
+        "absence_value": 0,
+        "absence_statements": [
+          "Trasporto separato non presente: incluso negli importi rete e oneri."
+        ]
+      },
+      {
+        "id": "system_separate",
+        "absence_value": 0,
+        "absence_statements": [
+          "Oneri separati non presenti: ASOS e ARIM sono compresi negli importi rete e oneri."
+        ]
+      },
+      {
+        "id": "recalculations",
+        "absence_value": 0,
+        "absence_statements": [
+          "Ricalcoli non presenti nel documento."
+        ]
+      }
+    ],
+    "checks": [
+      {
+        "total": "consumption_parent",
+        "parts": [
+          "selling_consumption",
+          "network_consumption"
+        ]
+      },
+      {
+        "total": "fixed_parent",
+        "parts": [
+          "fixed_selling",
+          "fixed_network"
+        ]
+      },
+      {
+        "total": "field:cost_non_consumption",
+        "parts": [
+          "header:Altri costi materia energia",
+          "header:Trasporto e gestione contatore",
+          "header:Oneri di sistema",
+          "header:Accise",
+          "header:Canone TV",
+          "header:Ricalcoli",
+          "header:Rete e oneri non scorporabili"
+        ]
+      }
+    ],
+    "allocations": [
+      {
+        "target": "field:cost_consumption",
+        "parts": [
+          "selling_consumption"
+        ],
+        "group": "canonical",
+        "replace_from": [
+          "consumption_parent"
+        ]
+      },
+      {
+        "target": "field:cost_non_consumption",
+        "parts": [
+          "fixed_selling",
+          "network_consumption",
+          "fixed_network",
+          "power_network",
+          "excise",
+          "television",
+          "transport_separate",
+          "system_separate",
+          "recalculations"
+        ],
+        "group": "canonical"
+      },
+      {
+        "target": "header:Altri costi materia energia",
+        "parts": [
+          "fixed_selling"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Trasporto e gestione contatore",
+        "parts": [
+          "transport_separate"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Oneri di sistema",
+        "parts": [
+          "system_separate"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Accise",
+        "parts": [
+          "excise"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Canone TV",
+        "parts": [
+          "television"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Ricalcoli",
+        "parts": [
+          "recalculations"
+        ],
+        "group": "details"
+      },
+      {
+        "target": "header:Rete e oneri non scorporabili",
+        "parts": [
+          "network_consumption",
+          "fixed_network",
+          "power_network"
+        ],
+        "group": "details",
+        "replace_from": [
+          "network_consumption",
+          "fixed_network",
+          "power_network"
+        ]
+      }
+    ],
+    "defaults": [
+      {
+        "header": "Trasporto e gestione contatore",
+        "value": 0,
+        "aliases": []
+      },
+      {
+        "header": "Oneri di sistema",
+        "value": 0,
+        "aliases": [],
+        "absence_statements": [
+          "Oneri di sistema non presente nel documento, le voci ASOS/ARIM sono subordinate o aggregate."
+        ]
+      },
+      {
+        "header": "Ricalcoli",
+        "value": 0,
+        "aliases": [
+          "Ricalcolo"
+        ]
+      }
+    ],
+    "electricity_consumption": true,
+    "customer_code_prefixes": [
+      "CL"
+    ],
+    "identifier_absence_statements": [
+      "Numero contratto non presente o non identificabile per {supplier} {customer_code} \u00e8 codice cliente.",
+      "Contract number not present for {supplier} customer code {customer_code}.",
+      "Contract number not present; customer code {customer_code}",
+      "Il numero di contratto non \u00e8 presente o non \u00e8 identificabile per {supplier} ({customer_code} \u00e8 codice cliente)."
+    ]
+  },
+  "legacy_defaults": [
+    {
+      "supplier": "Energygas Italia",
+      "supply_type": "Luce",
+      "header": "Trasporto e gestione contatore",
+      "value": 0,
+      "fieldPattern": "\\btrasporto\\s+e\\s+gestione\\s+contatore\\b",
+      "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+      "explicitAbsenceDiagnosticPattern": ""
+    },
+    {
+      "supplier": "Energygas Italia",
+      "supply_type": "Luce",
+      "header": "Oneri di sistema",
+      "value": 0,
+      "fieldPattern": "\\boneri\\s+di\\s+sistema\\b",
+      "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+      "explicitAbsenceDiagnosticPattern": "^oneri\\s+di\\s+sistema\\s+non\\s+(?:(?:e|\u00e8)\\s+)?presente\\s+nel\\s+documento[,;]\\s+le\\s+voci\\s+asos[/\\s]+arim\\s+sono\\s+(?:subordinate|aggregate)(?:\\s+o\\s+(?:subordinate|aggregate))?[.]?\\s*$"
+    },
+    {
+      "supplier": "Energygas Italia",
+      "supply_type": "Luce",
+      "header": "Ricalcoli",
+      "value": 0,
+      "fieldPattern": "\\bricalcol[io]\\b",
+      "explicitAbsencePattern": "\\b(?:non\\s+(?:(?:e|\u00e8)\\s+)?(?:presente|trovato|riportato|indicat[oa]|stampat[oa]e?)|assente)\\b",
+      "explicitAbsenceDiagnosticPattern": ""
+    }
+  ],
+  "detail_headers": [
+    "Altri costi materia energia",
+    "Trasporto e gestione contatore",
+    "Oneri di sistema",
+    "Accise",
+    "Canone TV",
+    "Ricalcoli",
+    "Rete e oneri non scorporabili"
+  ]
+}

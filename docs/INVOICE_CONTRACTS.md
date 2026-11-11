@@ -68,6 +68,14 @@ normalization; accepted localized rate/quantity strings remain supported, while
 ambiguous grouping and prose fail before product validation. Source component
 amounts must always be native JSON numbers.
 
+For a bill that includes network and system charges in several printed parent
+sections, transcribe each component and its parent independently. Check each
+printed parent against its children, then allocate the exclusive components
+to the configured detail columns once. A separate charge must have printed
+evidence or an explicitly reviewed absence statement; a nested recap alone does
+not authorize another charge. Conflicting supplied values remain blocking.
+Profiles with fixed column bindings require those writable columns to exist.
+
 ## Manual installation migration
 
 1. Preserve existing approved profile prose and evidence sources. Review the
