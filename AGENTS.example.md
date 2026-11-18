@@ -47,19 +47,41 @@ Do not commit or publish the customized Drive copy.
 - Archive `archive_only` documents in the configured folder without editing the
   spreadsheet.
 - Archive `import` utility invoices using the configured destination templates.
-- Classify a document as an `Invoice` when it has an invoice number, issue
-  date, or invoice total, even if it also contains consumption reports or
-  detailed calculation tables. Use `Report` only when those invoice indicators
-  are absent.
+- Classify the whole document as an `Invoice` when the fiscal invoice
+  evidence is clear, including when it has a consumption report attached.
+  A standalone consumption report may have a date or a customer or contract
+  code. Use `Report` when the primary document reports consumption and has
+  no fiscal invoice evidence.
 - For a certain supplier missing from the map, create
   `<supply>/<supplier>/<year>` and mention it in the report.
 - If a configured path for a known supplier is absent, do not create an
   alternative path: stop processing and report the issue.
 
+### Consumption reports
+
+For a dedicated report destination, add one `report-archive` block to the
+intake policy. Map the canonical `Supply|SUPPLIER` to an existing folder path
+relative to intake. Replace the example with the installation's values.
+
+```report-archive
+{
+  "Water|EXAMPLE SUPPLIER": "Consumption Reports/{year}"
+}
+```
+
+For a mapped report with a verified service address classified as `import`,
+use its printed issue date for the filename and destination year. When there
+is no issue date, use the end of the main report coverage interval. Require
+both coverage dates to be printed, valid, and ordered for this fallback.
+Exclude past comparison periods, forecasts, and dates from other documents.
+Keep the issue date empty when absent. A report identifier and a postal code
+are optional. Leave ambiguous or conflicting evidence for review. Reports
+never generate spreadsheet rows.
+
 ## File names
 
-Use the issue date in `YYYYMMDD` format and remove invalid file-name
-characters.
+Use the document's naming date in `YYYYMMDD` format and remove invalid
+file-name characters.
 
 | Document | File name |
 | --- | --- |
@@ -90,7 +112,8 @@ manual review.
   Require valid, ordered start and end dates. Never infer an endpoint from
   cadence, issue date or earlier invoices. Advance and delayed billing follow
   the same rule. Exclude payment dates, next-invoice dates, offer validity and
-  historical or credited periods; conflicting current-period evidence blocks.
+  historical or credited periods. Include estimates explicitly billed in the
+  current charges. Leave conflicting current-period evidence for review.
 - Store the reference year as four-digit literal text, never as a numeric
   value. Preserve the exact configured canonical supplier spelling and case;
   do not replace it with a filename abbreviation or uppercase fallback.

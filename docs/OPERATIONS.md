@@ -424,6 +424,8 @@ creates a hidden, ownership-marked data sheet in the same atomic Sheets batch
 that changes the chart's sources. It leaves the chart's position and other
 settings intact, copies source number formats for labels such as currency, and
 never writes chart-only values to invoice rows or totals.
+The chart closes each range in its final billed month, including across year
+boundaries. A later observed bill takes precedence over a projected endpoint.
 Existing source ranges outside the managed data block are rejected during
 refresh. Owner-adjusted ranges inside that block remain unchanged.
 Complete automatic sources follow both shorter and longer corrected periods,
