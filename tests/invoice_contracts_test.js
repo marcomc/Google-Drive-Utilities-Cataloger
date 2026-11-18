@@ -418,6 +418,70 @@ function testValidatedMappingRetainsNonBlockingDiagnostics() {
   }
 }
 
+function testEnergygasSourceComponentsDriveExclusiveAllocation() {
+  const c = runtime();
+  const fixture = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/energygas-electricity-contract.json'), 'utf8'));
+  // Synthetic amounts preserve the printed-parent and duplicate-charge cases.
+  const values = { consumption_parent: 52, selling_consumption: 40,
+    network_consumption: 12, fixed_parent: 10, fixed_selling: 8,
+    fixed_network: 2, power_network: 4, excise: 5, television: 6,
+    transport_separate: 0, system_separate: 0, recalculations: 0 };
+  const absence = { transport_separate: 'Trasporto separato non presente: incluso negli importi rete e oneri.',
+    system_separate: 'Oneri separati non presenti: ASOS e ARIM sono compresi negli importi rete e oneri.',
+    recalculations: 'Ricalcoli non presenti nel documento.' };
+  const e = { document_type: 'Invoice', supplier: 'Energygas Italia', supply_type: 'Luce',
+    contract_number: '', customer_code: 'CL123', cost_consumption: 40,
+    cost_non_consumption: 37, vat: 7, total: 84, problems: [], sheet_values: [],
+    source_components: Object.entries(values).map(([id, amount]) => ({ id, amount,
+      source_evidence: absence[id] ? 'explicit_absence' : 'printed',
+      ...(absence[id] ? { absence_evidence: absence[id] } : {}) })) };
+  Object.defineProperty(e, 'configured_writable_headers', { value: fixture.detail_headers });
+  c.bindInvoiceContract_(e, policy('Energygas Italia', fixture.contract));
+  c.applyApprovedProfileFieldDefaults_(e, fixture.detail_headers);
+  assert.deepEqual(e.problems, [], 'Contract-allocated fields must not receive conflicting default diagnostics');
+  assert.equal(c.evaluateInvoiceContract_(e, true).valid, true);
+  const mapped = Object.fromEntries(e.sheet_values.map(x => [x.header, x.value]));
+  assert.deepEqual(mapped, { 'Altri costi materia energia': 8,
+    'Trasporto e gestione contatore': 0, 'Oneri di sistema': 0, 'Accise': 5,
+    'Canone TV': 6, 'Ricalcoli': 0, 'Rete e oneri non scorporabili': 18 });
+  assert.equal(c.evaluateInvoiceContract_(e, false).valid, true);
+  const duplicated = JSON.parse(JSON.stringify(e));
+  duplicated.sheet_values.find(x => x.header === 'Oneri di sistema').value = 6.5;
+  Object.defineProperty(duplicated, 'configured_writable_headers', { value: fixture.detail_headers });
+  c.bindInvoiceContract_(duplicated, policy('Energygas Italia', fixture.contract));
+  const duplicateResult = c.evaluateInvoiceContract_(duplicated, true);
+  assert.equal(duplicateResult.valid, false, 'A contradictory charge cannot be silently replaced');
+  assert.equal(duplicateResult.code, 'invoice_cost_reconciliation_mismatch');
+  const missingColumn = JSON.parse(JSON.stringify(e));
+  Object.defineProperty(missingColumn, 'configured_writable_headers', {
+    value: fixture.detail_headers.filter(header => header !== 'Rete e oneri non scorporabili')
+  });
+  c.bindInvoiceContract_(missingColumn, policy('Energygas Italia', fixture.contract));
+  assert.equal(c.evaluateInvoiceContract_(missingColumn, true).valid, false,
+    'A missing cost column must not disable reconciliation');
+  for (const change of [
+    x => { x.source_components.find(v => v.id === 'system_separate').absence_evidence = 'Unreadable'; },
+    x => { x.source_components = x.source_components.filter(v => v.id !== 'power_network'); },
+    x => { x.source_components.find(v => v.id === 'fixed_parent').amount += 1; },
+    x => { x.source_components.find(v => v.id === 'fixed_parent').amount = 14; },
+    x => { x.sheet_values.find(v => v.header === 'Rete e oneri non scorporabili').value = 99; }
+  ]) {
+    const invalid = JSON.parse(JSON.stringify(e));
+    change(invalid);
+    Object.defineProperty(invalid, 'configured_writable_headers', { value: fixture.detail_headers });
+    c.bindInvoiceContract_(invalid, policy('Energygas Italia', fixture.contract));
+    const before = JSON.stringify(invalid);
+    assert.equal(c.evaluateInvoiceContract_(invalid, true).valid, false);
+    assert.equal(JSON.stringify(invalid), before, 'Rejected evidence must not mutate the extraction');
+  }
+  const inconsistent = JSON.parse(JSON.stringify(e));
+  inconsistent.source_components.find(x => x.id === 'network_consumption').amount += 1;
+  Object.defineProperty(inconsistent, 'configured_writable_headers', { value: fixture.detail_headers });
+  c.bindInvoiceContract_(inconsistent, policy('Energygas Italia', fixture.contract));
+  assert.equal(c.evaluateInvoiceContract_(inconsistent, true).valid, false);
+}
+
+testEnergygasSourceComponentsDriveExclusiveAllocation();
 testSupplierRenamingDoesNotChangeExecution();
 testSourceContradictionsRemainBlocking();
 testProfileTrustAndLanguageAreBounded();

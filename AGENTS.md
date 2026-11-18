@@ -180,6 +180,12 @@
   strategy, header count, hidden-dimension strategy, null interpolation, and
   row/column transposition. Cover refresh, rollback, and journal-recovery paths
   with customized-chart regressions.
+  Explicit owner-authorized adoption must also preserve chart identity and source
+  cell formats. Verify API readback, runtime wiring, and rendered output as
+  separate evidence; include cross-year ranges and custom presentation.
+  Preserve ambiguous historical aggregates without inventing per-period values,
+  and keep derived refresh pending while source journals remain unresolved.
+  Test compressed journal limits and recovery with representative chart payloads.
 - Keep installer-owned `clasp` authorization isolated from the global profile.
   Pass `clasp -A` the exact `.clasprc.json` path, not its containing directory,
   and cover the real CLI argument shape in tests rather than only mocking the
@@ -257,6 +263,10 @@
   header-recovery boundary. Keep canonical invoice-field precedence shared by
   writes and verification so supplementary `sheet_values` cannot replace
   imported identity fields.
+  Inventory native formulas and downstream dependencies before presenting the
+  migration for approval; resolve shared-formula followers in XLSX exports and
+  replay the complete proposed mutation on an isolated workbook. Compare
+  effective results and formats, and seek fresh approval for expanded scope.
 - When first-invoice identity bootstrap is supported, require a verified
   metadata row, literal formula-free controls, and a pristine no-data boundary
   before any write; legacy header-row-1 or partial/formula-backed sheets must

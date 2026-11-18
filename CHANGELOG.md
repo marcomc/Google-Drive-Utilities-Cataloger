@@ -9,6 +9,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+## [0.10.2] - 2026-11-11
+
+### Fixed
+
+- Avoid conflicting extraction instructions for spreadsheet columns assigned
+  by an approved invoice contract; derive them from independently transcribed
+  source components while still requesting unrelated consumption quantities
+  and rates, and retain validation of conflicting evidence.
+- Prevent default handling from inventing missing-value diagnostics for fields
+  that an approved invoice contract allocates from validated source evidence.
+- Clarify that a consumption reconciliation failure concerns the extracted
+  values and does not assert that the invoice lacks the printed details.
+- Include the extracted snapshot in blocked review reports so mismatched
+  values can be checked against the source document.
+
 ## [0.10.1] - 2026-11-05
 
 ### Fixed

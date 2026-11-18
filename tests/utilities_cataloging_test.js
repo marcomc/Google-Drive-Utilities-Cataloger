@@ -94,7 +94,14 @@ function loadCataloger(overrides = {}) {
     if (!fixture) return null;
     const data = JSON.parse(JSON.stringify(fixture.contract));
     const available = extracted.configured_writable_headers || (extracted.sheet_values || []).map(x => x.header);
-    if ((fixture.detail_headers || []).length && fixture.detail_headers.every(h =>
+    // Alternate-schema tests use a profile adapted to that schema; the exact
+    // installed contract is exercised without this adapter in invoice_contracts_test.
+    if (fixture.locale === 'it' && fixture.supplier === 'Energygas Italia' &&
+      !fixture.detail_headers.every(h => available.some(x => context.normalizeHeader_(x) === context.normalizeHeader_(h)))) {
+      data.checks = [];
+    }
+    if (!(fixture.locale === 'it' && fixture.supplier === 'Energygas Italia') &&
+      (fixture.detail_headers || []).length && fixture.detail_headers.every(h =>
       available.some(x => context.normalizeHeader_(x) === context.normalizeHeader_(h)))) {
       data.checks.push({ total: 'field:cost_non_consumption', parts: fixture.detail_headers.map(h => 'header:' + h) });
     }
@@ -689,15 +696,15 @@ function testServiceAddressIdentityCanBeTemporarilyDisabled() {
   const context = loadCataloger();
   disableServiceAddressIdentityEnforcement(context);
   const expected = {
-    account_holder: 'Laura Fortuna',
-    service_address: 'Corso Camillo Benso Conte di Cavour 125, Cesena'
+    account_holder: 'Giulia Esempio',
+    service_address: 'Corso Mario Esempio Conte di Prova 125, Citta Esempio'
   };
   const sameHolderDifferentAddress = {
-    account_holder: 'Laura Fortuna',
-    address_evidence: 'Corso Camillo Benso Cavour 125, 47521 Cesena FC',
-    service_street: 'Corso Camillo Benso Cavour',
+    account_holder: 'Giulia Esempio',
+    address_evidence: 'Corso Mario Esempio Prova 125, 00000 Citta Esempio ZZ',
+    service_street: 'Corso Mario Esempio Prova',
     service_civic_number: '125',
-    service_city: 'Cesena'
+    service_city: 'Citta Esempio'
   };
   assert.deepEqual(
     JSON.parse(JSON.stringify(context.validateServiceIdentity_(
@@ -1842,6 +1849,7 @@ function testExtractionSchemaAndCalendarValidation() {
   const rateValidation = context.validateInvoiceCostEvidence_(baseRateInvoice);
   assert.equal(rateValidation.valid, false);
   assert.equal(rateValidation.code, 'invoice_consumption_reconciliation_mismatch');
+  assert.match(rateValidation.problem, /extracted electricity selling rate and quantity/i);
   assert.equal(rateValidation.fields.includes('Costo unitario F3'), true);
   assert.equal(context.validateExtractedUtilityDataForImport_(baseRateInvoice).code,
     'invoice_consumption_reconciliation_mismatch');
@@ -2450,6 +2458,12 @@ function testResolvedFrequencyReconcilesOnlyStaleMissingDiagnostics() {
 function testSupplierDefaultHeaderEligibilityFollowsCurrentInvoice() {
   for (const locale of ['en', 'it']) {
     const context = loadCataloger();
+    // This test isolates default eligibility on deliberately incomplete sheets.
+    const getContract = context.getInvoiceContract_;
+    context.getInvoiceContract_ = extracted => {
+      const contract = getContract(extracted);
+      return contract ? { ...contract, checks: [] } : null;
+    };
     const localization = context.getLocalizationRegistry_()[locale];
     const defaults = profileFixtureDefaults(locale);
     const suppliers = [...new Set(defaults.map(rule => rule.supplier).concat('OTHER'))];
@@ -5715,6 +5729,9 @@ function testPostExtractionSpreadsheetErrorReportPreservesDiagnostics() {
   assert.match(report, /Reconciliation check: passed: 14\.64 EUR \/ 14\.64 EUR/);
   assert.match(report,
     /Detected discrepancy: field Total cost; expected 14\.64 EUR; observed 12\.34 EUR; tolerance 0\.02 EUR/);
+  const blocked = { ...result, status: 'BLOCKED NEEDS REVIEW' };
+  assert.ok(context.formatResult_(blocked).includes('Extracted snapshot: ' + JSON.stringify(extraction)),
+    'A blocked extraction must retain its evidence for review');
   assert.deepEqual(JSON.parse(JSON.stringify(cloudPayloads)), [
     {
       message: 'extraction-validation-completed',
@@ -7173,10 +7190,12 @@ function testPromptKeepsHeadersScopedBySupply() {
   assert.doesNotMatch(prompt, /reference year\/month/);
   assert.match(prompt, /Do not add a problem merely to note that line items include VAT/);
   assert.match(prompt, /mutually exclusive top-level printed cost row/);
-  assert.match(prompt, /If one target header represents a combined category, sum only the mutually exclusive top-level rows/);
+  assert.match(prompt, /If one unallocated target header represents a combined category, sum only the mutually exclusive top-level rows/);
   assert.match(prompt, /same printed parent section/);
   assert.match(prompt, /subordinate lines introduced by "di cui"/);
   assert.match(prompt, /For every non-formula header exposed by the matching target sheet/);
+  assert.match(prompt, /Omit a header from sheet_values when the matching approved contract allocates it/);
+  assert.match(prompt, /Only omit the exact allocated headers; return all other configured writable headers/);
   assert.match(prompt,
     /If a configured secondary field is explicitly absent or not applicable/);
   assert.match(prompt, /only after core monetary reconciliation succeeds/);
@@ -9732,6 +9751,19 @@ function testPendingReportOutboxChunksLargeExtractionSnapshots() {
   assert.match(delivered[0], /Actions taken: Automatic rollback completed/);
   assert.match(delivered[0], /Retry import: https:\/\/script\.test\/retry/);
   assert.ok(delivered[0].endsWith('Extracted snapshot: ' + snapshot));
+  assert.equal(Object.keys(store).filter((key) =>
+    key.startsWith(reportPrefix) || key.startsWith(snapshotPrefix)
+  ).length, 0);
+  context.queuePendingReports_([{
+    status: 'BLOCKED NEEDS REVIEW', fileUrl: 'https://drive.test/' + correlationId,
+    originalName: 'invoice.pdf', extracted: extraction,
+    actions: 'No file was imported.', problem: 'Extracted values conflict.',
+    recommendedAction: 'Review the source document.'
+  }]);
+  const blocked = JSON.parse(store[`${reportPrefix}${correlationId}`]);
+  assert.ok(blocked.extractionSnapshotChunks > 1);
+  assert.equal(context.flushPendingReports_().sent, 1);
+  assert.ok(delivered[1].endsWith('Extracted snapshot: ' + snapshot));
   assert.equal(Object.keys(store).filter((key) =>
     key.startsWith(reportPrefix) || key.startsWith(snapshotPrefix)
   ).length, 0);

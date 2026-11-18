@@ -339,6 +339,37 @@ reason, and recommended action rather than inventing a comparison.
 
 ## Operations
 
+On 2026-11-11, the installed Energygas electricity profile was updated to
+reconcile its seven writable detailed-cost columns against the extracted
+non-consumption total before a sheet write. A previous test fixture had added
+this check without it being present in the installed contract. The profile
+update used a conditional Drive write and exact content read-back; the
+regression now exercises the contract without injecting the missing check.
+This check detects inconsistent allocations but does not prove that a balanced
+allocation matches the invoice; the supplier's source-evidence rules still apply.
+An owner-only preview of the affected intake PDF reached Gemini but ended with
+HTTP 503 before validation; it did not establish a successful live import.
+The approved profile was subsequently revised to require independent printed
+parent and child amounts and to allocate network charges across the configured
+columns. A matching test fixture exercises the mapping and rejects missing,
+contradictory, or unproven source evidence. The conditional Drive update and
+exact profile read-back were verified separately from source deployment.
+The owner-only deployment was then updated to Apps Script version 149 with
+application version 0.10.2. The installed manifest and required entrypoints
+were verified from that exact version. A blocked extraction exposed correct
+aggregate quantity and rate but omitted the separately configured consumption
+columns; the profile now explicitly requests those printed fields.
+An owner-only single-read diagnostic then identified a computed fixed-and-power
+sum being presented as the printed fixed-charge subtotal. The profile now
+distinguishes the two printed rows. Default handling also skips invented absence
+diagnostics for contract-allocated fields; the contract still requires its
+independent absence evidence and rejects conflicting values.
+The subsequent automatic retry imported the affected invoice. Independent
+Sheets readback verified its unique identity, quantities, selling rates,
+exclusive cost allocation, formulas, numeric total, and literal identifiers
+and period. Drive readback verified the configured year destination and the
+unchanged PDF checksum.
+
 | Function | When to use it | Effect |
 | --- | --- | --- |
 | `runDailyUtilitiesCataloging` | Scheduled daily fallback only. | Scans and may process PDFs. |
