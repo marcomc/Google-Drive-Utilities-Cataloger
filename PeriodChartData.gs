@@ -18,7 +18,7 @@ function parsePeriodChartRange_(year, value) {
   if (endYear > 2200 || end < start || end - start >= 120) {
     throw new Error('Unsupported reference period in chart source.');
   }
-  return { start: start, endExclusive: end + 1, isRange: Boolean(match[3]) };
+  return { start: start, end: end, isRange: Boolean(match[3]) };
 }
 
 function buildPeriodChartSeries_(year, monthlyValues, periods) {
@@ -41,10 +41,10 @@ function buildPeriodChartSeries_(year, monthlyValues, periods) {
   const ambiguousStarts = {};
   parsed.forEach(function (range) {
     if (Object.prototype.hasOwnProperty.call(rangesByStart, range.start) &&
-      rangesByStart[range.start] !== range.endExclusive) {
+      rangesByStart[range.start] !== range.end) {
       ambiguousStarts[range.start] = true;
     }
-    rangesByStart[range.start] = range.endExclusive;
+    rangesByStart[range.start] = range.end;
   });
   parsed.forEach(function (range) {
     if (ambiguousStarts[range.start]) {
@@ -62,10 +62,11 @@ function buildPeriodChartSeries_(year, monthlyValues, periods) {
     if (!range.isRange) { return; }
     const source = monthlyValues[range.start - 1];
     if (typeof source !== 'number' || !Number.isFinite(source)) { return; }
-    const index = range.endExclusive - 1;
-    // A later observed bill takes precedence over an older period's boundary.
+    const index = range.end - 1;
+    // This is the last billed month. A later observed bill takes precedence
+    // if it starts within the period.
     const laterPeriods = parsed.filter(function (other) {
-      return other.start > range.start && other.start <= range.endExclusive;
+      return other.start > range.start && other.start <= range.end;
     });
     if (laterPeriods.length) {
       if (!laterPeriods.some(function (other) {
@@ -77,8 +78,6 @@ function buildPeriodChartSeries_(year, monthlyValues, periods) {
     if (monthlyValues.slice(range.start, Math.min(index + 1, 12)).some(
       function (value) { return typeof value === 'number' && Number.isFinite(value); }
     )) { return; }
-    if (index < 12 && typeof monthlyValues[index] === 'number' &&
-      Number.isFinite(monthlyValues[index])) { return; }
     if (Object.prototype.hasOwnProperty.call(boundaries, index) &&
       boundaries[index] !== source) {
       throw new Error('Conflicting chart period boundaries require review.');

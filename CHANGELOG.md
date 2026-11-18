@@ -9,6 +9,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+## [0.10.3] - 2026-11-18
+
+### Fixed
+
+- End managed billed-period chart segments in the final billed month, including
+  when the billed period crosses a calendar year.
+- Archive consumption reports without an issue date in the configured report
+  folder using the end of their printed coverage interval in the filename.
+
 ## [0.10.2] - 2026-11-11
 
 ### Fixed

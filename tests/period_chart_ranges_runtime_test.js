@@ -143,7 +143,7 @@ function fixture() {
   assert.deepEqual(f.state.chart.position, f.initial.position);
   assert.equal(f.state.chart.spec.title, 'Customized');
   assert.equal(f.state.chart.spec.basicChart.series[0].color.red, 0.4);
-  assert.equal(f.state.technical.getRange().getValues()[9][1], 49);
+  assert.equal(f.state.technical.getRange().getValues()[8][1], 49);
   assert.equal(f.state.technicalFormats[1][1], '€0.00');
   assert.equal(f.state.technicalFormats[13][1], '€0.00');
   assert.deepEqual(f.state.sourceRows, [['2026', '05–08']]);
@@ -151,8 +151,8 @@ function fixture() {
   f.state.sourceRows = [['2026', '05/2026–02/2027']];
   const registration = JSON.parse(f.props.PERIOD_CHART_RANGE_V1_10);
   assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
-  assert.equal(f.state.technicalValues[15][1], 49);
-  assert.equal(f.state.chart.spec.basicChart.domains[0].domain.sourceRange.sources[0].endRowIndex, 16);
+  assert.equal(f.state.technicalValues[14][1], 49);
+  assert.equal(f.state.chart.spec.basicChart.domains[0].domain.sourceRange.sources[0].endRowIndex, 15);
   assert.equal(f.state.chart.spec.title, 'Customized');
   assert.equal(f.state.writes, 2);
 }
@@ -196,7 +196,7 @@ function fixture() {
   assert.throws(() => f.context.refreshRegisteredPeriodChart_(registration));
   assert.equal(f.context.recoverPendingPeriodChartPoints_().state, 'committed');
   assert.equal(f.state.writes, 2);
-  assert.equal(f.state.technicalValues[15][1], 49);
+  assert.equal(f.state.technicalValues[14][1], 49);
 }
 {
   const f = fixture();
@@ -271,7 +271,7 @@ function fixture() {
   assert.equal(updated.bindings[1].year, 2027);
   assert.equal(f.state.chart.spec.basicChart.series.length, 2);
   assert.equal(f.state.chart.spec.basicChart.series[0].color.red, 0.4);
-  assert.equal(f.state.technicalValues[7][2], 25);
+  assert.equal(f.state.technicalValues[6][2], 25);
   assert.equal(f.state.writes, 2);
 }
 {
@@ -280,7 +280,7 @@ function fixture() {
   f.state.sourceRows = [['2026', '05/2026–02/2027']];
   assert.equal(f.context.recoverPendingPeriodChartRefresh_().state, 'idle');
   assert.equal(f.context.recoverPendingPeriodChartRefresh_(true).state, 'refreshed');
-  assert.equal(f.state.technicalValues[15][1], 49);
+  assert.equal(f.state.technicalValues[14][1], 49);
   assert.equal(f.props.PERIOD_CHART_REFRESH_PENDING_V1, undefined);
 }
 {
@@ -315,7 +315,7 @@ for (const interruptedShrink of [false, true]) {
   const registration = JSON.parse(f.props.PERIOD_CHART_RANGE_V1_10);
   const ranges = () => [f.state.chart.spec.basicChart.domains[0].domain,
     f.state.chart.spec.basicChart.series[0].series].map(item => item.sourceRange.sources[0]);
-  assert.deepEqual(ranges().map(range => range.endRowIndex), [16, 16]);
+  assert.deepEqual(ranges().map(range => range.endRowIndex), [15, 15]);
   f.state.sourceRows = [['2026', '05–08']];
   f.state.lost = interruptedShrink;
   if (interruptedShrink) {
@@ -326,17 +326,17 @@ for (const interruptedShrink of [false, true]) {
     assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
   }
   assert.deepEqual(ranges().map(range => range.endRowIndex), [13, 13]);
-  assert.equal(f.state.technicalValues[15][1], '');
+  assert.equal(f.state.technicalValues[14][1], '');
   f.state.sourceRows = [['2026', '05/2026–12/2027']];
   assert.equal(f.context.refreshRegisteredPeriodChart_(registration).state, 'committed');
-  assert.deepEqual(ranges().map(range => range.endRowIndex), [26, 26]);
-  assert.equal(f.state.technicalValues[25][1], 49);
+  assert.deepEqual(ranges().map(range => range.endRowIndex), [25, 25]);
+  assert.equal(f.state.technicalValues[24][1], 49);
   assert.deepEqual(f.state.chart.position, f.initial.position);
   assert.equal(f.state.chart.spec.basicChart.series[0].color.red, 0.4);
 }
 // Custom ends stay intact. Custom starts and columns also stay intact when the
 // end matches the automatic boundary or the start lies beyond the shorter table.
-for (const customization of [ { endRowIndex: 15 }, { startRowIndex: 14 },
+for (const customization of [ { endRowIndex: 14 }, { startRowIndex: 13 },
   { startColumnIndex: 1, endColumnIndex: 2 } ]) {
   const f = fixture();
   f.state.sourceRows = [['2026', '05/2026–02/2027']];

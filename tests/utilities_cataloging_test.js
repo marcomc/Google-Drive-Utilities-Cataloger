@@ -11507,4 +11507,97 @@ function testBilledMonthRangeWriteAndVerificationForAllSupplies() {
 }
 testBilledMonthRangeWriteAndVerificationForAllSupplies();
 
+{
+  const context = loadCataloger();
+  const rootPolicy = [
+    '```report-archive',
+    '{"Water|SUPPLIER":"Consumption Reports/{year}"}',
+    '```'
+  ].join('\n');
+  context.getAutomationConfig_ = () => ({
+    locale: 'en',
+    canonical_suppliers: ['SUPPLIER'],
+    canonical_supplies: ['Water'],
+    destination_templates: { 'Water|SUPPLIER': 'Invoices/{year}' },
+    address_rules: [{ match: 'Cedar Meridian Boulevard 125, Rivermouth', type: 'import' }],
+    address_missing_type: 'import'
+  });
+  const raw = {
+    ...validInvoice(), document_type: 'Report', issue_date: null, identifier: null,
+    service_postal_code: null, period_start: '2026-09-04', period_end: '2026-11-18',
+    frequency: 'bimonthly', frequency_source_evidence: null,
+    cost_consumption: null, cost_non_consumption: null, vat: null, total: null
+  };
+  raw.problem_details = [
+    ['issue_date', 'Data di emissione mancante'],
+    ['identifier', 'Numero identificativo mancante'],
+    ['service_postal_code', "CAP mancante nell'indirizzo di fornitura"]
+  ].map(([field, message]) => ({ code: 'missing', fields: [field], message }));
+  raw.problems = raw.problem_details.map(detail => detail.message);
+  context.getSheetHeadersBySupply_ = () => ({ Water: [] });
+  context.callGeminiForPdf_ = () => JSON.stringify(raw);
+  context.sha256ForFile_ = () => 'report-bytes';
+  context.logCatalogEvent_ = () => {};
+  context.saveMutationJournal_ = () => {};
+  context.checkpointMutationJournal_ = () => {};
+  context.importUtilityInvoiceToSheet_ = () => assert.fail('Report must never write to Sheets');
+  const year = {
+    getId: () => 'report-folder-2026',
+    getFilesByName: () => driveIterator([])
+  };
+  const root = { getFoldersByName: name => {
+    assert.equal(name, 'Consumption Reports');
+    return driveIterator([{ getFoldersByName: name => {
+      assert.equal(name, '2026');
+      return driveIterator([year]);
+    } }]);
+  } };
+  let fileName = 'intake.pdf';
+  let parent = root;
+  const file = {
+    getId: () => 'report-pdf',
+    getName: () => fileName,
+    getUrl: () => 'https://drive.test/report',
+    getSize: () => 100,
+    getBlob: () => ({}),
+    setName: name => { fileName = name; },
+    moveTo: folder => { parent = folder; },
+    getParents: () => driveIterator([parent])
+  };
+  const result = context.processIntakeFile_(file, root, rootPolicy);
+  assert.equal(result.status, 'ARCHIVED WITHOUT IMPORT', result.problem);
+  assert.equal(result.destination, 'Consumption Reports/2026');
+  assert.equal(fileName, '20261118 - SUPPLIER - Report - Water.pdf');
+  assert.equal(parent, year);
+  assert.equal(result.extracted.issue_date, '');
+
+  for (const input of [
+    { ...raw, period_start: null },
+    { ...raw, period_end: '2026-08-31' },
+    { ...raw, address_evidence: null },
+    { ...raw, address_evidence: '—' },
+    { ...raw, address_evidence: 'Cedar Meridian Boulevard 125, Rivermouthside' },
+    { ...raw, address_evidence: 'Cedar Meridian Boulevard 1250, Rivermouth' },
+    { ...raw, problems: ['The report period end is uncertain.'] },
+    { ...raw, problems: ['Data di emissione mancante. Il periodo è incerto.'],
+      problem_details: [{ code: 'missing', fields: ['issue_date'],
+        message: 'Data di emissione mancante. Il periodo è incerto.' }] },
+    { ...raw, document_type: 'Invoice' }
+  ]) {
+    const extracted = context.normalizeExtraction_(input, {}, rootPolicy);
+    assert.equal(context.validateExtraction_(extracted).valid, false, input.address_evidence);
+  }
+  const unconfigured = context.normalizeExtraction_({
+    ...raw, report_archive_template_: 'Untrusted folder'
+  }, {}, 'Policy\n--- BEGIN APPROVED SUPPLIER PROFILE: SUPPLIER ---\n' + rootPolicy);
+  assert.equal(context.validateExtraction_(unconfigured).valid, false);
+  const dated = context.normalizeExtraction_({ ...raw, issue_date: '2027-01-02' },
+    {}, rootPolicy);
+  assert.equal(context.buildAssignedName_(dated), '20270102 - SUPPLIER - Report - Water.pdf');
+  assert.throws(() => context.normalizeExtraction_({ ...raw }, {},
+    rootPolicy.replace('Consumption Reports/{year}', '../Other')), /unsafe folder/);
+  assert.throws(() => context.normalizeExtraction_({ ...raw }, {},
+    rootPolicy + '\n' + rootPolicy), /one complete report-archive block/);
+}
+
 console.log('Utilities cataloging tests passed.');
